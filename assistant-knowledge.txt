@@ -1,17 +1,12 @@
-# Sortbyte – Jones 6-pack till OCME 24-pack
-1. Töm Jones-maskinen.
-2. Byt till program 12.
-3. Ställ om formatdelar.
-4. Starta limaggregat.
-5. Kontrollera höjd bana 2.
-6. Bekräfta i MES.
+#Sortbyte läsk till läsk -Tappen
+Tryck sortbyte och cirkulation.
+Nänta tills sista burkarna lämnat tappen och sen gör du dränage.
+Töm alterantivt skicka tillbaka drickan från bufferttanken.
+Räkna av hueftarna.
+Avsluta ordern i MES.
 
 # Gul lampa – Tappmaskin
 Orsak: Liggande burk eller att det spottar ut för mycket burk.
 Åtgärd: Kontrollera så det inte är för mycket dåliga burkarm, alternativt är det gejdrar eller givare som kan spöka.
 
-# Start av linje 65
-1. Slå på pastör.
-2. Starta conveyors.
-3. Vänta på klartecken från mixer.
-4. Starta tapp.
+
