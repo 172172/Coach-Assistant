@@ -1,36 +1,39 @@
+// pages/api/tts.js
 export default async function handler(req, res) {
   const { text } = req.body;
 
-  if (!text) {
-    return res.status(400).json({ error: "Ingen text angiven" });
-  }
+  const voiceId = "21m00Tcm4TlvDq8ikWAM"; // ElevenLabs standardröst "Rachel" (byt om du vill)
+  const apiKey = process.env.ELEVENLABS_API_KEY;
 
   try {
-    const response = await fetch("https://api.openai.com/v1/audio/speech", {
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "xi-api-key": apiKey,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "tts-1-hd",
-        input: text,
-        voice: "nova", // Eller shimmer, fable, onyx
-      }),
+        text,
+        model_id: "eleven_multilingual_v2", // stöd för svenska
+        voice_settings: {
+          stability: 0.4,
+          similarity_boost: 0.8,
+          style: 0.5,
+          use_speaker_boost: true
+        }
+      })
     });
 
     if (!response.ok) {
-      const error = await response.text();
-      console.error("OpenAI TTS-fel:", error);
-      return res.status(500).json({ error: "OpenAI TTS misslyckades" });
+      const errorText = await response.text();
+      return res.status(500).send("TTS-fel från ElevenLabs: " + errorText);
     }
 
-    const buffer = await response.arrayBuffer();
-
+    const audioBuffer = await response.arrayBuffer();
     res.setHeader("Content-Type", "audio/mpeg");
-    res.send(Buffer.from(buffer));
+    res.send(Buffer.from(audioBuffer));
   } catch (err) {
-    console.error("Serverfel:", err);
-    res.status(500).json({ error: "Serverfel vid generering av tal" });
+    console.error("TTS-fel:", err);
+    res.status(500).send("Internt fel vid TTS");
   }
 }
