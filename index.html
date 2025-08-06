@@ -1,39 +1,90 @@
-<!-- index.html -->
 <!DOCTYPE html>
 <html lang="sv">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Coach Assistant</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 2rem;
+      background: #111;
+      color: #fff;
+    }
+    button {
+      padding: 1rem;
+      font-size: 1.2rem;
+      cursor: pointer;
+      background: #00aaff;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      margin-top: 1rem;
+    }
+    #output {
+      margin-top: 2rem;
+      font-size: 1.2rem;
+    }
+  </style>
 </head>
 <body>
-  <h1>🎤 Coach Assistant – Linje 65</h1>
-  <button onclick="startRecording()">Tryck för att prata</button>
-  <p id="response">Här kommer svaret...</p>
+  <h1>Coach Assistant</h1>
+  <p>Klicka på mikrofonen och ställ en fråga, t.ex: <em>"Hur gör jag ett sortbyte i tappen?"</em></p>
+  <button id="micBtn">🎤 Starta röst</button>
+  <div id="output"></div>
 
   <script>
-    async function startRecording() {
-      const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    const micBtn = document.getElementById('micBtn');
+    const output = document.getElementById('output');
+
+    const speak = (text) => {
+      const synth = window.speechSynthesis;
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = 'sv-SE';
+      synth.speak(utter);
+    };
+
+    const sendToChatGPT = async (text) => {
+      output.innerHTML = "<strong>Du frågade:</strong> " + text + "<br><em>Väntar på svar...</em>";
+
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer DIN_OPENAI_API_NYCKEL_HÄR"
+        },
+        body: JSON.stringify({
+          model: "gpt-4",
+          messages: [
+            { role: "system", content: "Du är en professionell assistent på en produktionslinje. Du svarar bara på frågor om t.ex. Linje 65, sortbyten och annat som operatörer behöver veta. Du svarar kort, tydligt och på svenska." },
+            { role: "user", content: text }
+          ]
+        })
+      });
+
+      const data = await response.json();
+      const answer = data.choices[0].message.content;
+      output.innerHTML += "<br><strong>Svar:</strong> " + answer;
+      speak(answer);
+    };
+
+    const startRecognition = () => {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const recognition = new SpeechRecognition();
       recognition.lang = 'sv-SE';
       recognition.start();
 
-      recognition.onresult = async function (event) {
+      recognition.onresult = function (event) {
         const text = event.results[0][0].transcript;
-        document.getElementById("response").innerText = "Tänker...";
-
-        const res = await fetch("/api/ask", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ question: text })
-        });
-
-        const data = await res.json();
-        document.getElementById("response").innerText = data.answer;
-
-        const audio = new Audio(`https://api.streamelements.com/kappa/v2/speech?voice=sv-SE-Wavenet-A&text=${encodeURIComponent(data.answer)}`);
-        audio.play();
+        sendToChatGPT(text);
       };
-    }
+
+      recognition.onerror = function (event) {
+        output.innerHTML = "<span style='color:red'>Fel: " + event.error + "</span>";
+      };
+    };
+
+    micBtn.addEventListener('click', startRecognition);
   </script>
 </body>
 </html>
