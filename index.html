@@ -1,0 +1,39 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Coach Assistant</title>
+</head>
+<body>
+  <h1>🎤 Coach Assistant – Linje 65</h1>
+  <button onclick="startRecording()">Tryck för att prata</button>
+  <p id="response">Här kommer svaret...</p>
+
+  <script>
+    async function startRecording() {
+      const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+      recognition.lang = 'sv-SE';
+      recognition.start();
+
+      recognition.onresult = async function (event) {
+        const text = event.results[0][0].transcript;
+        document.getElementById("response").innerText = "Tänker...";
+
+        const res = await fetch("/api/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: text })
+        });
+
+        const data = await res.json();
+        document.getElementById("response").innerText = data.answer;
+
+        const audio = new Audio(`https://api.streamelements.com/kappa/v2/speech?voice=sv-SE-Wavenet-A&text=${encodeURIComponent(data.answer)}`);
+        audio.play();
+      };
+    }
+  </script>
+</body>
+</html>
