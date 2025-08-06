@@ -2,7 +2,7 @@
 export default async function handler(req, res) {
   const { text } = req.body;
 
-  const voiceId = "21m00Tcm4TlvDq8ikWAM"; // ElevenLabs standardröst "Rachel" (byt om du vill)
+  const voiceId = "21m00Tcm4TlvDq8ikWAM"; // Rachel – fungerar bra för svenska
   const apiKey = process.env.ELEVENLABS_API_KEY;
 
   try {
@@ -14,10 +14,10 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         text,
-        model_id: "eleven_multilingual_v2", // stöd för svenska
+        model_id: "eleven_turbo_v2", // ✅ Ny modell = bättre flyt
         voice_settings: {
-          stability: 0.4,
-          similarity_boost: 0.8,
+          stability: 0.2, // Mindre variation, låter mer fokuserat
+          similarity_boost: 1.0, // Högsta möjliga "naturlighet"
           style: 0.5,
           use_speaker_boost: true
         }
