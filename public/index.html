@@ -37,25 +37,25 @@
     const micBtn = document.getElementById('micBtn');
     const output = document.getElementById('output');
 
-    const speak = (text) => {
-      const synth = window.speechSynthesis;
-      const utter = new SpeechSynthesisUtterance(text);
-      utter.lang = 'sv-SE';
+    const speak = async (text) => {
+      try {
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ text })
+        });
 
-      const loadVoices = () => {
-        const voices = synth.getVoices();
-        const swedishVoice = voices.find(v => v.lang === 'sv-SE' && v.name.toLowerCase().includes("google"));
+        if (!res.ok) throw new Error("Fel vid TTS-svar");
 
-        if (swedishVoice) {
-          utter.voice = swedishVoice;
-        }
-        synth.speak(utter);
-      };
-
-      if (synth.getVoices().length === 0) {
-        synth.onvoiceschanged = loadVoices;
-      } else {
-        loadVoices();
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.play();
+      } catch (err) {
+        console.error("TTS-fel:", err);
+        output.innerHTML += "<br><span style='color:red'>Kunde inte spela upp ljud.</span>";
       }
     };
 
