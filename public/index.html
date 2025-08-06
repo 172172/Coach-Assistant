@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Coach Assistant</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 2rem;
+      background: #111;
+      color: #fff;
+    }
+    button {
+      padding: 1rem;
+      font-size: 1.2rem;
+      cursor: pointer;
+      background: #00aaff;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      margin-top: 1rem;
+    }
+    #output {
+      margin-top: 2rem;
+      font-size: 1.2rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Coach Assistant</h1>
+  <p>Klicka på mikrofonen och ställ en fråga, t.ex: <em>"Hur gör jag ett sortbyte i tappen?"</em></p>
+  <button id="micBtn">🎤 Starta röst</button>
+  <div id="output"></div>
+
+  <script>
+    const micBtn = document.getElementById('micBtn');
+    const output = document.getElementById('output');
+
+    const speak = (text) => {
+      const synth = window.speechSynthesis;
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = 'sv-SE';
+      synth.speak(utter);
+    };
+
+    const sendToChatGPT = async (text) => {
+      output.innerHTML = "<strong>Du frågade:</strong> " + text + "<br><em>Väntar på svar...</em>";
+
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ message: text })
+      });
+
+      const data = await response.json();
+      const answer = data.reply;
+      output.innerHTML += "<br><strong>Svar:</strong> " + answer;
+      speak(answer);
+    };
+
+    const startRecognition = () => {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const recognition = new SpeechRecognition();
+      recognition.lang = 'sv-SE';
+      recognition.start();
+
+      recognition.onresult = function (event) {
+        const text = event.results[0][0].transcript;
+        sendToChatGPT(text);
+      };
+
+      recognition.onerror = function (event) {
+        output.innerHTML = "<span style='color:red'>Fel: " + event.error + "</span>";
+      };
+    };
+
+    micBtn.addEventListener('click', startRecognition);
+  </script>
+</body>
+</html>
