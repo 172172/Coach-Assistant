@@ -36,7 +36,6 @@
   <script>
     const micBtn = document.getElementById('micBtn');
     const output = document.getElementById('output');
-    let audio = null;
 
     const speak = async (text) => {
       try {
@@ -51,16 +50,18 @@
         if (!res.ok) throw new Error("Fel vid TTS-svar");
 
         const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
+        const arrayBuffer = await blob.arrayBuffer();
 
-        if (!audio) {
-          audio = new Audio();
-          audio.autoplay = true;
-        }
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const gainNode = audioContext.createGain();
+        gainNode.gain.value = 2.0; // 🔊 Förstärk ljudet till 200%
 
-        audio.src = url;
-        audio.volume = 1.0; // ✅ Sätt volymen till max
-        audio.play();
+        const source = audioContext.createBufferSource();
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+        source.buffer = audioBuffer;
+
+        source.connect(gainNode).connect(audioContext.destination);
+        source.start(0);
       } catch (err) {
         console.error("TTS-fel:", err);
         output.innerHTML += "<br><span style='color:red'>Kunde inte spela upp ljud.</span>";
@@ -106,13 +107,7 @@
       };
     };
 
-    micBtn.addEventListener('click', () => {
-      if (!audio) {
-        audio = new Audio();
-        audio.autoplay = true;
-      }
-      startRecognition();
-    });
+    micBtn.addEventListener('click', startRecognition);
   </script>
 </body>
 </html>
