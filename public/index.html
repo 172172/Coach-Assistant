@@ -52,11 +52,14 @@
 
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
+
         if (!audio) {
           audio = new Audio();
           audio.autoplay = true;
         }
+
         audio.src = url;
+        audio.volume = 1.0; // ✅ Sätt volymen till max
         audio.play();
       } catch (err) {
         console.error("TTS-fel:", err);
@@ -104,7 +107,6 @@
     };
 
     micBtn.addEventListener('click', () => {
-      // Skapa ljudobjektet på första klick för att aktivera Safari
       if (!audio) {
         audio = new Audio();
         audio.autoplay = true;
