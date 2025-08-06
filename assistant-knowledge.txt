@@ -6,9 +6,9 @@
 5. Kontrollera höjd bana 2.
 6. Bekräfta i MES.
 
-# Felkod F014 – Tappmaskin
-Orsak: För lågt tryck.
-Åtgärd: Kontrollera tryckregulatorn och öppna huvudventilen.
+# Gul lampa – Tappmaskin
+Orsak: Liggande burk eller att det spottar ut för mycket burk.
+Åtgärd: Kontrollera så det inte är för mycket dåliga burkarm, alternativt är det gejdrar eller givare som kan spöka.
 
 # Start av linje 65
 1. Slå på pastör.
