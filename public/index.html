@@ -54,7 +54,7 @@
 
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
         const gainNode = audioContext.createGain();
-        gainNode.gain.value = 2.0; // 🔊 Förstärk ljudet till 200%
+        gainNode.gain.value = 2.0; // 🔊 Förstärk ljudet
 
         const source = audioContext.createBufferSource();
         const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
@@ -91,23 +91,39 @@
       speak(answer);
     };
 
-    const startRecognition = () => {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      const recognition = new SpeechRecognition();
-      recognition.lang = 'sv-SE';
-      recognition.start();
+    const startRecording = async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      const chunks = [];
 
-      recognition.onresult = function (event) {
-        const text = event.results[0][0].transcript;
-        sendToChatGPT(text);
+      mediaRecorder.ondataavailable = (e) => {
+        chunks.push(e.data);
       };
 
-      recognition.onerror = function (event) {
-        output.innerHTML = "<span style='color:red'>Fel: " + event.error + "</span>";
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const formData = new FormData();
+        formData.append('audio', blob, 'audio.webm');
+
+        const res = await fetch('/api/whisper', {
+          method: 'POST',
+          body: formData,
+        });
+
+        const data = await res.json();
+
+        if (data.text) {
+          sendToChatGPT(data.text);
+        } else {
+          output.innerHTML = "<span style='color:red'>Kunde inte transkribera.</span>";
+        }
       };
+
+      mediaRecorder.start();
+      setTimeout(() => mediaRecorder.stop(), 4000); // 4 sekunder inspelning
     };
 
-    micBtn.addEventListener('click', startRecognition);
+    micBtn.addEventListener('click', startRecording);
   </script>
 </body>
 </html>
