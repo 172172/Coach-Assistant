@@ -23,13 +23,20 @@ export default async function handler(req, res) {
 
   try {
     const { files } = await parseForm(req);
+    console.log('Files object:', files); // Lägg till logg för felsökning
     const file = files.audio;
 
     if (!file) {
       return res.status(400).json({ error: 'No audio file uploaded' });
     }
 
-    const audioData = await readFile(file.filepath);
+    // Kontrollera om filepath finns, annars använd en annan egenskap (t.ex. file.path)
+    const filePath = file.filepath || file.path;
+    if (!filePath) {
+      throw new Error('No valid file path found');
+    }
+
+    const audioData = await readFile(filePath);
 
     const formData = new FormData();
     formData.append('file', audioData, {
