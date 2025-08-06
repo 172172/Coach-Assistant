@@ -41,9 +41,7 @@
       try {
         const res = await fetch('/api/tts', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text })
         });
 
@@ -54,12 +52,11 @@
 
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
         const gainNode = audioContext.createGain();
-        gainNode.gain.value = 2.0; // 🔊 Förstärk ljudet
+        gainNode.gain.value = 2.0;
 
         const source = audioContext.createBufferSource();
         const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
         source.buffer = audioBuffer;
-
         source.connect(gainNode).connect(audioContext.destination);
         source.start(0);
       } catch (err) {
@@ -71,24 +68,24 @@
     const sendToChatGPT = async (text) => {
       output.innerHTML = "<strong>Du frågade:</strong> " + text + "<br><em>Väntar på svar...</em>";
 
-      const fileResponse = await fetch("https://raw.githubusercontent.com/172172/Coach-Assistant/main/assistant-knowledge.txt");
-      const knowledge = await fileResponse.text();
+      try {
+        const fileResponse = await fetch("https://raw.githubusercontent.com/172172/Coach-Assistant/main/assistant-knowledge.txt");
+        const knowledge = await fileResponse.text();
 
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          knowledge: knowledge,
-          message: text
-        })
-      });
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ knowledge, message: text })
+        });
 
-      const data = await response.json();
-      const answer = data.reply;
-      output.innerHTML += "<br><strong>Svar:</strong> " + answer;
-      speak(answer);
+        const data = await response.json();
+        const answer = data.reply;
+        output.innerHTML += "<br><strong>Svar:</strong> " + answer;
+        speak(answer);
+      } catch (err) {
+        console.error("ChatGPT-fel:", err);
+        output.innerHTML += "<br><span style='color:red'>Kunde inte få svar från AI.</span>";
+      }
     };
 
     const startRecording = async () => {
@@ -105,22 +102,28 @@
         const formData = new FormData();
         formData.append('audio', blob, 'audio.webm');
 
-        const res = await fetch('/api/whisper', {
-          method: 'POST',
-          body: formData,
-        });
+        try {
+          const res = await fetch('/api/whisper', {
+            method: 'POST',
+            body: formData
+          });
 
-        const data = await res.json();
+          const data = await res.json();
 
-        if (data.text) {
-          sendToChatGPT(data.text);
-        } else {
-          output.innerHTML = "<span style='color:red'>Kunde inte transkribera.</span>";
+          if (res.ok && data.text) {
+            sendToChatGPT(data.text);
+          } else {
+            console.error("Transkriberingsfel:", data);
+            output.innerHTML += "<br><span style='color:red'>Kunde inte transkribera ljudet.</span>";
+          }
+        } catch (err) {
+          console.error("Fetch-fel:", err);
+          output.innerHTML += "<br><span style='color:red'>Fel vid kontakt med servern.</span>";
         }
       };
 
       mediaRecorder.start();
-      setTimeout(() => mediaRecorder.stop(), 4000); // 4 sekunder inspelning
+      setTimeout(() => mediaRecorder.stop(), 4000);
     };
 
     micBtn.addEventListener('click', startRecording);
