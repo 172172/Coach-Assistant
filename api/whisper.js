@@ -2,7 +2,7 @@
 
 export const config = {
   api: {
-    bodyParser: false, // vi behöver hantera rå ljuddata
+    bodyParser: false, // Vi hanterar formdata manuellt
   },
 };
 
@@ -10,6 +10,7 @@ import formidable from 'formidable';
 import fs from 'fs';
 import { promisify } from 'util';
 import fetch from 'node-fetch';
+import FormData from 'form-data';
 
 const readFile = promisify(fs.readFile);
 
@@ -34,28 +35,34 @@ export default async function handler(req, res) {
     try {
       const audioData = await readFile(file.filepath);
 
+      // Använd form-data istället för Blob (för Node.js)
+      const formData = new FormData();
+      formData.append('file', audioData, {
+        filename: 'audio.webm',
+        contentType: 'audio/webm',
+      });
+      formData.append('model', 'whisper-1');
+      formData.append('language', 'sv');
+
       const whisperResponse = await fetch('https://api.openai.com/v1/audio/transcriptions', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          ...formData.getHeaders(),
         },
-        body: (() => {
-          const formData = new FormData();
-          formData.append('file', new Blob([audioData]), 'audio.webm');
-          formData.append('model', 'whisper-1');
-          formData.append('language', 'sv');
-          return formData;
-        })(),
+        body: formData,
       });
 
-      const result = await whisperResponse.json();
-
-      if (result.error) {
-        return res.status(500).json({ error: result.error.message });
+      if (!whisperResponse.ok) {
+        const errText = await whisperResponse.text();
+        console.error("OpenAI Whisper Error:", errText);
+        return res.status(500).json({ error: 'Whisper API error', details: errText });
       }
 
+      const result = await whisperResponse.json();
       res.status(200).json({ text: result.text });
     } catch (error) {
+      console.error("Whisper exception:", error);
       res.status(500).json({ error: 'Transcription failed', details: error.message });
     }
   });
