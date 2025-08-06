@@ -4,8 +4,6 @@ export default async function handler(req, res) {
   const voiceId = "3mwblJqg1SFnILqt4AFC"; // ← Din svenska röst
   const apiKey = process.env.ELEVENLABS_API_KEY;
 
-  const ssmlText = `<speak><lang xml:lang="sv-SE">${text}</lang></speak>`;
-
   const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
     method: "POST",
     headers: {
@@ -13,9 +11,8 @@ export default async function handler(req, res) {
       "xi-api-key": apiKey
     },
     body: JSON.stringify({
-      model_id: "eleven_turbo_v2",
-      text: ssmlText,
-      // 👇 Förbättrade röstinställningar för mjuk, tydlig AI-röst
+      model_id: "eleven_multilingual_v2", // 🔁 Viktigt: bättre svenska
+      text, // ⚠️ Använd ren text – inte SSML
       voice_settings: {
         stability: 0.5,
         similarity_boost: 0.9,
