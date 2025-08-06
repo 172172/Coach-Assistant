@@ -60,21 +60,29 @@
     };
 
     const sendToChatGPT = async (text) => {
-      output.innerHTML = "<strong>Du frågade:</strong> " + text + "<br><em>Väntar på svar...</em>";
+  output.innerHTML = "<strong>Du frågade:</strong> " + text + "<br><em>Väntar på svar...</em>";
 
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ message: text })
-      });
+  // Hämta kunskapen från din GitHub-fil
+  const fileResponse = await fetch("https://raw.githubusercontent.com/172172/Coach-Assistant/main/assistant-knowledge.txt");
+  const knowledge = await fileResponse.text();
 
-      const data = await response.json();
-      const answer = data.reply;
-      output.innerHTML += "<br><strong>Svar:</strong> " + answer;
-      speak(answer);
-    };
+  const response = await fetch("/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      knowledge: knowledge,
+      message: text
+    })
+  });
+
+  const data = await response.json();
+  const answer = data.reply;
+  output.innerHTML += "<br><strong>Svar:</strong> " + answer;
+  speak(answer);
+};
+
 
     const startRecognition = () => {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
