@@ -1,12 +1,4 @@
-// /api/whisper.js
-
-export const config = {
-  api: {
-    bodyParser: false,
-  },
-};
-
-import formidable from 'formidable';
+import { IncomingForm } from 'formidable';
 import fs from 'fs';
 import { promisify } from 'util';
 import fetch from 'node-fetch';
@@ -15,7 +7,7 @@ import FormData from 'form-data';
 const readFile = promisify(fs.readFile);
 
 function parseForm(req) {
-  const form = new formidable.IncomingForm();
+  const form = new IncomingForm();
   return new Promise((resolve, reject) => {
     form.parse(req, (err, fields, files) => {
       if (err) reject(err);
