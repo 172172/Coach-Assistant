@@ -1,4 +1,4 @@
- <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="sv">
 <head>
   <meta charset="UTF-8" />
@@ -41,7 +41,22 @@
       const synth = window.speechSynthesis;
       const utter = new SpeechSynthesisUtterance(text);
       utter.lang = 'sv-SE';
-      synth.speak(utter);
+
+      const loadVoices = () => {
+        const voices = synth.getVoices();
+        const swedishVoice = voices.find(v => v.lang === 'sv-SE' && v.name.toLowerCase().includes("google"));
+
+        if (swedishVoice) {
+          utter.voice = swedishVoice;
+        }
+        synth.speak(utter);
+      };
+
+      if (synth.getVoices().length === 0) {
+        synth.onvoiceschanged = loadVoices;
+      } else {
+        loadVoices();
+      }
     };
 
     const sendToChatGPT = async (text) => {
