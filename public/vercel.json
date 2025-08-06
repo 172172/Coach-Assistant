@@ -15,3 +15,7 @@
     { "src": "/(.*)", "dest": "/public/$1" }
   ]
 }
+{
+  "buildCommand": "npm install",
+  "outputDirectory": "public"  // eller "./" om allt ligger i roten
+}
