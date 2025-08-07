@@ -1,13 +1,17 @@
 import { IncomingForm } from 'formidable';
 import fs from 'fs';
-import { promisify } from 'util';
 import fetch from 'node-fetch';
 import FormData from 'form-data';
 
-const readFile = promisify(fs.readFile);
+// Ingen promisify behövs längre, vi använder fs.promises direkt
 
 function parseForm(req) {
-  const form = new IncomingForm();
+  const form = new IncomingForm({
+    keepExtensions: true,
+    multiples: false,
+    maxFileSize: 100 * 1024 * 1024, // 100 MB
+  });
+
   return new Promise((resolve, reject) => {
     form.parse(req, (err, fields, files) => {
       if (err) reject(err);
@@ -23,20 +27,26 @@ export default async function handler(req, res) {
 
   try {
     const { files } = await parseForm(req);
-    console.log('Files object:', files); // Lägg till logg för felsökning
+    console.log('Files object:', files); // Debug
+
     const file = files.audio;
 
     if (!file) {
       return res.status(400).json({ error: 'No audio file uploaded' });
     }
 
-    // Kontrollera om filepath finns, annars använd en annan egenskap (t.ex. file.path)
-    const filePath = file.filepath || file.path;
+    // Debug loggar
+    console.log('File object:', file);
+    console.log('file.filepath:', file.filepath);
+    console.log('file.path:', file.path);
+
+    // Försök läsa från filepath eller path
+    const filePath = file.filepath ?? file.path;
     if (!filePath) {
       throw new Error('No valid file path found');
     }
 
-    const audioData = await readFile(filePath);
+    const audioData = await fs.promises.readFile(filePath);
 
     const formData = new FormData();
     formData.append('file', audioData, {
