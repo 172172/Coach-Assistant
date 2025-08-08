@@ -78,6 +78,7 @@ Instruktioner:
         model: "gpt-4o",
         temperature: 0.25,
         max_tokens: 950,
+        response_format: { type: "json_object" }, // tvingar ren JSON
         messages: [
           { role: "system", content: system },
           { role: "user", content: user }
@@ -110,15 +111,19 @@ Instruktioner:
       };
     }
 
-    // Gatekeeping: om coverage < 0.6 och det är en teknisk fråga → varna
-    if (structured.coverage < 0.6 && (structured.steps?.length || structured.explanation)) {
-      structured.summary = "Den informationen finns inte tillräckligt tydligt i manualen.";
-      structured.steps = [];
-      structured.explanation = "För att vara säker, följ generella säkra rutiner eller kontakta ansvarig. Vi bör uppdatera manualen med detta.";
-      structured.pitfalls = [];
-      structured.simple = structured.summary;
-      structured.pro = structured.summary;
-      structured.follow_up = "Vill du att jag noterar att manualen behöver uppdateras för just detta?";
+    // Hård gate vid låg coverage (<0.6)
+    if (typeof structured.coverage !== 'number' || structured.coverage < 0.6) {
+      structured = {
+        summary: "Den informationen finns inte tillräckligt tydligt i manualen.",
+        steps: [],
+        explanation: "För säkerhets skull: följ generella säkra steg eller kontakta ansvarig. Vi bör uppdatera manualen.",
+        pitfalls: [],
+        simple: "Saknar täckning i manualen.",
+        pro: "Saknar täckning i manualen.",
+        follow_up: "Vill du att jag noterar att manualen behöver uppdateras för just detta?",
+        coverage: 0,
+        matched_headings: structured.matched_headings || []
+      };
     }
 
     return res.status(200).json({ reply: structured });
