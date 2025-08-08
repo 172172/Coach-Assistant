@@ -20,6 +20,8 @@
     .src { font-size:.85rem; color:#9aa3ad; margin-top:.3rem }
     .opts { display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.5rem }
     .opt { padding:.4rem .6rem; border-radius:10px; border:1px solid #2a3040; background:#171b27; cursor:pointer; }
+    .link { color:#8ecbff; cursor:pointer; text-decoration:underline; }
+    .muted { color:#9aa3ad; font-size:.9rem; }
   </style>
 </head>
 <body>
@@ -45,7 +47,7 @@
     // ---------- STATE ----------
     let state = 'IDLE', running = false;
 
-    // Profil via presentation (servern kör Jarvis-stil ändå)
+    // Profil via presentation (behålls men påverkar mest hälsningston)
     let profileName = localStorage.getItem('coach_profile') || null;
 
     // Mic / analyser
@@ -72,7 +74,7 @@
     const BARGE_HOLD_MS   = 130;
     let bargeHold = 0;
 
-    // Dynamisk MIME (Safari iOS behöver mp4/m4a)
+    // MIME (Safari iOS behöver mp4/m4a)
     const REC_MIME =
       MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' :
       MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' :
@@ -91,29 +93,17 @@
     const MIN_SPEECH_MS = 400;
     const MIN_BLOB_BYTES = 20000;
 
-    // Vanliga tystnadshallisar → svartlista
     const HALLUCINATION_PATTERNS = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
 
-    // --- Pep interjections for spoken replies ---
-    const PEP_ENABLED = true;
-    const PEP_PREFIX_ANSWER = [
-      "Absolut, chefen! Det löser vi.",
-      "Självklart — det fixar vi.",
-      "Yes, det tar vi direkt.",
-      "Inga problem — så här gör du.",
-      "Grymt, vi kör."
-    ];
-    const PEP_PREFIX_CLARIFY = [
-      "Absolut — bara en snabb sak först:",
-      "Yes — för att göra det rätt:",
-      "Toppen — behöver bara veta en grej:"
-    ];
-    function pep(text, kind = "answer") {
-      if (!PEP_ENABLED || !text) return text;
-      const arr = kind === "clarify" ? PEP_PREFIX_CLARIFY : PEP_PREFIX_ANSWER;
-      const lead = arr[Math.floor(Math.random() * arr.length)];
-      const cleaned = String(text).replace(/^(\s*[–-]\s*)/,'').trim();
-      return `${lead} ${cleaned}`;
+    // Liten språklig krydda men *inte* varje gång (för att undvika “förprogrammerad” känsla)
+    function maybePep(text, kind="answer"){
+      const chance = 0.18; // 18% av gångerna
+      if (Math.random()>chance) return text;
+      const A = kind==="clarify"
+        ? ["Absolut — en snabb grej först:", "Yes, bara en sak:", "Toppen — för att göra rätt:"]
+        : ["Absolut, chefen! Det löser vi.", "Självklart — så här gör du.", "Grymt, då kör vi."];
+      const lead = A[Math.floor(Math.random()*A.length)];
+      return `${lead} ${text}`;
     }
 
     function setStatus(mode, text) {
@@ -135,7 +125,6 @@
       if (/\b(glöm min profil|ta bort profil)\b/i.test(t)){ profileName=null; localStorage.removeItem('coach_profile'); output.insertAdjacentHTML('beforeend',`<div class="pill">Profil rensad – neutral stil.</div>`); return true; }
       return false;
     }
-
     async function calibrateNoiseOnce() {
       if (!analyser || !micArr) return;
       let acc = 0, n = 0; 
@@ -163,7 +152,6 @@
       if (running && state === 'SPEAKING' && analyser){
         speakBaseline = speakBaseline ? (0.92*speakBaseline + 0.08*micLevel) : micLevel;
         const threshold = Math.max(BARGE_MIN_LEVEL, speakBaseline + BARGE_MARGIN);
-
         if (micLevel > threshold) {
           if (ttsGainNode && ttsCtx) { try { ttsGainNode.gain.setTargetAtTime(TTS_DUCK_GAIN, ttsCtx.currentTime, 0.015); } catch {} }
           if (bargeCooldownMs <= 0) {
@@ -252,9 +240,22 @@
     }
 
     // ---------- CHAT ----------
+    function renderDetails(cards, followUp){
+      const srcNote = (Array.isArray(cards.matched_headings) && cards.matched_headings.length)
+        ? `<div class="src">Hämtat från: ${cards.matched_headings.join(', ')}</div>` : '';
+      return `
+        <div class="muted"><strong>Sammanfattning:</strong> ${cards.summary||'—'}</div>
+        ${cards.steps?.length ? `<div class="muted"><strong>Steg:</strong><br>- ${cards.steps.join('<br>- ')}</div>` : ''}
+        ${cards.pitfalls?.length ? `<div class="muted"><strong>Fallgropar:</strong><br>- ${cards.pitfalls.join('<br>- ')}</div>` : ''}
+        ${cards.explanation ? `<details style="margin-top:.4rem"><summary class="link">Förklaring</summary><div class="muted" style="margin-top:.4rem">${cards.explanation}</div></details>` : ''}
+        ${srcNote}
+        ${followUp ? `<div style="margin-top:.4rem;opacity:.9"><em>${followUp}</em></div>` : ''}
+      `;
+    }
+
     async function askAssistant(text){
       state='THINKING'; setStatus(state,'Bearbetar…');
-      output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text} ${profileName?`(profil: ${profileName})`:''}</div>`);
+      output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
       try{
         const res = await fetch('/api/chat',{
           method:'POST',
@@ -264,66 +265,49 @@
         const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Chat-fel');
 
         let r=data.reply; if(typeof r==='string'){ try{ r=JSON.parse(r); }catch{} }
-        let toSpeak=''; let srcNote='';
+        if(!r || typeof r!=='object'){ r = { spoken: 'Jag kunde inte formulera ett svar.' }; }
 
-        if(r && typeof r==='object'){
-          // --- Klarifieringsläge ---
-          if (r.needs_clarification) {
-            const opts = Array.isArray(r.clarifying_options) ? r.clarifying_options : [];
-            const html = `
-              <div class="pill">
-                <div><strong>Fråga:</strong> ${r.clarifying_question || 'Behöver lite mer info.'}</div>
-                ${opts.length ? `<div class="opts">${opts.map(o => `<button class="opt" data-opt="${o}">${o}</button>`).join('')}</div>` : ''}
-              </div>`;
-            output.insertAdjacentHTML('beforeend', html);
-
-            // klickbara snabbval
-            document.querySelectorAll('.opt').forEach(btn=>{
-              btn.addEventListener('click', ()=>{
-                const val = btn.getAttribute('data-opt');
-                output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${val}</div>`);
-                askAssistant(val);
-              });
-            });
-
-            toSpeak = pep(
-              (r.clarifying_question || 'Behöver lite mer info.') +
-              (opts.length ? ' Alternativ: ' + opts.join(', ') + '.' : ''),
-              'clarify'
-            );
-            await speak(toSpeak);
-            // Spara kontext
-            lastQ = text; lastA = r;
-            return;
-          }
-
-          // --- Vanligt svar (utan default-förklaring) ---
-          toSpeak = r.summary || '';
-          if(Array.isArray(r.steps)&&r.steps.length){ toSpeak += (toSpeak?' ':'') + 'Steg: ' + r.steps.slice(0,4).join(', ') + '.'; }
-
-          if(Array.isArray(r.matched_headings)&&r.matched_headings.length){ srcNote = `Hämtat från: ${r.matched_headings.join(', ')}`; }
+        // --- Klarifiering först?
+        if (r.need?.clarify) {
+          const opts = Array.isArray(r.need.options) ? r.need.options : [];
           const html = `
             <div class="pill">
-              <div><strong>Sammanfattning:</strong> ${r.summary||'—'}</div>
-              ${Array.isArray(r.steps)&&r.steps.length?`<div><strong>Steg:</strong><br>- ${r.steps.join('<br>- ')}</div>`:''}
-              ${Array.isArray(r.pitfalls)&&r.pitfalls.length?`<div><strong>Fallgropar:</strong><br>- ${r.pitfalls.join('<br>- ')}</div>`:''}
-              ${srcNote?`<div class="src">${srcNote}</div>`:''}
-              <div style="margin-top:.5rem;opacity:.9"><em>${r.follow_up || "Vill du ha en enkel förklaring också?"}</em></div>
+              <div>${r.need.question || 'Behöver lite mer info.'}</div>
+              ${opts.length ? `<div class="opts">${opts.map(o => `<button class="opt" data-opt="${o}">${o}</button>`).join('')}</div>` : ''}
             </div>`;
           output.insertAdjacentHTML('beforeend', html);
-
-          lastQ = text;
-          lastA = r;
-
-          toSpeak = pep(toSpeak, 'answer');
-          await speak(toSpeak || 'Oklart svar.');
+          document.querySelectorAll('.opt').forEach(btn=>{
+            btn.addEventListener('click', ()=>{
+              const val = btn.getAttribute('data-opt');
+              output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${val}</div>`);
+              askAssistant(val);
+            });
+          });
+          await speak(maybePep(r.spoken || r.need.question || 'En sak till…', 'clarify'));
+          lastQ = text; lastA = r;
           return;
         }
 
-        // fallback
-        const fallback = typeof data.reply === 'string' ? data.reply : 'Jag kunde inte formulera ett svar.';
-        output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Svar:</strong><br>${fallback}</div>`);
-        await speak(fallback);
+        // --- Vanligt svar (samtalsmässigt)
+        const bubble = document.createElement('div');
+        bubble.className = 'pill';
+        bubble.innerHTML = `<div>${r.spoken || 'Klart.'}</div>
+                            <div style="margin-top:.5rem"><span class="link" id="toggle_${Date.now()}">Visa detaljer</span></div>
+                            <div id="details_${Date.now()}" style="display:none;margin-top:.5rem">${renderDetails(r.cards||{}, r.follow_up||'')}</div>`;
+        output.appendChild(bubble);
+
+        // Toggle
+        const id = bubble.querySelector('span[id^=toggle_]').id.split('_')[1];
+        const toggle = bubble.querySelector(`#toggle_${id}`);
+        const details = bubble.querySelector(`#details_${id}`);
+        toggle.addEventListener('click', ()=>{
+          const open = details.style.display !== 'none';
+          details.style.display = open ? 'none' : 'block';
+          toggle.textContent = open ? 'Visa detaljer' : 'Dölj detaljer';
+        });
+
+        lastQ = text; lastA = r;
+        await speak(maybePep(r.spoken || 'Okej.', 'answer'));
       }catch(err){
         console.error('Chat-fel:',err);
         output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI.</div>`);
@@ -337,7 +321,6 @@
       const typedBlob = new Blob([blob], { type: REC_MIME || 'audio/webm' });
       fd.append('audio', typedBlob, `audio.${REC_EXT}`);
       fd.append('mime', REC_MIME || 'audio/webm');
-
       const res=await fetch('/api/whisper',{ method:'POST', body: fd });
       const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Transkriberingsfel');
       return (data.text||'').trim();
@@ -374,7 +357,6 @@
             if(running) startListening();
             return;
           }
-
           if(!trySetProfileFrom(text)){
             if(text) await askAssistant(text);
             else { output.insertAdjacentHTML('beforeend',"<div class='pill'>Hörde inget tydligt. Prova igen.</div>"); if(running) startListening(); }
@@ -390,15 +372,8 @@
       const vadTimer=setInterval(()=>{
         analyser.getByteTimeDomainData(micArr);
         const lvl = rmsLevel(micArr);
-
-        if (lvl >= speechThreshold) {
-          talkMs += 100;
-          silentMs = 0;
-          everAbove = true;
-        } else {
-          silentMs += 100;
-        }
-
+        if (lvl >= speechThreshold) { talkMs += 100; silentMs = 0; everAbove = true; }
+        else { silentMs += 100; }
         const elapsed = performance.now()-startedAt;
         if (silentMs >= SILENCE_HOLD_MS || elapsed > MAX_RECORD_MS){
           clearInterval(vadTimer);
@@ -411,7 +386,6 @@
     async function startLoop(){
       if(running) return; running=true;
       startBtn.style.display='none'; stopBtn.style.display='inline-block';
-
       try{
         micStream = await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:false }
@@ -420,20 +394,16 @@
         output.insertAdjacentHTML('beforeend', "<div class='pill'>Mikrofon kunde inte startas (behörighet?).</div>");
         running=false; startBtn.style.display='inline-block'; stopBtn.style.display='none'; return;
       }
-
       audioCtxVAD = new (window.AudioContext||window.webkitAudioContext)();
       const src = audioCtxVAD.createMediaStreamSource(micStream);
       analyser = audioCtxVAD.createAnalyser(); analyser.fftSize = 2048;
       micArr = new Uint8Array(analyser.fftSize); src.connect(analyser);
-
       if(!rafId) rafId = requestAnimationFrame(loop);
       startListening();
     }
-
     function stopLoop(){
       running=false; state='IDLE'; setStatus(state,'Stoppad');
       startBtn.style.display='inline-block'; stopBtn.style.display='none';
-
       if(rafId){ cancelAnimationFrame(rafId); rafId=null; lastTs=0; }
       stopTTS();
       try{ mediaRecorder && mediaRecorder.state!=='inactive' && mediaRecorder.stop(); }catch{}
