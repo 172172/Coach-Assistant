@@ -22,16 +22,14 @@
 </head>
 <body>
   <h1>Coach Assistant</h1>
-  <p class="status"><span class="dot idle"></span><span id="recStatus">Redo – tryck start. Presentera dig: “Hej, det är Kevin” för personlig stil.</span></p>
+  <p class="status"><span class="dot idle"></span><span id="recStatus">Redo – tryck start. Presentera dig: “Hej, det är Kevin”. Prata normalt för att avbryta svar.</span></p>
 
   <div class="row">
     <button id="startBtn">▶️ Starta röstloop</button>
     <button id="stopBtn" style="background:#ef4444;display:none">⏹️ Stoppa</button>
   </div>
 
-  <div id="vizWrap">
-    <canvas id="viz" width="800" height="140"></canvas>
-  </div>
+  <div id="vizWrap"><canvas id="viz" width="800" height="140"></canvas></div>
 
   <div id="output"></div>
 
@@ -43,28 +41,28 @@
     const canvas   = document.getElementById('viz');
     const ctx      = canvas.getContext('2d');
 
-    // -------- STATE --------
+    // ---------- STATE ----------
     let state = 'IDLE', running = false;
 
-    // Profil (aktiveras med “Hej, det är Kevin” / “Jag heter Kevin”)
+    // Profil via presentation
     let profileName = localStorage.getItem('coach_profile') || null;
 
     // Mic / analyser
     let micStream = null, mediaRecorder = null, chunks = [];
-    let analyser = null, vadData = null, audioCtxVAD = null;
+    let audioCtxVAD = null, analyser = null, micArr = null;
 
     // TTS
     let ttsCtx = null, ttsSource = null, ttsAnalyser = null;
 
-    // Trösklar (naturlig barge-in)
+    // Barge-in/VAD
     const SILENCE_THRESHOLD = 12;
     const SILENCE_HOLD_MS   = 900;
     const MAX_RECORD_MS     = 12000;
 
-    let speakBaseline = 0;      // EMA av läcknivå
-    const BARGE_MARGIN    = 6;  // dB-ish över baseline
-    const BARGE_MIN_LEVEL = 16; // minsta nivå för att tolka som tal
-    const BARGE_HOLD_MS   = 250;
+    let speakBaseline = 0;         // adaptiv baseline för TTS-läckage
+    const BARGE_MARGIN    = 6;     // hur mycket över baseline som räcker
+    const BARGE_MIN_LEVEL = 16;    // undvik att trigga på brus
+    const BARGE_HOLD_MS   = 250;   // hur länge du behöver prata
     let bargeHold = 0;
 
     function setStatus(mode, text) {
@@ -73,330 +71,249 @@
       recStatus.textContent = text + (profileName ? `  • Profil: ${profileName}` : '');
     }
 
-    // -------- Utils --------
+    // ---------- Utils ----------
     function rmsLevel(uint8PCM) {
-      let sum = 0;
-      for (let i = 0; i < uint8PCM.length; i++) { const v = uint8PCM[i] - 128; sum += v * v; }
-      const rms = Math.sqrt(sum / uint8PCM.length);
-      return Math.min(255, Math.max(0, Math.round(rms * 6)));
+      let sum=0; for (let i=0;i<uint8PCM.length;i++){ const v=uint8PCM[i]-128; sum+=v*v; }
+      const rms=Math.sqrt(sum/uint8PCM.length);
+      return Math.min(255, Math.max(0, Math.round(rms*6)));
     }
-
-    // Enkel namndetektion
     function trySetProfileFrom(text) {
-      const t = (text || '').toLowerCase();
-      const m1 = t.match(/\b(det är|de e|det e|jag heter|mitt namn är)\s+([a-zåäö\- ]{2,})/i);
-      if (m1) {
-        const name = m1[2].trim().split(/\s+/)[0];
-        if (name) {
-          profileName = name.charAt(0).toUpperCase() + name.slice(1);
-          localStorage.setItem('coach_profile', profileName);
-          output.insertAdjacentHTML('beforeend', `<div class="pill">Profil aktiverad: <strong>${profileName}</strong></div>`);
-          return true;
-        }
-      }
-      // rensa profil
-      if (/\b(glöm min profil|ta bort profil)\b/i.test(t)) {
-        profileName = null;
-        localStorage.removeItem('coach_profile');
-        output.insertAdjacentHTML('beforeend', `<div class="pill">Profil rensad – neutral stil.</div>`);
-        return true;
-      }
+      const t=(text||'').toLowerCase();
+      const m=t.match(/\b(det är|de e|det e|jag heter|mitt namn är)\s+([a-zåäö\- ]{2,})/i);
+      if (m){ const name=m[2].trim().split(/\s+/)[0]; if(name){ profileName=name.charAt(0).toUpperCase()+name.slice(1); localStorage.setItem('coach_profile',profileName); output.insertAdjacentHTML('beforeend',`<div class="pill">Profil aktiverad: <strong>${profileName}</strong></div>`); return true; } }
+      if (/\b(glöm min profil|ta bort profil)\b/i.test(t)){ profileName=null; localStorage.removeItem('coach_profile'); output.insertAdjacentHTML('beforeend',`<div class="pill">Profil rensad – neutral stil.</div>`); return true; }
       return false;
     }
 
-    // -------- Visualizer --------
-    let t = 0;
-    function drawViz(levelListen=0, levelSpeak=0) {
-      const w = canvas.width, h = canvas.height;
+    // ---------- Visualizer + BARGe-IN monitor (EN loop) ----------
+    let rafId = null, lastTs = 0, phase = 0;
+    function loop(ts){
+      const dt = Math.min(200, ts - (lastTs||ts)); lastTs = ts;
+
+      // nivåer
+      let micLevel = 0, ttsLevel = 0;
+      if (analyser && micArr){ analyser.getByteTimeDomainData(micArr); micLevel = rmsLevel(micArr); }
+      if (ttsAnalyser){ const arr = new Uint8Array(ttsAnalyser.fftSize); ttsAnalyser.getByteTimeDomainData(arr); ttsLevel = rmsLevel(arr); }
+
+      // ---- BARGe-IN: lyssna efter röst när TTS pratar ----
+      if (running && state === 'SPEAKING' && analyser){
+        // uppdatera baseline (EMA) – hur mycket TTS “läcker” in i micken
+        speakBaseline = speakBaseline ? (0.92*speakBaseline + 0.08*micLevel) : micLevel;
+        const threshold = Math.max(BARGE_MIN_LEVEL, speakBaseline + BARGE_MARGIN);
+
+        if (micLevel > threshold){
+          bargeHold += dt;
+          if (bargeHold >= BARGE_HOLD_MS){
+            // avbryt tal och börja lyssna
+            stopTTS();
+            startListening();
+            bargeHold = 0;
+          }
+        } else {
+          bargeHold = 0;
+        }
+      }
+
+      // ---- RITA VIZ ----
+      drawViz(micLevel, ttsLevel);
+
+      rafId = requestAnimationFrame(loop);
+    }
+    function drawViz(micLevel, ttsLevel){
+      const w=canvas.width, h=canvas.height;
       ctx.clearRect(0,0,w,h);
 
-      // Bakgrundsgradient
-      const g = ctx.createLinearGradient(0,0,0,h);
-      g.addColorStop(0,'#0e1222');
-      g.addColorStop(1,'#0a0d18');
-      ctx.fillStyle = g;
-      ctx.fillRect(0,0,w,h);
+      const g=ctx.createLinearGradient(0,0,0,h);
+      g.addColorStop(0,'#0e1222'); g.addColorStop(1,'#0a0d18'); ctx.fillStyle=g; ctx.fillRect(0,0,w,h);
 
-      // Wave + blob puls
-      const base = state === 'SPEAKING' ? levelSpeak : levelListen;
-      const amp = Math.min(1, base/50); // 0..~1
-      t += 0.015 + amp*0.02;
+      const base = state==='SPEAKING'? ttsLevel : micLevel;
+      const amp  = Math.min(1, base/50); phase += 0.015 + amp*0.02;
 
-      // Blob
-      const cx = w*0.5, cy = h*0.56;
-      const radius = 26 + amp*18;
+      const cx=w*0.5, cy=h*0.56, radius=26+amp*18;
       ctx.beginPath();
-      for (let i=0;i<64;i++){
-        const ang = (i/64)*Math.PI*2;
-        const r = radius + Math.sin(ang*3 + t*3)*4*amp + Math.cos(ang*2.2 + t*2)*3*amp;
-        const x = cx + Math.cos(ang)*r;
-        const y = cy + Math.sin(ang)*r;
-        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      for(let i=0;i<64;i++){
+        const ang=(i/64)*Math.PI*2;
+        const r=radius + Math.sin(ang*3 + phase*3)*4*amp + Math.cos(ang*2.2 + phase*2)*3*amp;
+        const x=cx+Math.cos(ang)*r, y=cy+Math.sin(ang)*r;
+        if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
       }
       ctx.closePath();
-      const blobGrad = ctx.createRadialGradient(cx,cy, radius*0.3, cx,cy, radius*1.1);
-      blobGrad.addColorStop(0, state==='SPEAKING' ? '#63b3ff' : '#3fe08a');
-      blobGrad.addColorStop(1, '#0b1022');
-      ctx.fillStyle = blobGrad;
-      ctx.fill();
+      const blobGrad=ctx.createRadialGradient(cx,cy,radius*0.3,cx,cy,radius*1.1);
+      blobGrad.addColorStop(0, state==='SPEAKING'?'#63b3ff':'#3fe08a'); blobGrad.addColorStop(1,'#0b1022');
+      ctx.fillStyle=blobGrad; ctx.fill();
 
-      // Sine-wave
       ctx.beginPath();
-      const mid = h*0.78;
-      const A = 10 + amp*22;
-      const freq = 0.018 + amp*0.01;
-      for (let x=0;x<w;x++){
-        const y = mid + Math.sin(x*freq + t*4)*A*Math.cos(x*0.003 + t);
-        if (x===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-      }
-      ctx.strokeStyle = state==='SPEAKING' ? 'rgba(99,179,255,0.9)' : 'rgba(63,224,138,0.9)';
-      ctx.lineWidth = 2;
-      ctx.stroke();
+      const mid=h*0.78, A=10+amp*22, freq=0.018+amp*0.01;
+      for(let x=0;x<w;x++){ const y=mid + Math.sin(x*freq + phase*4)*A*Math.cos(x*0.003 + phase); if(x===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); }
+      ctx.strokeStyle = state==='SPEAKING'?'rgba(99,179,255,0.9)':'rgba(63,224,138,0.9)';
+      ctx.lineWidth=2; ctx.stroke();
     }
 
-    function startVizLoop() {
-      function loop() {
-        // Hämta nivåer
-        let lvlListen = 0, lvlSpeak = 0;
-        if (analyser && vadData) {
-          analyser.getByteTimeDomainData(vadData);
-          lvlListen = rmsLevel(vadData);
-        }
-        if (ttsAnalyser) {
-          const arr = new Uint8Array(ttsAnalyser.fftSize);
-          ttsAnalyser.getByteTimeDomainData(arr);
-          lvlSpeak = rmsLevel(arr);
-        }
-        drawViz(lvlListen, lvlSpeak);
-        requestAnimationFrame(loop);
-      }
-      loop();
-    }
-
-    // -------- TTS --------
-    function stopTTS() {
-      try { ttsSource && ttsSource.stop(); } catch {}
-      ttsSource = null;
-      ttsAnalyser = null;
-      if (ttsCtx) { try { ttsCtx.close(); } catch {} }
-      ttsCtx = null;
-    }
-
-    async function speak(text) {
+    // ---------- TTS ----------
+    function stopTTS(){ try{ ttsSource && ttsSource.stop(); }catch{} ttsSource=null; ttsAnalyser=null; if(ttsCtx){ try{ ttsCtx.close(); }catch{} } ttsCtx=null; }
+    async function speak(text){
       stopTTS();
-      state = 'SPEAKING';
-      setStatus(state, 'Svarar… (prata för att avbryta)');
+      state='SPEAKING'; setStatus(state,'Svarar… (prata för att avbryta)');
+      try{
+        const res = await fetch('/api/tts',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text }) });
+        if(!res.ok) throw new Error('Fel vid TTS-svar');
+        const blob=await res.blob(); const arrayBuffer=await blob.arrayBuffer();
 
-      try {
-        const res = await fetch('/api/tts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text })
-        });
-        if (!res.ok) throw new Error('Fel vid TTS-svar');
-
-        const blob = await res.blob();
-        const arrayBuffer = await blob.arrayBuffer();
-
-        ttsCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const gainNode = ttsCtx.createGain();
-        gainNode.gain.value = 1.5; // lite lägre för mindre läck
+        ttsCtx = new (window.AudioContext||window.webkitAudioContext)();
+        const gainNode = ttsCtx.createGain(); gainNode.gain.value = 1.4; // lite lägre → mindre läck
 
         ttsSource = ttsCtx.createBufferSource();
         const audioBuffer = await ttsCtx.decodeAudioData(arrayBuffer);
         ttsSource.buffer = audioBuffer;
 
-        ttsAnalyser = ttsCtx.createAnalyser();
-        ttsAnalyser.fftSize = 1024;
+        ttsAnalyser = ttsCtx.createAnalyser(); ttsAnalyser.fftSize = 1024;
 
         ttsSource.connect(gainNode).connect(ttsAnalyser).connect(ttsCtx.destination);
-        ttsSource.onended = () => { if (running) startListening(); };
+        ttsSource.onended = ()=>{ if(running) startListening(); };
         ttsSource.start(0);
 
-        // nollställ barge
+        // nollställ barge-spårning
         speakBaseline = 0; bargeHold = 0;
-      } catch (err) {
-        console.error('TTS-fel:', err);
-        output.insertAdjacentHTML('beforeend', "<div class='pill'>Kunde inte spela upp ljud.</div>");
-        if (running) startListening();
+      }catch(err){
+        console.error('TTS-fel:',err);
+        output.insertAdjacentHTML('beforeend',"<div class='pill'>Kunde inte spela upp ljud.</div>");
+        if(running) startListening();
       }
     }
 
-    // -------- CHAT --------
-    async function askAssistant(text) {
-      state = 'THINKING';
-      setStatus(state, 'Bearbetar…');
-      output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text} ${profileName ? `(profil: ${profileName})` : ''}</div>`);
+    // ---------- CHAT ----------
+    async function askAssistant(text){
+      state='THINKING'; setStatus(state,'Bearbetar…');
+      output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text} ${profileName?`(profil: ${profileName})`:''}</div>`);
+      try{
+        const res = await fetch('/api/chat',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ message:text, profile: profileName||null }) });
+        const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Chat-fel');
 
-      try {
-        const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text, profile: profileName || null })
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error || 'Chat-fel');
+        let r=data.reply; if(typeof r==='string'){ try{ r=JSON.parse(r); }catch{} }
+        let toSpeak=''; let srcNote='';
 
-        // Försök tolka strukturerat
-        let r = data.reply;
-        if (typeof r === 'string') { try { r = JSON.parse(r); } catch {} }
-
-        let toSpeak = '';
-        let srcNote = '';
-        if (r && typeof r === 'object') {
-          // Kevin-stil: superkort förklaring + åtgärd
-          if (profileName && profileName.toLowerCase() === 'kevin') {
+        if(r && typeof r==='object'){
+          if(profileName && profileName.toLowerCase()==='kevin'){
             const short = r.simple || r.summary || '';
-            const action = Array.isArray(r.steps) && r.steps[0] ? `Åtgärd: ${r.steps[0]}` : '';
+            const action = Array.isArray(r.steps)&&r.steps[0] ? `Åtgärd: ${r.steps[0]}` : '';
             toSpeak = [short, action].filter(Boolean).join('. ');
           } else {
-            // neutral: sammanhängande svar
             toSpeak = r.summary || '';
-            if (Array.isArray(r.steps) && r.steps.length) {
-              toSpeak += (toSpeak ? ' ' : '') + 'Steg: ' + r.steps.slice(0,4).join(', ') + '.';
-            }
-            if (r.explanation) toSpeak += ' ' + r.explanation;
+            if(Array.isArray(r.steps)&&r.steps.length){ toSpeak += (toSpeak?' ':'') + 'Steg: ' + r.steps.slice(0,4).join(', ') + '.'; }
+            if(r.explanation) toSpeak += ' ' + r.explanation;
           }
-          if (Array.isArray(r.matched_headings) && r.matched_headings.length) {
-            srcNote = `Hämtat från: ${r.matched_headings.join(', ')}`;
-          }
-          // Visa snyggt
+          if(Array.isArray(r.matched_headings)&&r.matched_headings.length){ srcNote = `Hämtat från: ${r.matched_headings.join(', ')}`; }
           const html = `
             <div class="pill">
-              <div><strong>Sammanfattning:</strong> ${r.summary || '—'}</div>
-              ${Array.isArray(r.steps)&&r.steps.length ? `<div><strong>Steg:</strong><br>- ${r.steps.join('<br>- ')}</div>`:''}
-              ${r.explanation ? `<div><strong>Förklaring:</strong> ${r.explanation}</div>`:''}
-              ${Array.isArray(r.pitfalls)&&r.pitfalls.length ? `<div><strong>Fallgropar:</strong><br>- ${r.pitfalls.join('<br>- ')}</div>`:''}
-              ${r.follow_up ? `<div><em>${r.follow_up}</em></div>`:''}
-              ${srcNote ? `<div class="src">${srcNote}</div>`:''}
+              <div><strong>Sammanfattning:</strong> ${r.summary||'—'}</div>
+              ${Array.isArray(r.steps)&&r.steps.length?`<div><strong>Steg:</strong><br>- ${r.steps.join('<br>- ')}</div>`:''}
+              ${r.explanation?`<div><strong>Förklaring:</strong> ${r.explanation}</div>`:''}
+              ${Array.isArray(r.pitfalls)&&r.pitfalls.length?`<div><strong>Fallgropar:</strong><br>- ${r.pitfalls.join('<br>- ')}</div>`:''}
+              ${r.follow_up?`<div><em>${r.follow_up}</em></div>`:''}
+              ${srcNote?`<div class="src">${srcNote}</div>`:''}
             </div>`;
           output.insertAdjacentHTML('beforeend', html);
         } else {
-          // Fallback: visa text
           toSpeak = typeof data.reply === 'string' ? data.reply : 'Jag kunde inte formulera ett svar.';
           output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Svar:</strong><br>${toSpeak}</div>`);
         }
-
         await speak(toSpeak || 'Oklart svar.');
-      } catch (err) {
-        console.error('Chat-fel:', err);
+      }catch(err){
+        console.error('Chat-fel:',err);
         output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI.</div>`);
-        if (running) startListening();
+        if(running) startListening();
       }
     }
 
-    // -------- Whisper --------
-    async function transcribe(blob) {
-      const formData = new FormData();
-      formData.append('audio', blob, 'audio.webm');
-      const res = await fetch('/api/whisper', { method: 'POST', body: formData });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || 'Transkriberingsfel');
-      return (data.text || '').trim();
+    // ---------- Whisper ----------
+    async function transcribe(blob){
+      const fd=new FormData(); fd.append('audio', blob, 'audio.webm');
+      const res=await fetch('/api/whisper',{ method:'POST', body: fd });
+      const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Transkriberingsfel');
+      return (data.text||'').trim();
     }
 
-    // -------- Listening --------
-    async function startListening() {
-      if (!running) return;
+    // ---------- LISTEN ----------
+    async function startListening(){
+      if(!running) return;
       stopTTS();
-      state = 'LISTENING';
-      setStatus(state, 'Lyssnar… (bli tyst för att skicka)');
+      state='LISTENING'; setStatus(state,'Lyssnar… (bli tyst för att skicka)');
 
-      chunks = [];
-      const startedAt = performance.now();
-      let silentMs = 0;
+      chunks=[]; const startedAt=performance.now(); let silentMs=0;
 
-      mediaRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm' });
-      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-      mediaRecorder.onstop = async () => {
-        const blob = new Blob(chunks, { type: 'audio/webm' });
-        if (!running) return;
-        try {
+      mediaRecorder = new MediaRecorder(micStream,{ mimeType:'audio/webm' });
+      mediaRecorder.ondataavailable = (e)=>{ if(e.data.size>0) chunks.push(e.data); };
+      mediaRecorder.onstop = async ()=>{
+        const blob=new Blob(chunks,{type:'audio/webm'}); if(!running) return;
+        try{
           const text = await transcribe(blob);
-
-          // Försök sätta/ta bort profil från tal
-          if (!trySetProfileFrom(text)) {
-            if (text) await askAssistant(text);
-            else {
-              output.insertAdjacentHTML('beforeend', "<div class='pill'>Hörde inget tydligt. Prova igen.</div>");
-              if (running) startListening();
-            }
-          } else {
-            // Profil ändrad – gå direkt till lyssna igen
-            if (running) startListening();
-          }
-        } catch (err) {
-          console.error('Whisper-fel:', err);
-          output.insertAdjacentHTML('beforeend', "<div class='pill'>Kunde inte transkribera ljudet.</div>");
-          if (running) startListening();
+          if(!trySetProfileFrom(text)){
+            if(text) await askAssistant(text);
+            else { output.insertAdjacentHTML('beforeend',"<div class='pill'>Hörde inget tydligt. Prova igen.</div>"); if(running) startListening(); }
+          } else { if(running) startListening(); }
+        }catch(err){
+          console.error('Whisper-fel:',err);
+          output.insertAdjacentHTML('beforeend',"<div class='pill'>Kunde inte transkribera ljudet.</div>");
+          if(running) startListening();
         }
       };
       mediaRecorder.start();
 
-      const vadListen = setInterval(() => {
-        analyser.getByteTimeDomainData(vadData);
-        const level = rmsLevel(vadData);
-        if (level < SILENCE_THRESHOLD) silentMs += 100; else silentMs = 0;
-
-        if (silentMs >= SILENCE_HOLD_MS || performance.now() - startedAt > MAX_RECORD_MS) {
-          clearInterval(vadListen);
-          try { mediaRecorder.state !== 'inactive' && mediaRecorder.stop(); } catch {}
+      const vadTimer=setInterval(()=>{
+        analyser.getByteTimeDomainData(micArr);
+        const lvl = rmsLevel(micArr);
+        if(lvl < SILENCE_THRESHOLD) silentMs += 100; else silentMs = 0;
+        if (silentMs >= SILENCE_HOLD_MS || performance.now()-startedAt > MAX_RECORD_MS){
+          clearInterval(vadTimer);
+          try{ mediaRecorder.state!=='inactive' && mediaRecorder.stop(); }catch{}
         }
-      }, 100);
+      },100);
     }
 
-    // -------- Start/Stop --------
-    async function startLoop() {
-      if (running) return;
-      running = true;
-      startBtn.style.display = 'none';
-      stopBtn.style.display  = 'inline-block';
+    // ---------- START/STOP ----------
+    async function startLoop(){
+      if(running) return; running=true;
+      startBtn.style.display='none'; stopBtn.style.display='inline-block';
 
-      try {
+      try{
         micStream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false }
+          audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:false }
         });
-      } catch (e) {
+      }catch(e){
         output.insertAdjacentHTML('beforeend', "<div class='pill'>Mikrofon kunde inte startas (behörighet?).</div>");
-        running = false;
-        startBtn.style.display = 'inline-block';
-        stopBtn.style.display  = 'none';
-        return;
+        running=false; startBtn.style.display='inline-block'; stopBtn.style.display='none'; return;
       }
 
-      audioCtxVAD = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtxVAD = new (window.AudioContext||window.webkitAudioContext)();
       const src = audioCtxVAD.createMediaStreamSource(micStream);
-      analyser = audioCtxVAD.createAnalyser();
-      analyser.fftSize = 2048;
-      vadData = new Uint8Array(analyser.fftSize);
-      src.connect(analyser);
+      analyser = audioCtxVAD.createAnalyser(); analyser.fftSize = 2048;
+      micArr = new Uint8Array(analyser.fftSize); src.connect(analyser);
 
-      // start visualizer-loop
-      startVizLoop();
+      // starta monitor/viz-loop (inkl. barge-in)
+      if(!rafId) rafId = requestAnimationFrame(loop);
 
       startListening();
     }
 
-    function stopLoop() {
-      running = false;
-      state = 'IDLE';
-      setStatus(state, 'Stoppad');
-      startBtn.style.display = 'inline-block';
-      stopBtn.style.display  = 'none';
+    function stopLoop(){
+      running=false; state='IDLE'; setStatus(state,'Stoppad');
+      startBtn.style.display='inline-block'; stopBtn.style.display='none';
+
+      // stoppa loop
+      if(rafId){ cancelAnimationFrame(rafId); rafId=null; lastTs=0; }
 
       stopTTS();
-      try { mediaRecorder && mediaRecorder.state !== 'inactive' && mediaRecorder.stop(); } catch {}
+      try{ mediaRecorder && mediaRecorder.state!=='inactive' && mediaRecorder.stop(); }catch{}
+      try{ analyser && analyser.disconnect(); }catch{}
+      try{ audioCtxVAD && audioCtxVAD.close(); }catch{}
+      analyser=null; audioCtxVAD=null; micArr=null;
 
-      try { analyser && analyser.disconnect(); } catch {}
-      try { audioCtxVAD && audioCtxVAD.close(); } catch {}
-      analyser = null; audioCtxVAD = null; vadData = null;
-
-      if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+      if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
     }
 
     startBtn.addEventListener('click', startLoop);
     stopBtn.addEventListener('click', stopLoop);
-    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') stopLoop(); });
+    window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') stopLoop(); });
   </script>
 </body>
 </html>
