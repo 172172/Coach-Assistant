@@ -1,5 +1,4 @@
 // /api/whisper.js
-
 export const config = {
   api: { bodyParser: false },
 };
@@ -12,7 +11,7 @@ import FormData from "form-data";
 
 const readFile = promisify(fs.readFile);
 
-// Formidable v3: använd funktionen formidable({...}) – inte new IncomingForm()
+// Formidable v3: använd funktionen formidable({...})
 function parseForm(req) {
   const form = formidable({
     multiples: false,
@@ -57,11 +56,19 @@ export default async function handler(req, res) {
     // Skicka till OpenAI Whisper
     const formData = new FormData();
     formData.append("file", audioData, {
-      filename: "audio.webm",
+      filename:
+        file.originalFilename ||
+        (file.mimetype && file.mimetype.includes("mp4") ? "audio.m4a" : "audio.webm"),
       contentType: file.mimetype || "audio/webm",
     });
     formData.append("model", "whisper-1");
     formData.append("language", "sv");
+    formData.append("temperature", "0");
+    // Hjälper Whisper med domänord → färre konstiga feltolkningar
+    formData.append(
+      "prompt",
+      "Carlsberg, Linje 65, tapp, pastör, depalletizer, Kisters, OCME, Jones, gejdrar, givare, fals, Coolpack, 6-pack, 20-pack, 24-pack, CIP"
+    );
 
     const whisperResponse = await fetch(
       "https://api.openai.com/v1/audio/transcriptions",
@@ -77,14 +84,15 @@ export default async function handler(req, res) {
 
     const result = await whisperResponse.json();
 
+    // Städa tempfil oavsett
+    try { fs.unlink(filepath, () => {}); } catch {}
+
     if (!whisperResponse.ok) {
       console.error("Whisper API error:", result);
-      return res
-        .status(500)
-        .json({ error: "Whisper API error", details: result });
+      return res.status(500).json({ error: "Whisper API error", details: result });
     }
 
-    return res.status(200).json({ text: result.text });
+    return res.status(200).json({ text: (result.text || "").trim() });
   } catch (error) {
     console.error("Whisper.js internal error:", error);
     return res.status(500).json({
