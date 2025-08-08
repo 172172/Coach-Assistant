@@ -70,7 +70,6 @@
       MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' :
       MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' :
       MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
-
     const REC_EXT = REC_MIME.includes('mp4') ? 'm4a' : 'webm';
 
     // Barge cooldown (hindrar studs mellan tala/lyssna)
@@ -80,6 +79,13 @@
     // Adaptiv tystnadströskel
     let BASE_NOISE = 0;
     let DYNAMIC_SILENCE = SILENCE_THRESHOLD;
+
+    // Minsta krav för att räkna ett klipp som "tal"
+    const MIN_SPEECH_MS = 400;     // du måste prata minst 0.4s totalt
+    const MIN_BLOB_BYTES = 20000;  // släng väldigt små klipp (tystnad)
+
+    // Vanliga hallisar vid tystnad → ignorera om de råkar dyka upp
+    const HALLUCINATION_PATTERNS = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
 
     function setStatus(mode, text) {
       const dotClass = mode === 'LISTENING' ? 'listen' : mode === 'THINKING' ? 'think' : mode === 'SPEAKING' ? 'speak' : 'idle';
@@ -126,16 +132,13 @@
       if (analyser && micArr){ analyser.getByteTimeDomainData(micArr); micLevel = rmsLevel(micArr); }
       if (ttsAnalyser){ const arr = new Uint8Array(ttsAnalyser.fftSize); ttsAnalyser.getByteTimeDomainData(arr); ttsLevel = rmsLevel(arr); }
 
-      // ---- BARGe-IN: lyssna efter röst när TTS pratar ----
+      // ---- BARGe-IN ----
       if (running && state === 'SPEAKING' && analyser && bargeCooldownMs <= 0){
-        // uppdatera baseline (EMA) – hur mycket TTS “läcker” in i micken
         speakBaseline = speakBaseline ? (0.92*speakBaseline + 0.08*micLevel) : micLevel;
         const threshold = Math.max(BARGE_MIN_LEVEL, speakBaseline + BARGE_MARGIN);
-
         if (micLevel > threshold){
           bargeHold += dt;
           if (bargeHold >= BARGE_HOLD_MS){
-            // avbryt tal och börja lyssna
             bargeCooldownMs = BARGE_COOLDOWN_SET;
             stopTTS();
             startListening();
@@ -146,21 +149,16 @@
         }
       }
 
-      // ---- RITA VIZ ----
       drawViz(micLevel, ttsLevel);
-
       rafId = requestAnimationFrame(loop);
     }
     function drawViz(micLevel, ttsLevel){
       const w=canvas.width, h=canvas.height;
       ctx.clearRect(0,0,w,h);
-
       const g=ctx.createLinearGradient(0,0,0,h);
       g.addColorStop(0,'#0e1222'); g.addColorStop(1,'#0a0d18'); ctx.fillStyle=g; ctx.fillRect(0,0,w,h);
-
       const base = state==='SPEAKING'? ttsLevel : micLevel;
       const amp  = Math.min(1, base/50); phase += 0.015 + amp*0.02;
-
       const cx=w*0.5, cy=h*0.56, radius=26+amp*18;
       ctx.beginPath();
       for(let i=0;i<64;i++){
@@ -173,7 +171,6 @@
       const blobGrad=ctx.createRadialGradient(cx,cy,radius*0.3,cx,cy,radius*1.1);
       blobGrad.addColorStop(0, state==='SPEAKING'?'#63b3ff':'#3fe08a'); blobGrad.addColorStop(1,'#0b1022');
       ctx.fillStyle=blobGrad; ctx.fill();
-
       ctx.beginPath();
       const mid=h*0.78, A=10+amp*22, freq=0.018+amp*0.01;
       for(let x=0;x<w;x++){ const y=mid + Math.sin(x*freq + phase*4)*A*Math.cos(x*0.003 + phase); if(x===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); }
@@ -193,7 +190,7 @@
 
         ttsCtx = new (window.AudioContext||window.webkitAudioContext)();
         const gainNode = ttsCtx.createGain(); 
-        gainNode.gain.value = 0.85; // lägre → mindre läck in i micken
+        gainNode.gain.value = 0.85; // mindre läck in i micken
 
         ttsSource = ttsCtx.createBufferSource();
         const audioBuffer = await ttsCtx.decodeAudioData(arrayBuffer);
@@ -205,7 +202,6 @@
         ttsSource.onended = ()=>{ if(running) startListening(); };
         ttsSource.start(0);
 
-        // nollställ barge-spårning
         speakBaseline = 0; bargeHold = 0;
       }catch(err){
         console.error('TTS-fel:',err);
@@ -276,9 +272,12 @@
       stopTTS();
       state='LISTENING'; setStatus(state,'Lyssnar… (bli tyst för att skicka)');
 
-      chunks=[]; const startedAt=performance.now(); let silentMs=0;
+      chunks=[]; const startedAt=performance.now();
+      let silentMs=0, talkMs=0, everAbove=false;
 
       await calibrateNoiseOnce();
+
+      const speechThreshold = DYNAMIC_SILENCE + 2;
 
       mediaRecorder = REC_MIME ? new MediaRecorder(micStream, { mimeType: REC_MIME, audioBitsPerSecond: 128000 })
                                : new MediaRecorder(micStream);
@@ -286,8 +285,22 @@
       mediaRecorder.ondataavailable = (e)=>{ if(e.data.size>0) chunks.push(e.data); };
       mediaRecorder.onstop = async ()=>{
         const blob=new Blob(chunks,{type: REC_MIME || 'audio/webm'}); if(!running) return;
+
+        // *** Gating mot tystnad/hallucination ***
+        if (!everAbove || talkMs < MIN_SPEECH_MS || blob.size < MIN_BLOB_BYTES) {
+          if(running) startListening();
+          return;
+        }
+
         try{
           const text = await transcribe(blob);
+
+          // ignorera typiska "YouTube-eftertexter"-hallisar
+          if (!text || HALLUCINATION_PATTERNS.test(text)) {
+            if(running) startListening();
+            return;
+          }
+
           if(!trySetProfileFrom(text)){
             if(text) await askAssistant(text);
             else { output.insertAdjacentHTML('beforeend',"<div class='pill'>Hörde inget tydligt. Prova igen.</div>"); if(running) startListening(); }
@@ -303,8 +316,17 @@
       const vadTimer=setInterval(()=>{
         analyser.getByteTimeDomainData(micArr);
         const lvl = rmsLevel(micArr);
-        if (lvl < DYNAMIC_SILENCE) silentMs += 100; else silentMs = 0;
-        if (silentMs >= SILENCE_HOLD_MS || performance.now()-startedAt > MAX_RECORD_MS){
+
+        if (lvl >= speechThreshold) {
+          talkMs += 100;             // räknas som tal
+          silentMs = 0;
+          everAbove = true;
+        } else {
+          silentMs += 100;
+        }
+
+        const elapsed = performance.now()-startedAt;
+        if (silentMs >= SILENCE_HOLD_MS || elapsed > MAX_RECORD_MS){
           clearInterval(vadTimer);
           try{ mediaRecorder.state!=='inactive' && mediaRecorder.stop(); }catch{}
         }
@@ -330,9 +352,7 @@
       analyser = audioCtxVAD.createAnalyser(); analyser.fftSize = 2048;
       micArr = new Uint8Array(analyser.fftSize); src.connect(analyser);
 
-      // starta monitor/viz-loop (inkl. barge-in)
       if(!rafId) rafId = requestAnimationFrame(loop);
-
       startListening();
     }
 
@@ -340,15 +360,12 @@
       running=false; state='IDLE'; setStatus(state,'Stoppad');
       startBtn.style.display='inline-block'; stopBtn.style.display='none';
 
-      // stoppa loop
       if(rafId){ cancelAnimationFrame(rafId); rafId=null; lastTs=0; }
-
       stopTTS();
       try{ mediaRecorder && mediaRecorder.state!=='inactive' && mediaRecorder.stop(); }catch{}
       try{ analyser && analyser.disconnect(); }catch{}
       try{ audioCtxVAD && audioCtxVAD.close(); }catch{}
       analyser=null; audioCtxVAD=null; micArr=null;
-
       if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
     }
 
