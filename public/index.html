@@ -9,7 +9,9 @@
     :root { --bg:#0b0b0f; --fg:#fff; --acc:#00aaff; --mut:#b9c0c7; }
     body { font-family: system-ui, sans-serif; padding: 2rem; background: var(--bg); color: var(--fg); }
     .row { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
-    button { padding:.9rem 1.2rem; font-size:1rem; cursor:pointer; border:none; border-radius:12px; background:var(--acc); color:#fff; }
+    button, select { padding:.9rem 1.2rem; font-size:1rem; border:none; border-radius:12px; }
+    button { cursor:pointer; background:var(--acc); color:#fff; }
+    select { background:#12141a; color:#fff; border:1px solid #232733; }
     #output { margin-top: 1rem; font-size:1.05rem; }
     .status { font-size:.95rem; color:#cfd6dd }
     .pill { background:#12141a; border:1px solid #232733; padding:.75rem .9rem; border-radius:12px; margin-top:.6rem }
@@ -27,6 +29,14 @@
   <div class="row">
     <button id="startBtn">▶️ Starta röstloop</button>
     <button id="stopBtn" style="background:#ef4444;display:none">⏹️ Stoppa</button>
+
+    <!-- Ton-väljare (påverkar ElevenLabs voice_settings) -->
+    <select id="toneSel" title="Röstton">
+      <option value="cheerful" selected>Pepp</option>
+      <option value="energetic">Energi ++</option>
+      <option value="neutral">Neutral</option>
+      <option value="calm">Lugn</option>
+    </select>
   </div>
 
   <div id="vizWrap"><canvas id="viz" width="800" height="140"></canvas></div>
@@ -40,11 +50,12 @@
     const recStatus= document.getElementById('recStatus');
     const canvas   = document.getElementById('viz');
     const ctx      = canvas.getContext('2d');
+    const toneSel  = document.getElementById('toneSel');
 
     // ---------- STATE ----------
     let state = 'IDLE', running = false;
 
-    // Profil via presentation (behålls, men servern kör Jarvis-stil)
+    // Profil via presentation (servern kör Jarvis-stil ändå)
     let profileName = localStorage.getItem('coach_profile') || null;
 
     // Mic / analyser
@@ -56,41 +67,41 @@
     const TTS_BASE_GAIN = 0.85;
     const TTS_DUCK_GAIN = 0.22;
 
-    // Enkelt “konversationsminne” för uppföljningsfrågor
+    // Enkel kontext för uppföljningsfrågor
     let lastQ = null;
     let lastA = null;
 
-    // Barge-in/VAD grund
-    const SILENCE_THRESHOLD = 12;   // baseline (används endast initialt)
+    // Barge-in/VAD
+    const SILENCE_THRESHOLD = 12;   // baseline
     const SILENCE_HOLD_MS   = 900;
     const MAX_RECORD_MS     = 12000;
 
     let speakBaseline = 0;          // adaptiv baseline för TTS-läckage
-    const BARGE_MARGIN    = 4;      // lite känsligare
+    const BARGE_MARGIN    = 4;      // känsligare
     const BARGE_MIN_LEVEL = 16;
     const BARGE_HOLD_MS   = 130;    // snabbare avbrott
     let bargeHold = 0;
 
-    // --- Dynamisk MIME (Safari iOS behöver mp4/m4a) ---
+    // Dynamisk MIME (Safari iOS behöver mp4/m4a)
     const REC_MIME =
       MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' :
       MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' :
       MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
     const REC_EXT = REC_MIME.includes('mp4') ? 'm4a' : 'webm';
 
-    // Barge cooldown (hindrar studs mellan tala/lyssna)
+    // Barge cooldown
     let bargeCooldownMs = 0;
-    const BARGE_COOLDOWN_SET = 600; // ms spärr efter barge-in
+    const BARGE_COOLDOWN_SET = 600;
 
     // Adaptiv tystnadströskel
     let BASE_NOISE = 0;
     let DYNAMIC_SILENCE = SILENCE_THRESHOLD;
 
-    // Minsta krav för att räkna ett klipp som "tal"
-    const MIN_SPEECH_MS = 400;     // du måste prata minst 0.4s totalt
-    const MIN_BLOB_BYTES = 20000;  // släng väldigt små klipp (tystnad)
+    // Minimikrav så vi inte skickar tystnad
+    const MIN_SPEECH_MS = 400;
+    const MIN_BLOB_BYTES = 20000;
 
-    // Vanliga hallisar vid tystnad → ignorera om de råkar dyka upp
+    // Vanliga tystnadshallisar → svartlista
     const HALLUCINATION_PATTERNS = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
 
     function setStatus(mode, text) {
@@ -126,30 +137,23 @@
       DYNAMIC_SILENCE = Math.max(8, BASE_NOISE + 3);
     }
 
-    // ---------- Visualizer + BARGe-IN monitor (EN loop) ----------
+    // ---------- Visualizer + BARGe-IN monitor ----------
     let rafId = null, lastTs = 0, phase = 0;
     function loop(ts){
       const dt = Math.min(200, ts - (lastTs||ts)); lastTs = ts;
-
       if (bargeCooldownMs > 0) { bargeCooldownMs -= dt; }
 
-      // nivåer
       let micLevel = 0, ttsLevel = 0;
       if (analyser && micArr){ analyser.getByteTimeDomainData(micArr); micLevel = rmsLevel(micArr); }
       if (ttsAnalyser){ const arr = new Uint8Array(ttsAnalyser.fftSize); ttsAnalyser.getByteTimeDomainData(arr); ttsLevel = rmsLevel(arr); }
 
-      // ---- BARGe-IN + DUCKING ----
+      // Barge-in + ducking
       if (running && state === 'SPEAKING' && analyser){
-        // uppdatera baseline (EMA) – hur mycket TTS “läcker” in i micken
         speakBaseline = speakBaseline ? (0.92*speakBaseline + 0.08*micLevel) : micLevel;
         const threshold = Math.max(BARGE_MIN_LEVEL, speakBaseline + BARGE_MARGIN);
 
         if (micLevel > threshold) {
-          // sänk TTS-volym direkt så du bryter igenom
-          if (ttsGainNode && ttsCtx) {
-            try { ttsGainNode.gain.setTargetAtTime(TTS_DUCK_GAIN, ttsCtx.currentTime, 0.015); } catch {}
-          }
-
+          if (ttsGainNode && ttsCtx) { try { ttsGainNode.gain.setTargetAtTime(TTS_DUCK_GAIN, ttsCtx.currentTime, 0.015); } catch {} }
           if (bargeCooldownMs <= 0) {
             bargeHold += dt;
             if (bargeHold >= BARGE_HOLD_MS){
@@ -161,10 +165,7 @@
           }
         } else {
           bargeHold = 0;
-          // släpp upp TTS-volym när du inte pratar
-          if (ttsGainNode && ttsCtx) {
-            try { ttsGainNode.gain.setTargetAtTime(TTS_BASE_GAIN, ttsCtx.currentTime, 0.05); } catch {}
-          }
+          if (ttsGainNode && ttsCtx) { try { ttsGainNode.gain.setTargetAtTime(TTS_BASE_GAIN, ttsCtx.currentTime, 0.05); } catch {} }
         }
       }
 
@@ -208,12 +209,16 @@
       stopTTS();
       state='SPEAKING'; setStatus(state,'Svarar… (prata för att avbryta)');
       try{
-        const res = await fetch('/api/tts',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text }) });
+        const res = await fetch('/api/tts',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ text, tone: toneSel ? toneSel.value : 'cheerful' })
+        });
         if(!res.ok) throw new Error('Fel vid TTS-svar');
         const blob=await res.blob(); const arrayBuffer=await blob.arrayBuffer();
 
         ttsCtx = new (window.AudioContext||window.webkitAudioContext)();
-        ttsGainNode = ttsCtx.createGain();
+        ttsGainNode = ttsCtx.createGain(); 
         ttsGainNode.gain.value = TTS_BASE_GAIN;
 
         ttsSource = ttsCtx.createBufferSource();
@@ -266,7 +271,6 @@
             </div>`;
           output.insertAdjacentHTML('beforeend', html);
 
-          // spara kontext för nästa uppföljning
           lastQ = text;
           lastA = r;
         } else {
@@ -305,7 +309,6 @@
       let silentMs=0, talkMs=0, everAbove=false;
 
       await calibrateNoiseOnce();
-
       const speechThreshold = DYNAMIC_SILENCE + 2;
 
       mediaRecorder = REC_MIME ? new MediaRecorder(micStream, { mimeType: REC_MIME, audioBitsPerSecond: 128000 })
@@ -315,7 +318,7 @@
       mediaRecorder.onstop = async ()=>{
         const blob=new Blob(chunks,{type: REC_MIME || 'audio/webm'}); if(!running) return;
 
-        // *** Gating mot tystnad/hallucination ***
+        // Gate mot tystnad/hallisar
         if (!everAbove || talkMs < MIN_SPEECH_MS || blob.size < MIN_BLOB_BYTES) {
           if(running) startListening();
           return;
@@ -323,8 +326,6 @@
 
         try{
           const text = await transcribe(blob);
-
-          // ignorera typiska "YouTube-eftertexter"-hallisar
           if (!text || HALLUCINATION_PATTERNS.test(text)) {
             if(running) startListening();
             return;
@@ -347,7 +348,7 @@
         const lvl = rmsLevel(micArr);
 
         if (lvl >= speechThreshold) {
-          talkMs += 100;             // räknas som tal
+          talkMs += 100;
           silentMs = 0;
           everAbove = true;
         } else {
@@ -398,13 +399,13 @@
       if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
     }
 
-    // Snabb manuell avbryt (klick/space) om du vill
+    // Manuell avbryt (klick/space) om du vill
     document.addEventListener('click', ()=>{ if (running && state==='SPEAKING'){ bargeCooldownMs=BARGE_COOLDOWN_SET; stopTTS(); startListening(); }});
     window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); bargeCooldownMs=BARGE_COOLDOWN_SET; stopTTS(); startListening(); }});
+    window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') stopLoop(); });
 
     startBtn.addEventListener('click', startLoop);
     stopBtn.addEventListener('click', stopLoop);
-    window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') stopLoop(); });
   </script>
 </body>
 </html>
