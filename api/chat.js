@@ -18,15 +18,11 @@ export default async function handler(req, res) {
   try {
     if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
 
-    const { message = "", profile = null } = req.body || {};
+    const { message = "", profile = null, prev = null } = req.body || {};
     const knowledge = await getKnowledge();
 
-    const persona = (profile && typeof profile === 'string') ? profile.trim() : null;
-    const isKevin = persona && persona.toLowerCase() === 'kevin';
-
-    const styleDirective = isKevin
-      ? `Använd "Kevin-stil": extremt kort och enkel svenska, fokusera på 1) mycket kort förklaring och 2) en tydlig åtgärd.`
-      : `Neutral mentor-stil: lugn, tydlig och pedagogisk; anpassa djupet efter frågan.`;
+    // Alltid mentor/Jarvis-stil – ingen "kort Kevin-stil" längre
+    const styleDirective = `Mentor-stil (Jarvis): tydlig, pedagogisk, trygg ton. Ge sammanfattning, steg, förklaring, fallgropar och en uppföljningsfråga. Var konkret men inte torr.`
 
     const system = `
 Du är "Coach Assistant" – mentor på en produktionslinje (t.ex. Linje 65). Ton: trygg, lugn, tydlig.
@@ -44,12 +40,21 @@ HÅRDA REGLER:
     "simple": string,
     "pro": string,
     "follow_up": string,
-    "coverage": number,                // 0..1, hur väl kunskapen täcker svaret
-    "matched_headings": string[]       // t.ex. ["Avsnitt: Sortbyte Tapp"]
+    "coverage": number,
+    "matched_headings": string[]
   }
 
 Skriv alltid alla fält. ${styleDirective}
 `.trim();
+
+    const prevBlock = prev && (prev.question || prev.assistant)
+      ? `
+Föregående tur (kontext för uppföljning):
+- Tidigare fråga: ${prev.question || "(saknas)"}
+- Ditt tidigare svar (JSON): ${JSON.stringify(prev.assistant || {}, null, 2)}
+
+Om den nya frågan typiskt betyder "förklara tydligare/mer detaljer/andra exempel", gör en fördjupad, tydligare version baserat på föregående svar.
+` : "";
 
     const user = `
 Kunskap (manual/arbetsplatsdokumentation):
@@ -57,15 +62,16 @@ Kunskap (manual/arbetsplatsdokumentation):
 ${knowledge}
 """
 
+${prevBlock}
+
 Användarens inmatning:
 "${message}"
 
 Instruktioner:
 - Matcha relevanta rubriker i kunskapen och fyll "matched_headings".
 - Skatta "coverage" mellan 0 och 1 (>=0.6 betyder god täckning).
-- "simple" ska vara den enklaste möjliga förklaringen (passar nybörjare).
+- "simple" ska vara den enklaste möjliga förklaringen (för nybörjare).
 - "pro" ska vara mer teknisk och kompakt (för erfarna).
-- Om "Kevin-stil" används: prioritera "simple" + konkret första åtgärd.
 `.trim();
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -92,7 +98,6 @@ Instruktioner:
       return res.status(500).json({ error: "Chat API error", details: data });
     }
 
-    // Försäkra strukturerat JSON som svar
     let content = data.choices?.[0]?.message?.content || "";
     let structured;
     try {
@@ -111,7 +116,7 @@ Instruktioner:
       };
     }
 
-    // Hård gate vid låg coverage (<0.6)
+    // Hård gate vid låg coverage
     if (typeof structured.coverage !== 'number' || structured.coverage < 0.6) {
       structured = {
         summary: "Den informationen finns inte tillräckligt tydligt i manualen.",
