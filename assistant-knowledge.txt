@@ -1,7 +1,12 @@
-### Avsnitt: Sortbyte Tapp
+### Avsnitt: Sortbyte Tapp läsk till läsk
 Tryck sortbyte och cirkulation.
 Nänta tills sista burkarna lämnat tappen och sen gör du dränage.
 Töm alterantivt skicka tillbaka drickan från bufferttanken.
+Räkna av hueftarna.
+Avsluta ordern i MES.
+
+### Avsnitt: Sortbyte Tapp öl till öl
+Tryck sortbyte och cirkulation.
 Räkna av hueftarna.
 Avsluta ordern i MES.
 
