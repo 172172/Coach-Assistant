@@ -9,23 +9,21 @@
     :root { --bg:#111; --fg:#fff; --acc:#00aaff; --mut:#bbb; }
     body { font-family: system-ui, sans-serif; padding: 2rem; background: var(--bg); color: var(--fg); }
     .row { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
-    button { padding: .9rem 1.2rem; font-size: 1rem; cursor: pointer; border: none; border-radius: 10px; background: var(--acc); color:#fff; }
+    button { padding:.9rem 1.2rem; font-size:1rem; cursor:pointer; border:none; border-radius:10px; background:var(--acc); color:#fff; }
     #output { margin-top: 1rem; font-size: 1.05rem; }
-    .status { font-size: .95rem; color: #ddd }
+    .status { font-size:.95rem; color:#ddd }
     .pill { background:#1a1a1a; border:1px solid #333; padding:.7rem .9rem; border-radius:10px; margin-top:.6rem }
-    .muted { color: var(--mut); font-size:.95rem }
     .dot { width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:.5rem; vertical-align:middle }
     .listen { background:#22c55e } .think { background:#facc15 } .speak { background:#60a5fa } .idle { background:#6b7280 }
   </style>
 </head>
 <body>
   <h1>Coach Assistant</h1>
-  <p class="muted">Tryck start en gång. Prata → bli tyst så svarar den. Börja prata för att avbryta.</p>
+  <p class="status"><span class="dot idle"></span><span id="recStatus">Redo – tryck start, prata normalt för att avbryta svar.</span></p>
 
   <div class="row">
     <button id="startBtn">▶️ Starta röstloop</button>
     <button id="stopBtn" style="background:#ef4444;display:none">⏹️ Stoppa</button>
-    <span id="recStatus" class="status"><span class="dot idle"></span>Redo</span>
   </div>
 
   <div id="output"></div>
@@ -36,33 +34,48 @@
     const output   = document.getElementById('output');
     const recStatus= document.getElementById('recStatus');
 
+    // -------- STATE --------
+    // IDLE → LISTENING → THINKING → SPEAKING → LISTENING ...
     let state = 'IDLE';
     let running = false;
 
-    // Mic & VAD
+    // Mic / analyser
     let micStream = null, mediaRecorder = null, chunks = [];
-    let vadInterval = null, audioCtxVAD = null, analyser = null, vadData = null;
+    let analyser = null, vadData = null, audioCtxVAD = null;
+
+    // Level monitor (kör kontinuerligt under sessionen)
+    let levelMonitor = null;
 
     // TTS
     let ttsCtx = null, ttsSource = null;
 
-    // VAD/Barge in – trösklar
-    const SILENCE_THRESHOLD = 12;
-    const SILENCE_HOLD_MS   = 900;
+    // Trösklar (tuning för naturlig barge-in)
+    const SILENCE_THRESHOLD = 12;   // tystnadsnivå (0–255)
+    const SILENCE_HOLD_MS   = 900;  // hur länge tyst innan vi skickar
     const MAX_RECORD_MS     = 12000;
 
-    // Barge-in: kräver tydligt starkare nivå än TTS-läckage
-    let speakBaseline = 0;
-    const BARGE_MARGIN_DB   = 18;   // hur mycket över baseline som krävs
-    const BARGE_HOLD_MS     = 500;  // håll kvar över tröskel så här länge
+    // Barge-in: adaptiv mot TTS-läckage
+    let speakBaseline = 0;          // EMA på “läcknivå”
+    const BARGE_MARGIN      = 6;    // så mycket över baseline räcker
+    const BARGE_MIN_LEVEL   = 18;   // kräver minst den här nivån (undviker brus)
+    const BARGE_HOLD_MS     = 250;  // hur länge du behöver prata för att bryta
     let bargeHold = 0;
 
     function setStatus(mode, text) {
       const dotClass = mode === 'LISTENING' ? 'listen' : mode === 'THINKING' ? 'think' : mode === 'SPEAKING' ? 'speak' : 'idle';
-      recStatus.innerHTML = `<span class="dot ${dotClass}"></span>${text}`;
+      recStatus.previousElementSibling.className = `dot ${dotClass}`;
+      recStatus.textContent = text;
     }
 
-    // ---------- TTS ----------
+    // -------- Utils --------
+    function rmsLevel(uint8PCM) {
+      let sum = 0;
+      for (let i = 0; i < uint8PCM.length; i++) { const v = uint8PCM[i] - 128; sum += v * v; }
+      const rms = Math.sqrt(sum / uint8PCM.length);
+      return Math.min(255, Math.max(0, Math.round(rms * 6)));
+    }
+
+    // -------- TTS --------
     function stopTTS() {
       try { ttsSource && ttsSource.stop(); } catch {}
       ttsSource = null;
@@ -73,7 +86,7 @@
     async function speak(text) {
       stopTTS();
       state = 'SPEAKING';
-      setStatus(state, 'Svarar… (börja prata för att avbryta)');
+      setStatus(state, 'Svarar… (prata normalt för att avbryta)');
 
       try {
         const res = await fetch('/api/tts', {
@@ -88,7 +101,7 @@
 
         ttsCtx = new (window.AudioContext || window.webkitAudioContext)();
         const gainNode = ttsCtx.createGain();
-        gainNode.gain.value = 2.0;
+        gainNode.gain.value = 1.6; // lite lägre än 2.0 för mindre läck
 
         ttsSource = ttsCtx.createBufferSource();
         const audioBuffer = await ttsCtx.decodeAudioData(arrayBuffer);
@@ -97,7 +110,7 @@
         ttsSource.onended = () => { if (running) startListening(); };
         ttsSource.start(0);
 
-        // initiera baseline så barge-in inte triggas av TTS-läckage
+        // init baseline för barge-in
         speakBaseline = 0;
         bargeHold = 0;
       } catch (err) {
@@ -107,7 +120,7 @@
       }
     }
 
-    // ---------- CHAT ----------
+    // -------- CHAT --------
     async function askAssistant(text) {
       state = 'THINKING';
       setStatus(state, 'Bearbetar…');
@@ -133,7 +146,7 @@
       }
     }
 
-    // ---------- WHISPER ----------
+    // -------- Whisper --------
     async function transcribe(blob) {
       const formData = new FormData();
       formData.append('audio', blob, 'audio.webm');
@@ -143,18 +156,39 @@
       return (data.text || '').trim();
     }
 
-    // ---------- VAD utils ----------
-    function rmsLevel(uint8PCM) {
-      let sum = 0;
-      for (let i = 0; i < uint8PCM.length; i++) { const v = uint8PCM[i] - 128; sum += v * v; }
-      const rms = Math.sqrt(sum / uint8PCM.length);
-      return Math.min(255, Math.max(0, Math.round(rms * 6)));
-    }
+    // -------- Level monitor (kör hela sessionen) --------
+    function startLevelMonitor() {
+      if (levelMonitor) return;
+      levelMonitor = setInterval(() => {
+        if (!analyser || !vadData) return;
+        analyser.getByteTimeDomainData(vadData);
+        const level = rmsLevel(vadData);
 
-    // ---------- LISTENING ----------
+        if (state === 'SPEAKING') {
+          // EMA för baseline (läcknivå från högtalare)
+          speakBaseline = speakBaseline ? (0.85 * speakBaseline + 0.15 * level) : level;
+          const threshold = Math.max(BARGE_MIN_LEVEL, speakBaseline + BARGE_MARGIN);
+
+          if (level > threshold) {
+            bargeHold += 100;
+            if (bargeHold >= BARGE_HOLD_MS) {
+              // naturlig barge-in
+              stopTTS();
+              startListening();
+              bargeHold = 0;
+            }
+          } else {
+            bargeHold = 0;
+          }
+        }
+      }, 100);
+    }
+    function stopLevelMonitor() { if (levelMonitor) { clearInterval(levelMonitor); levelMonitor = null; } }
+
+    // -------- Listening --------
     async function startListening() {
       if (!running) return;
-      stopTTS();
+      stopTTS(); // säkerställ tyst
       state = 'LISTENING';
       setStatus(state, 'Lyssnar… (bli tyst för att skicka)');
 
@@ -165,7 +199,6 @@
       mediaRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm' });
       mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
       mediaRecorder.onstop = async () => {
-        clearInterval(vadInterval);
         const blob = new Blob(chunks, { type: 'audio/webm' });
         if (!running) return;
         try {
@@ -183,38 +216,25 @@
       };
       mediaRecorder.start();
 
-      vadInterval = setInterval(() => {
+      // enkel VAD i lyssningsläge – auto-stop på tystnad/timeout
+      const vadListen = setInterval(() => {
         analyser.getByteTimeDomainData(vadData);
         const level = rmsLevel(vadData);
-
-        // auto-stop vid tystnad eller timeout
         if (level < SILENCE_THRESHOLD) silentMs += 100; else silentMs = 0;
-        if (silentMs >= SILENCE_HOLD_MS || performance.now() - startedAt > MAX_RECORD_MS) {
-          try { mediaRecorder.state !== 'inactive' && mediaRecorder.stop(); } catch {}
-        }
 
-        // barge-in: räkna baseline av TTS-läckage och kräv tydligt högre nivå
-        if (state === 'SPEAKING') {
-          speakBaseline = speakBaseline ? (0.9 * speakBaseline + 0.1 * level) : level;
-          if (level > speakBaseline + BARGE_MARGIN_DB) {
-            bargeHold += 100;
-            if (bargeHold >= BARGE_HOLD_MS) {
-              stopTTS(); // låt lyssningen fortsätta
-              bargeHold = 0;
-            }
-          } else {
-            bargeHold = 0;
-          }
+        if (silentMs >= SILENCE_HOLD_MS || performance.now() - startedAt > MAX_RECORD_MS) {
+          clearInterval(vadListen);
+          try { mediaRecorder.state !== 'inactive' && mediaRecorder.stop(); } catch {}
         }
       }, 100);
     }
 
-    // ---------- START / STOP ----------
+    // -------- Start/Stop loop --------
     async function startLoop() {
       if (running) return;
       running = true;
       startBtn.style.display = 'none';
-      stopBtn.style.display = 'inline-block';
+      stopBtn.style.display  = 'inline-block';
 
       try {
         micStream = await navigator.mediaDevices.getUserMedia({
@@ -239,6 +259,7 @@
       vadData = new Uint8Array(analyser.fftSize);
       src.connect(analyser);
 
+      startLevelMonitor(); // alltid aktiv under sessionen
       startListening();
     }
 
@@ -249,9 +270,9 @@
       startBtn.style.display = 'inline-block';
       stopBtn.style.display  = 'none';
 
+      stopLevelMonitor();
       stopTTS();
       try { mediaRecorder && mediaRecorder.state !== 'inactive' && mediaRecorder.stop(); } catch {}
-      if (vadInterval) { clearInterval(vadInterval); vadInterval = null; }
       try { analyser && analyser.disconnect(); } catch {}
       try { audioCtxVAD && audioCtxVAD.close(); } catch {}
       analyser = null; audioCtxVAD = null; vadData = null;
