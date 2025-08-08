@@ -9,282 +9,270 @@
     :root { --bg:#111; --fg:#fff; --acc:#00aaff; --mut:#bbb; }
     body { font-family: system-ui, sans-serif; padding: 2rem; background: var(--bg); color: var(--fg); }
     .row { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
-    button, select { padding: .9rem 1.1rem; font-size: 1rem; cursor: pointer; border: none; border-radius: 10px; }
-    button { background: var(--acc); color: #fff; }
-    select { background:#1a1a1a; border:1px solid #333; color:#fff }
-    #output { margin-top: 1.25rem; font-size: 1.05rem; }
-    .muted { color: var(--mut); font-size:.95rem }
+    button {
+      padding: 0.9rem 1.2rem; font-size: 1rem; cursor: pointer; border: none; border-radius: 10px;
+      background: var(--acc); color:#fff;
+    }
+    #output { margin-top: 1rem; font-size: 1.05rem; }
+    .status { font-size: .95rem; color: #ddd }
     .pill { background:#1a1a1a; border:1px solid #333; padding:.7rem .9rem; border-radius:10px; margin-top:.6rem }
-    .tag { display:inline-block; padding:.1rem .45rem; border:1px solid #333; border-radius:6px; margin-left:.5rem; font-size:.8rem; color:#ddd }
-    .status { margin-left:.5rem; font-size:.95rem; color:#ddd }
-    .ok { color:#6ee7a8 } .warn { color:#fbbf24 } .err { color:#f87171 }
+    .muted { color: var(--mut); font-size:.95rem }
+    .dot { width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:.5rem; vertical-align:middle }
+    .listen { background:#22c55e }  /* green */
+    .think  { background:#facc15 }  /* yellow */
+    .speak  { background:#60a5fa }  /* blue */
+    .idle   { background:#6b7280 }  /* gray  */
   </style>
 </head>
 <body>
   <h1>Coach Assistant</h1>
-  <p class="muted">Klicka och prata naturligt. Säg <em>“nästa”</em>, <em>“förklara (steg X)”</em> eller <em>“upprepa”</em> för guidat läge.</p>
+  <p class="muted">Tryck start en gång. Prata → bli tyst så svarar den. Börja prata under svar för att avbryta (barge-in).</p>
 
   <div class="row">
-    <button id="micBtn">🎤 Starta röst</button>
-    <span id="recStatus" class="status"></span>
-    <label>
-      Läge:
-      <select id="mode">
-        <option value="pedagogiskt" selected>Pedagogiskt (steg-för-steg)</option>
-        <option value="snabbt">Snabbt svar</option>
-      </select>
-    </label>
+    <button id="startBtn">▶️ Starta röstloop</button>
+    <button id="stopBtn" style="background:#ef4444;display:none">⏹️ Stoppa</button>
+    <span id="recStatus" class="status"><span class="dot idle"></span>Redo</span>
   </div>
 
   <div id="output"></div>
 
   <script>
-    const micBtn = document.getElementById('micBtn');
-    const output = document.getElementById('output');
-    const recStatus = document.getElementById('recStatus');
-    const modeSel = document.getElementById('mode');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn  = document.getElementById('stopBtn');
+    const output   = document.getElementById('output');
+    const recStatus= document.getElementById('recStatus');
 
-    // Samtalsminne i klienten (skickas till backend)
-    const history = []; // {role:'user'|'assistant', content:string}
-    let pendingSteps = []; // senaste AI:ns steglista
-    let stepCursor = 0;
+    // ---------- STATE ----------
+    // IDLE → LISTENING → THINKING → SPEAKING → LISTENING ...
+    let state = 'IDLE';
+    let running = false;
 
-    // ---------- TTS (ElevenLabs via /api/tts) med avbrott ----------
-    let activeAudioCtx = null;
-    let activeSource = null;
-    function stopTTS() {
-      try { activeSource && activeSource.stop(); } catch {}
-      activeSource = null;
-      if (activeAudioCtx) { try { activeAudioCtx.close(); } catch {} }
-      activeAudioCtx = null;
+    // Mic & VAD
+    let micStream = null;
+    let mediaRecorder = null;
+    let chunks = [];
+    let vadInterval = null;
+    let audioCtxVAD = null;
+    let analyser = null;
+    let vadData = null;
+
+    // TTS
+    let ttsCtx = null;
+    let ttsSource = null;
+
+    // Thresholds
+    const SILENCE_THRESHOLD = 12;   // 0-255 (lägre = känsligare)
+    const SILENCE_HOLD_MS   = 900;  // hur länge tyst innan vi stoppar inspelning
+    const MAX_RECORD_MS     = 10000;// safety cap
+    const BARGE_THRESHOLD   = 22;   // röstnivå för att bryta TTS
+    const BARGE_HOLD_MS     = 200;  // hur länge nivå över tröskel krävs
+
+    function setStatus(mode, text) {
+      const dotClass = mode === 'LISTENING' ? 'listen' :
+                       mode === 'THINKING'  ? 'think'  :
+                       mode === 'SPEAKING'  ? 'speak'  : 'idle';
+      recStatus.innerHTML = `<span class="dot ${dotClass}"></span>${text}`;
     }
 
-    const speak = async (text) => {
+    // ---------- TTS ----------
+    function stopTTS() {
+      try { ttsSource && ttsSource.stop(); } catch {}
+      ttsSource = null;
+      if (ttsCtx) { try { ttsCtx.close(); } catch {} }
+      ttsCtx = null;
+    }
+
+    async function speak(text) {
+      stopTTS();
+      state = 'SPEAKING';
+      setStatus(state, 'Svarar… (prata för att avbryta)');
+
       try {
-        stopTTS(); // avbryt ev. pågående tal
         const res = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text })
         });
-        if (!res.ok) throw new Error("Fel vid TTS-svar");
+        if (!res.ok) throw new Error('Fel vid TTS-svar');
+
         const blob = await res.blob();
         const arrayBuffer = await blob.arrayBuffer();
 
-        activeAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const gainNode = activeAudioCtx.createGain();
+        ttsCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const gainNode = ttsCtx.createGain();
         gainNode.gain.value = 2.0;
 
-        activeSource = activeAudioCtx.createBufferSource();
-        const audioBuffer = await activeAudioCtx.decodeAudioData(arrayBuffer);
-        activeSource.buffer = audioBuffer;
-        activeSource.connect(gainNode).connect(activeAudioCtx.destination);
-        activeSource.start(0);
+        ttsSource = ttsCtx.createBufferSource();
+        const audioBuffer = await ttsCtx.decodeAudioData(arrayBuffer);
+        ttsSource.buffer = audioBuffer;
+        ttsSource.connect(gainNode).connect(ttsCtx.destination);
+        ttsSource.onended = () => { if (running) startListening(); };
+        ttsSource.start(0);
       } catch (err) {
-        console.error("TTS-fel:", err);
-        output.insertAdjacentHTML("beforeend", "<div class='err'>Kunde inte spela upp ljud.</div>");
+        console.error('TTS-fel:', err);
+        output.insertAdjacentHTML('beforeend', "<div class='pill'>Kunde inte spela upp ljud.</div>");
+        if (running) startListening();
       }
-    };
-
-    // ---------- Små normaliseringar (stavfel/felsägningar) ----------
-    function normalizeTranscript(t) {
-      const map = [
-        [/sockerbit/gi, "sortbyte"],
-        [/co2/gi, "koldioxid"],
-        [/cip/gi, "CIP"], [/ocme/gi, "OCME"], [/rco/gi, "RCO"],
-        [/kl\s*(\d+)/gi, "klockan $1"]
-      ];
-      let out = (t || "").trim();
-      map.forEach(([re, repl]) => { out = out.replace(re, repl); });
-      return out;
     }
 
-    // ---------- Skicka till backend-chat med historia ----------
-    async function callChat(message, opts={}) {
-      const body = {
-        message,
-        mode: modeSel.value,
-        history: history.slice(-8),        // skicka senaste kontexten
-        explainStepIndex: opts.explainStepIndex ?? null,
-        lastSteps: pendingSteps.length ? pendingSteps : null
-      };
+    // ---------- CHAT ----------
+    async function askAssistant(text) {
+      state = 'THINKING';
+      setStatus(state, 'Bearbetar…');
+      output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
 
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      });
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || 'Chat-fel');
+        const answer = (typeof data.reply === 'string') ? data.reply
+                      : data.reply?.reply || 'Jag kunde inte formulera ett svar.';
+        output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Svar:</strong><br>${answer}</div>`);
+        await speak(answer);
+      } catch (err) {
+        console.error('Chat-fel:', err);
+        output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI.</div>`);
+        if (running) startListening();
+      }
+    }
+
+    // ---------- WHISPER ----------
+    async function transcribe(blob) {
+      const formData = new FormData();
+      formData.append('audio', blob, 'audio.webm');
+
+      const res = await fetch('/api/whisper', { method: 'POST', body: formData });
       const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Chat-fel");
+      if (!res.ok) throw new Error(data?.error || 'Transkriberingsfel');
+      return (data.text || '').trim();
+    }
 
-      // Försök tolka strukturerat svar
-      let replyText = "";
-      let steps = null;
+    // ---------- VAD utils ----------
+    function rmsLevel(uint8PCM) {
+      let sum = 0;
+      for (let i = 0; i < uint8PCM.length; i++) {
+        const v = uint8PCM[i] - 128;
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / uint8PCM.length);
+      return Math.min(255, Math.max(0, Math.round(rms * 6)));
+    }
+
+    // ---------- LISTENING ----------
+    async function startListening() {
+      if (!running) return;
+      stopTTS(); // säkerställ att tyst
+      state = 'LISTENING';
+      setStatus(state, 'Lyssnar… (bli tyst för att skicka)');
+
+      chunks = [];
+      const startedAt = performance.now();
+      let silentMs = 0;
+      let bargeHold = 0;
+
+      mediaRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm' });
+      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+      mediaRecorder.onstop = async () => {
+        clearInterval(vadInterval);
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        if (!running) return;
+        try {
+          const text = await transcribe(blob);
+          if (text) await askAssistant(text);
+          else {
+            output.insertAdjacentHTML('beforeend', "<div class='pill'>Hörde inget tydligt. Prova igen.</div>");
+            if (running) startListening();
+          }
+        } catch (err) {
+          console.error('Whisper-fel:', err);
+          output.insertAdjacentHTML('beforeend', "<div class='pill'>Kunde inte transkribera ljudet.</div>");
+          if (running) startListening();
+        }
+      };
+      mediaRecorder.start();
+
+      // Kör VAD mot mic: auto-stop på tystnad + barge-in
+      vadInterval = setInterval(() => {
+        analyser.getByteTimeDomainData(vadData);
+        const level = rmsLevel(vadData);
+
+        // auto-stop när det varit tyst en stund eller maxlängd
+        if (level < SILENCE_THRESHOLD) silentMs += 100; else silentMs = 0;
+        const overMax = performance.now() - startedAt > MAX_RECORD_MS;
+        if (silentMs >= SILENCE_HOLD_MS || overMax) {
+          try { mediaRecorder.state !== 'inactive' && mediaRecorder.stop(); } catch {}
+        }
+
+        // barge-in: om TTS skulle vara igång, stoppa den vid röstnivå
+        if (state === 'SPEAKING') {
+          if (level > BARGE_THRESHOLD) bargeHold += 100; else bargeHold = 0;
+          if (bargeHold >= BARGE_HOLD_MS) {
+            stopTTS();
+            // vi låter LISTENING rulla vidare och fånga talet
+          }
+        }
+      }, 100);
+    }
+
+    // ---------- START / STOP ----------
+    async function startLoop() {
+      if (running) return;
+      running = true;
+      startBtn.style.display = 'none';
+      stopBtn.style.display = 'inline-block';
+
+      // Mic + analyser för VAD
       try {
-        const parsed = typeof data.reply === "string" ? JSON.parse(data.reply) : data.reply;
-        replyText = parsed.reply || "";
-        steps = Array.isArray(parsed.steps) ? parsed.steps : null;
-      } catch {
-        // Fallback: allt är bara text
-        replyText = data.reply;
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        output.insertAdjacentHTML('beforeend', "<div class='pill'>Mikrofon kunde inte startas (behörighet?).</div>");
+        running = false;
+        startBtn.style.display = 'inline-block';
+        stopBtn.style.display = 'none';
+        return;
       }
 
-      // Rendera och lagra
-      output.insertAdjacentHTML("beforeend", `<div class="pill"><strong>Svar:</strong><br>${replyText}</div>`);
-      history.push({ role: "assistant", content: replyText });
+      audioCtxVAD = new (window.AudioContext || window.webkitAudioContext)();
+      const src = audioCtxVAD.createMediaStreamSource(micStream);
+      analyser = audioCtxVAD.createAnalyser();
+      analyser.fftSize = 2048;
+      vadData = new Uint8Array(analyser.fftSize);
+      src.connect(analyser);
 
-      // Spara steglista för “nästa”
-      if (steps && steps.length) {
-        pendingSteps = steps;
-        stepCursor = 0;
-        output.insertAdjacentHTML("beforeend", `<div class="muted">Jag har ${steps.length} steg redo. Säg “nästa” för att gå vidare.</div>`);
+      startListening();
+    }
+
+    function stopLoop() {
+      running = false;
+      state = 'IDLE';
+      setStatus(state, 'Stoppad');
+      startBtn.style.display = 'inline-block';
+      stopBtn.style.display  = 'none';
+
+      stopTTS();
+      try { mediaRecorder && mediaRecorder.state !== 'inactive' && mediaRecorder.stop(); } catch {}
+      if (vadInterval) { clearInterval(vadInterval); vadInterval = null; }
+      try { analyser && analyser.disconnect(); } catch {}
+      try { audioCtxVAD && audioCtxVAD.close(); } catch {}
+      analyser = null; audioCtxVAD = null; vadData = null;
+
+      if (micStream) {
+        micStream.getTracks().forEach(t => t.stop());
+        micStream = null;
       }
-
-      // Talsyntes
-      speak(replyText);
     }
 
-    // ---------- Kommandohantering (nästa/förklara/upprepa) ----------
-    function isNextCmd(t) {
-      return /\b(nästa|fortsätt|vidare)\b/i.test(t);
-    }
-    function isRepeatCmd(t) {
-      return /\b(upprepa|igen)\b/i.test(t);
-    }
-    function extractExplainIndex(t) {
-      // “förklara steg 2” → 2 (0-baserat senare)
-      const m = t.match(/förklara(?:\s+steg)?\s+(\d+)/i);
-      if (m) return Math.max(1, parseInt(m[1], 10));
-      return null;
-    }
-    function isExplainGeneral(t) {
-      return /\bförklara\b/i.test(t);
-    }
+    startBtn.addEventListener('click', startLoop);
+    stopBtn.addEventListener('click', stopLoop);
 
-    async function handleCommand(heard) {
-      const text = normalizeTranscript(heard);
-
-      // Lokala kommandon för pending steps
-      if (pendingSteps.length) {
-        if (isNextCmd(text)) {
-          if (stepCursor < pendingSteps.length) {
-            const step = pendingSteps[stepCursor++];
-            output.insertAdjacentHTML("beforeend", `<div class="pill"><strong>Steg ${stepCursor}:</strong> ${step}</div>`);
-            history.push({ role: "assistant", content: `Steg ${stepCursor}: ${step}` });
-            speak(`Steg ${stepCursor}: ${step}`);
-            if (stepCursor >= pendingSteps.length) {
-              output.insertAdjacentHTML("beforeend", `<div class="muted">Det var sista steget.</div>`);
-            } else {
-              output.insertAdjacentHTML("beforeend", `<div class="muted">Säg “nästa” för att fortsätta.</div>`);
-            }
-            return;
-          }
-        }
-        if (isRepeatCmd(text)) {
-          const idx = Math.max(0, stepCursor - 1);
-          const step = pendingSteps[idx];
-          speak(`Upprepar steg ${idx + 1}: ${step}`);
-          output.insertAdjacentHTML("beforeend", `<div class="muted">Upprepar steg ${idx + 1}.</div>`);
-          return;
-        }
-        const explicit = extractExplainIndex(text);
-        if (explicit !== null) {
-          const idx = explicit - 1;
-          if (idx >= 0 && idx < pendingSteps.length) {
-            // Be backend förklara just detta steg
-            await callChat(`Förklara steg ${explicit} mer ingående.`, { explainStepIndex: idx });
-            return;
-          }
-        }
-        if (isExplainGeneral(text)) {
-          // Förklara senaste steg
-          const idx = Math.max(0, stepCursor - 1);
-          await callChat(`Förklara steg ${idx + 1} mer ingående.`, { explainStepIndex: idx });
-          return;
-        }
-      }
-
-      // Vanlig fråga → skicka till modellen
-      output.insertAdjacentHTML("beforeend", `<div class="pill"><strong>Du sa:</strong> ${text} <span class="tag">Whisper</span></div>`);
-      history.push({ role: "user", content: text });
-      await callChat(text);
-    }
-
-    // ---------- Inspelning med automatisk tystnads-stop ----------
-    const startRecording = async () => {
-      try {
-        stopTTS(); // avbryt tal när vi börjar lyssna
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        recStatus.textContent = "Lyssnar… (bli tyst för att stoppa)";
-        micBtn.disabled = true;
-
-        const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-        const chunks = [];
-        mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const sourceNode = audioCtx.createMediaStreamSource(stream);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 2048;
-        sourceNode.connect(analyser);
-        const data = new Uint8Array(analyser.fftSize);
-
-        let silentMs = 0;
-        const SILENCE_THRESHOLD = 12; // 0-255
-        const SILENCE_HOLD_MS = 900;
-        const MAX_RECORD_MS = 10000;
-        const startedAt = performance.now();
-
-        const vadInterval = setInterval(() => {
-          analyser.getByteTimeDomainData(data);
-          let sum = 0;
-          for (let i = 0; i < data.length; i++) { const v = data[i] - 128; sum += v * v; }
-          const rms = Math.sqrt(sum / data.length);
-          const level = Math.min(255, Math.max(0, Math.round(rms * 6)));
-
-          silentMs = (level < SILENCE_THRESHOLD) ? (silentMs + 100) : 0;
-          if (silentMs >= SILENCE_HOLD_MS || performance.now() - startedAt > MAX_RECORD_MS) {
-            clearInterval(vadInterval);
-            try { mediaRecorder.state !== "inactive" && mediaRecorder.stop(); } catch {}
-          }
-        }, 100);
-
-        mediaRecorder.onstop = async () => {
-          try { sourceNode.disconnect(); analyser.disconnect(); audioCtx.close(); } catch {}
-          stream.getTracks().forEach(t => t.stop());
-          recStatus.textContent = "Bearbetar…";
-
-          const blob = new Blob(chunks, { type: 'audio/webm' });
-          const formData = new FormData();
-          formData.append('audio', blob, 'audio.webm');
-
-          try {
-            const res = await fetch('/api/whisper', { method: 'POST', body: formData });
-            const data = await res.json();
-
-            if (res.ok && data.text) {
-              await handleCommand(data.text);
-            } else {
-              console.error("Transkriberingsfel:", data);
-              output.insertAdjacentHTML("beforeend", "<div class='err'>Kunde inte transkribera ljudet.</div>");
-            }
-          } catch (err) {
-            console.error("Fetch-fel:", err);
-            output.insertAdjacentHTML("beforeend", "<div class='err'>Fel vid kontakt med servern.</div>");
-          } finally {
-            recStatus.textContent = "";
-            micBtn.disabled = false;
-          }
-        };
-
-        mediaRecorder.start();
-      } catch (err) {
-        console.error("Mikrofonfel:", err);
-        output.insertAdjacentHTML("beforeend", "<div class='err'>Mikrofon kunde inte startas.</div>");
-      }
-    };
-
-    micBtn.addEventListener('click', startRecording);
+    // Bonus: ESC för att stoppa snabbt
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') stopLoop();
+    });
   </script>
 </body>
 </html>
