@@ -54,16 +54,32 @@
     // TTS
     let ttsCtx = null, ttsSource = null, ttsAnalyser = null;
 
-    // Barge-in/VAD
-    const SILENCE_THRESHOLD = 12;
+    // Barge-in/VAD grund
+    const SILENCE_THRESHOLD = 12;   // baseline (används endast initialt)
     const SILENCE_HOLD_MS   = 900;
     const MAX_RECORD_MS     = 12000;
 
-    let speakBaseline = 0;         // adaptiv baseline för TTS-läckage
-    const BARGE_MARGIN    = 6;     // hur mycket över baseline som räcker
-    const BARGE_MIN_LEVEL = 16;    // undvik att trigga på brus
-    const BARGE_HOLD_MS   = 250;   // hur länge du behöver prata
+    let speakBaseline = 0;          // adaptiv baseline för TTS-läckage
+    const BARGE_MARGIN    = 6;      // hur mycket över baseline som räcker
+    const BARGE_MIN_LEVEL = 16;     // undvik att trigga på brus
+    const BARGE_HOLD_MS   = 250;    // hur länge du behöver prata
     let bargeHold = 0;
+
+    // --- Dynamisk MIME (Safari iOS behöver mp4/m4a) ---
+    const REC_MIME =
+      MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' :
+      MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' :
+      MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
+
+    const REC_EXT = REC_MIME.includes('mp4') ? 'm4a' : 'webm';
+
+    // Barge cooldown (hindrar studs mellan tala/lyssna)
+    let bargeCooldownMs = 0;
+    const BARGE_COOLDOWN_SET = 600; // ms spärr efter barge-in
+
+    // Adaptiv tystnadströskel
+    let BASE_NOISE = 0;
+    let DYNAMIC_SILENCE = SILENCE_THRESHOLD;
 
     function setStatus(mode, text) {
       const dotClass = mode === 'LISTENING' ? 'listen' : mode === 'THINKING' ? 'think' : mode === 'SPEAKING' ? 'speak' : 'idle';
@@ -85,10 +101,25 @@
       return false;
     }
 
+    async function calibrateNoiseOnce() {
+      if (!analyser || !micArr) return;
+      let acc = 0, n = 0; 
+      const t0 = performance.now();
+      while (performance.now() - t0 < 220) {
+        analyser.getByteTimeDomainData(micArr);
+        acc += rmsLevel(micArr); n++;
+        await new Promise(r => setTimeout(r, 30));
+      }
+      BASE_NOISE = Math.round(acc / Math.max(1, n));
+      DYNAMIC_SILENCE = Math.max(8, BASE_NOISE + 3);
+    }
+
     // ---------- Visualizer + BARGe-IN monitor (EN loop) ----------
     let rafId = null, lastTs = 0, phase = 0;
     function loop(ts){
       const dt = Math.min(200, ts - (lastTs||ts)); lastTs = ts;
+
+      if (bargeCooldownMs > 0) { bargeCooldownMs -= dt; }
 
       // nivåer
       let micLevel = 0, ttsLevel = 0;
@@ -96,7 +127,7 @@
       if (ttsAnalyser){ const arr = new Uint8Array(ttsAnalyser.fftSize); ttsAnalyser.getByteTimeDomainData(arr); ttsLevel = rmsLevel(arr); }
 
       // ---- BARGe-IN: lyssna efter röst när TTS pratar ----
-      if (running && state === 'SPEAKING' && analyser){
+      if (running && state === 'SPEAKING' && analyser && bargeCooldownMs <= 0){
         // uppdatera baseline (EMA) – hur mycket TTS “läcker” in i micken
         speakBaseline = speakBaseline ? (0.92*speakBaseline + 0.08*micLevel) : micLevel;
         const threshold = Math.max(BARGE_MIN_LEVEL, speakBaseline + BARGE_MARGIN);
@@ -105,6 +136,7 @@
           bargeHold += dt;
           if (bargeHold >= BARGE_HOLD_MS){
             // avbryt tal och börja lyssna
+            bargeCooldownMs = BARGE_COOLDOWN_SET;
             stopTTS();
             startListening();
             bargeHold = 0;
@@ -160,7 +192,8 @@
         const blob=await res.blob(); const arrayBuffer=await blob.arrayBuffer();
 
         ttsCtx = new (window.AudioContext||window.webkitAudioContext)();
-        const gainNode = ttsCtx.createGain(); gainNode.gain.value = 1.4; // lite lägre → mindre läck
+        const gainNode = ttsCtx.createGain(); 
+        gainNode.gain.value = 0.85; // lägre → mindre läck in i micken
 
         ttsSource = ttsCtx.createBufferSource();
         const audioBuffer = await ttsCtx.decodeAudioData(arrayBuffer);
@@ -227,7 +260,11 @@
 
     // ---------- Whisper ----------
     async function transcribe(blob){
-      const fd=new FormData(); fd.append('audio', blob, 'audio.webm');
+      const fd = new FormData();
+      const typedBlob = new Blob([blob], { type: REC_MIME || 'audio/webm' });
+      fd.append('audio', typedBlob, `audio.${REC_EXT}`);
+      fd.append('mime', REC_MIME || 'audio/webm');
+
       const res=await fetch('/api/whisper',{ method:'POST', body: fd });
       const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Transkriberingsfel');
       return (data.text||'').trim();
@@ -241,10 +278,14 @@
 
       chunks=[]; const startedAt=performance.now(); let silentMs=0;
 
-      mediaRecorder = new MediaRecorder(micStream,{ mimeType:'audio/webm' });
+      await calibrateNoiseOnce();
+
+      mediaRecorder = REC_MIME ? new MediaRecorder(micStream, { mimeType: REC_MIME, audioBitsPerSecond: 128000 })
+                               : new MediaRecorder(micStream);
+
       mediaRecorder.ondataavailable = (e)=>{ if(e.data.size>0) chunks.push(e.data); };
       mediaRecorder.onstop = async ()=>{
-        const blob=new Blob(chunks,{type:'audio/webm'}); if(!running) return;
+        const blob=new Blob(chunks,{type: REC_MIME || 'audio/webm'}); if(!running) return;
         try{
           const text = await transcribe(blob);
           if(!trySetProfileFrom(text)){
@@ -262,7 +303,7 @@
       const vadTimer=setInterval(()=>{
         analyser.getByteTimeDomainData(micArr);
         const lvl = rmsLevel(micArr);
-        if(lvl < SILENCE_THRESHOLD) silentMs += 100; else silentMs = 0;
+        if (lvl < DYNAMIC_SILENCE) silentMs += 100; else silentMs = 0;
         if (silentMs >= SILENCE_HOLD_MS || performance.now()-startedAt > MAX_RECORD_MS){
           clearInterval(vadTimer);
           try{ mediaRecorder.state!=='inactive' && mediaRecorder.stop(); }catch{}
