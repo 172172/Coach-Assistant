@@ -44,7 +44,7 @@
     // ---------- STATE ----------
     let state = 'IDLE', running = false;
 
-    // Profil via presentation
+    // Profil via presentation (behålls, men servern kör Jarvis-stil)
     let profileName = localStorage.getItem('coach_profile') || null;
 
     // Mic / analyser
@@ -52,7 +52,13 @@
     let audioCtxVAD = null, analyser = null, micArr = null;
 
     // TTS
-    let ttsCtx = null, ttsSource = null, ttsAnalyser = null;
+    let ttsCtx = null, ttsSource = null, ttsAnalyser = null, ttsGainNode = null;
+    const TTS_BASE_GAIN = 0.85;
+    const TTS_DUCK_GAIN = 0.22;
+
+    // Enkelt “konversationsminne” för uppföljningsfrågor
+    let lastQ = null;
+    let lastA = null;
 
     // Barge-in/VAD grund
     const SILENCE_THRESHOLD = 12;   // baseline (används endast initialt)
@@ -60,9 +66,9 @@
     const MAX_RECORD_MS     = 12000;
 
     let speakBaseline = 0;          // adaptiv baseline för TTS-läckage
-    const BARGE_MARGIN    = 6;      // hur mycket över baseline som räcker
-    const BARGE_MIN_LEVEL = 16;     // undvik att trigga på brus
-    const BARGE_HOLD_MS   = 250;    // hur länge du behöver prata
+    const BARGE_MARGIN    = 4;      // lite känsligare
+    const BARGE_MIN_LEVEL = 16;
+    const BARGE_HOLD_MS   = 130;    // snabbare avbrott
     let bargeHold = 0;
 
     // --- Dynamisk MIME (Safari iOS behöver mp4/m4a) ---
@@ -132,20 +138,33 @@
       if (analyser && micArr){ analyser.getByteTimeDomainData(micArr); micLevel = rmsLevel(micArr); }
       if (ttsAnalyser){ const arr = new Uint8Array(ttsAnalyser.fftSize); ttsAnalyser.getByteTimeDomainData(arr); ttsLevel = rmsLevel(arr); }
 
-      // ---- BARGe-IN ----
-      if (running && state === 'SPEAKING' && analyser && bargeCooldownMs <= 0){
+      // ---- BARGe-IN + DUCKING ----
+      if (running && state === 'SPEAKING' && analyser){
+        // uppdatera baseline (EMA) – hur mycket TTS “läcker” in i micken
         speakBaseline = speakBaseline ? (0.92*speakBaseline + 0.08*micLevel) : micLevel;
         const threshold = Math.max(BARGE_MIN_LEVEL, speakBaseline + BARGE_MARGIN);
-        if (micLevel > threshold){
-          bargeHold += dt;
-          if (bargeHold >= BARGE_HOLD_MS){
-            bargeCooldownMs = BARGE_COOLDOWN_SET;
-            stopTTS();
-            startListening();
-            bargeHold = 0;
+
+        if (micLevel > threshold) {
+          // sänk TTS-volym direkt så du bryter igenom
+          if (ttsGainNode && ttsCtx) {
+            try { ttsGainNode.gain.setTargetAtTime(TTS_DUCK_GAIN, ttsCtx.currentTime, 0.015); } catch {}
+          }
+
+          if (bargeCooldownMs <= 0) {
+            bargeHold += dt;
+            if (bargeHold >= BARGE_HOLD_MS){
+              bargeCooldownMs = BARGE_COOLDOWN_SET;
+              stopTTS();
+              startListening();
+              bargeHold = 0;
+            }
           }
         } else {
           bargeHold = 0;
+          // släpp upp TTS-volym när du inte pratar
+          if (ttsGainNode && ttsCtx) {
+            try { ttsGainNode.gain.setTargetAtTime(TTS_BASE_GAIN, ttsCtx.currentTime, 0.05); } catch {}
+          }
         }
       }
 
@@ -179,7 +198,12 @@
     }
 
     // ---------- TTS ----------
-    function stopTTS(){ try{ ttsSource && ttsSource.stop(); }catch{} ttsSource=null; ttsAnalyser=null; if(ttsCtx){ try{ ttsCtx.close(); }catch{} } ttsCtx=null; }
+    function stopTTS(){
+      try{ ttsSource && ttsSource.stop(); }catch{}
+      ttsSource=null; ttsAnalyser=null;
+      if(ttsCtx){ try{ ttsCtx.close(); }catch{} }
+      ttsCtx=null; ttsGainNode=null;
+    }
     async function speak(text){
       stopTTS();
       state='SPEAKING'; setStatus(state,'Svarar… (prata för att avbryta)');
@@ -189,8 +213,8 @@
         const blob=await res.blob(); const arrayBuffer=await blob.arrayBuffer();
 
         ttsCtx = new (window.AudioContext||window.webkitAudioContext)();
-        const gainNode = ttsCtx.createGain(); 
-        gainNode.gain.value = 0.85; // mindre läck in i micken
+        ttsGainNode = ttsCtx.createGain();
+        ttsGainNode.gain.value = TTS_BASE_GAIN;
 
         ttsSource = ttsCtx.createBufferSource();
         const audioBuffer = await ttsCtx.decodeAudioData(arrayBuffer);
@@ -198,8 +222,8 @@
 
         ttsAnalyser = ttsCtx.createAnalyser(); ttsAnalyser.fftSize = 1024;
 
-        ttsSource.connect(gainNode).connect(ttsAnalyser).connect(ttsCtx.destination);
-        ttsSource.onended = ()=>{ if(running) startListening(); };
+        ttsSource.connect(ttsGainNode).connect(ttsAnalyser).connect(ttsCtx.destination);
+        ttsSource.onended = ()=>{ ttsGainNode=null; if(running) startListening(); };
         ttsSource.start(0);
 
         speakBaseline = 0; bargeHold = 0;
@@ -215,22 +239,21 @@
       state='THINKING'; setStatus(state,'Bearbetar…');
       output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text} ${profileName?`(profil: ${profileName})`:''}</div>`);
       try{
-        const res = await fetch('/api/chat',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ message:text, profile: profileName||null }) });
+        const res = await fetch('/api/chat',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ message:text, profile: profileName||null, prev: { question: lastQ, assistant: lastA } })
+        });
         const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Chat-fel');
 
         let r=data.reply; if(typeof r==='string'){ try{ r=JSON.parse(r); }catch{} }
         let toSpeak=''; let srcNote='';
 
         if(r && typeof r==='object'){
-          if(profileName && profileName.toLowerCase()==='kevin'){
-            const short = r.simple || r.summary || '';
-            const action = Array.isArray(r.steps)&&r.steps[0] ? `Åtgärd: ${r.steps[0]}` : '';
-            toSpeak = [short, action].filter(Boolean).join('. ');
-          } else {
-            toSpeak = r.summary || '';
-            if(Array.isArray(r.steps)&&r.steps.length){ toSpeak += (toSpeak?' ':'') + 'Steg: ' + r.steps.slice(0,4).join(', ') + '.'; }
-            if(r.explanation) toSpeak += ' ' + r.explanation;
-          }
+          toSpeak = r.summary || '';
+          if(Array.isArray(r.steps)&&r.steps.length){ toSpeak += (toSpeak?' ':'') + 'Steg: ' + r.steps.slice(0,4).join(', ') + '.'; }
+          if(r.explanation) toSpeak += ' ' + r.explanation;
+
           if(Array.isArray(r.matched_headings)&&r.matched_headings.length){ srcNote = `Hämtat från: ${r.matched_headings.join(', ')}`; }
           const html = `
             <div class="pill">
@@ -242,9 +265,15 @@
               ${srcNote?`<div class="src">${srcNote}</div>`:''}
             </div>`;
           output.insertAdjacentHTML('beforeend', html);
+
+          // spara kontext för nästa uppföljning
+          lastQ = text;
+          lastA = r;
         } else {
-          toSpeak = typeof data.reply === 'string' ? data.reply : 'Jag kunde inte formulera ett svar.';
-          output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Svar:</strong><br>${toSpeak}</div>`);
+          const fallback = typeof data.reply === 'string' ? data.reply : 'Jag kunde inte formulera ett svar.';
+          output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Svar:</strong><br>${fallback}</div>`);
+          toSpeak = fallback;
+          lastQ = text; lastA = null;
         }
         await speak(toSpeak || 'Oklart svar.');
       }catch(err){
@@ -368,6 +397,10 @@
       analyser=null; audioCtxVAD=null; micArr=null;
       if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
     }
+
+    // Snabb manuell avbryt (klick/space) om du vill
+    document.addEventListener('click', ()=>{ if (running && state==='SPEAKING'){ bargeCooldownMs=BARGE_COOLDOWN_SET; stopTTS(); startListening(); }});
+    window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); bargeCooldownMs=BARGE_COOLDOWN_SET; stopTTS(); startListening(); }});
 
     startBtn.addEventListener('click', startLoop);
     stopBtn.addEventListener('click', stopLoop);
