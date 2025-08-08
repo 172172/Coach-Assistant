@@ -1,4 +1,6 @@
-// /api/chat.js
+// Minimal, fri men säker: bygg svaret från manualen, fråga om oklarheter,
+// och stoppa bara om det verkligen saknas underlag.
+
 const KNOWLEDGE_URL = "https://raw.githubusercontent.com/172172/Coach-Assistant/main/assistant-knowledge.txt";
 const CACHE_MS = 5 * 60 * 1000;
 
@@ -13,55 +15,14 @@ async function getKnowledge() {
   return text;
 }
 
-// ---------- helpers ----------
-function normalize(s = "") {
-  return (s || "")
-    .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .replace(/ö/g,"o").replace(/ä/g,"a").replace(/å/g,"a")
-    .replace(/\s+/g," ").trim();
-}
-function isSortbyteQuery(msg = "") {
-  const t = normalize(msg);
-  return /(sort\s*byte|sortbyte|byta sort|byte i tappen|sortbyten?)/.test(t);
-}
-function hasTypeHint(msg = "") {
-  const t = normalize(msg);
-  return /(ol|lager|ale|stout|ipa|lask|soda|vatten|juice|cider|energi|sirap|syrup|smak|kolsyrad|still)/.test(t);
-}
-function extractTypePair(msg = "") {
-  const t = normalize(msg);
-  const m = t.match(/(?:fran\s+)?([a-z0-9\-]+)\s*(?:->|→|till)\s*([a-z0-9\-]+)/i);
-  if (m) return { from: m[1], to: m[2], hasPair: true };
-  return { from: null, to: null, hasPair: false };
-}
-function extractHeadings(knowledgeText) {
-  const lines = (knowledgeText || "").split(/\r?\n/);
-  const heads = [];
-  for (const ln of lines) {
-    if (/^\s*#{2,}\s+/.test(ln) || /^\s*[-*]\s*Avsnitt:/i.test(ln) || /^\s*Avsnitt:/i.test(ln)) {
-      heads.push(ln.replace(/^\s*[-*]\s*/,'').trim());
-    }
-  }
-  if (heads.length < 3) {
-    for (const ln of lines) if (/Avsnitt\s*:/.test(ln)) heads.push(ln.trim());
-  }
-  return [...new Set(heads)].slice(0, 200);
-}
-function relevantHeadings(headings) {
-  const kw = /(sort|byte|tapp|tappa|fyll|cip|skolj|flush|omkoppl|vaxl|rengor|sanit)/i;
-  return headings.filter(h => kw.test(h)).slice(0, 12);
-}
-
-// ---- sort-intent from previous turn ----
-function prevImpliesSortbyte(prev) {
-  if (!prev) return false;
-  const q = normalize(prev.question || "");
-  const aSpoken = normalize(prev.assistant?.spoken || "");
-  const aQuestion = normalize(prev.assistant?.need?.question || "");
-  const askedPair = /fran.*till/.test(aSpoken) || /fran.*till/.test(aQuestion) || /produkt.*fran.*till/.test(aQuestion);
-  return askedPair || isSortbyteQuery(q);
-}
+// små helpers för kontext
+const norm = (s="") => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/ö/g,"o").replace(/ä/g,"a").replace(/å/g,"a").trim();
+const isSortQ = (s="") => /(sort\s*byte|sortbyte|byta sort|byte i tappen|sortbyten?)/.test(norm(s));
+const hasType  = (s="") => /(ol|lager|ale|stout|ipa|lask|soda|vatten|juice|cider|energi|sirap|syrup|smak|kolsyrad|still)/.test(norm(s));
+const pairFrom = (s="") => {
+  const m = norm(s).match(/(?:fran\s+)?([a-z0-9\-]+)\s*(?:->|→|till)\s*([a-z0-9\-]+)/i);
+  return m ? { has:true, from:m[1], to:m[2] } : { has:false };
+};
 
 export default async function handler(req, res) {
   try {
@@ -70,84 +31,57 @@ export default async function handler(req, res) {
     const { message = "", prev = null } = req.body || {};
     const knowledge = await getKnowledge();
 
-    // intent + context
-    const fromPrevSort = prevImpliesSortbyte(prev);
-    const sortIntent = isSortbyteQuery(message) || fromPrevSort;
-    const typeHint = hasTypeHint(message) || hasTypeHint(prev?.question || "");
-    const pair = extractTypePair(message);
-
-    const allHeadings = extractHeadings(knowledge);
-    const relHeadings = relevantHeadings(allHeadings);
-
-    // --- SYSTEM ---
     const system = `
-Du är "Coach Assistant" – mentor på produktionslinjen (t.ex. Linje 65).
-Ton: varm, lugn, naturlig, pedagogisk.
+Du är "Coach Assistant" – varm, lugn, pedagogisk, pratar som en kollega.
+Du får gärna vara fri i språket, men all teknik ska bygga på "Kunskap" nedan.
 
-ABSOLUT:
-- Råd måste stödas av "Kunskap" (manual).
-- Svara i EXAKT JSON (schemat nedan). Ingen text utanför JSON.
-- Hårt stopp endast vid mycket låg täckning (<0.15) OCH inga relevanta rubriker OCH nästan inga steg.
-
-KLARIFIERING:
-- Om frågan är för vag: ställ EN öppen följdfråga (“Vilken produkt går du från – och till?”). Inga påhittade alternativ.
-
-SORTBYTE:
-- När typ finns: ge lugna, NUMRERADE steg (förberedelser, säkringar, switch/flush/CIP om manualen nämner det, kontroller, återstart).
-  * Sikta på 8–20 steg om manualen tillåter.
-  * Lista exakta rubrikträffar i "matched_headings".
-  * Inga egna siffror – använd generella formuleringar om manualen saknar värden.
-
-COVERAGE (sätt rimligt):
-- ≥0.75: flera starka rubriker direkt relevanta.
-- 0.6–0.75: delvis stöd; generella formuleringar OK.
-- 0.4–0.6: viss relevans; leverera steg men be att verifiera mot rubrikerna.
-- <0.15: för svagt → ingen detaljerad vägledning.
-
-JSON-SCHEMA:
+Regler:
+- Om underlaget är oklart: ställ EN tydlig följdfråga för att få rätt kontext.
+- Om underlaget är tillräckligt: ge tydliga, NUMRERADE steg (gärna 8–20 om manualen räcker), plus kort sammanfattning.
+- Säg aldrig påhittade siffror. Om manualen saknar värden: håll det generellt ("enligt manualens gränsvärden").
+- Returnera EXAKT JSON:
 {
-  "spoken": string,
-  "need": { "clarify": boolean, "question"?: string, "options"?: string[] },
+  "spoken": string,                            // naturligt talat svar
+  "need": { "clarify": boolean, "question"?: string }, // sätt clarify=true om du behöver ett förtydligande
   "cards": {
     "summary": string,
-    "steps": string[],
+    "steps": string[],                         // numrerade steg i textform
     "explanation": string,
     "pitfalls": string[],
     "simple": string,
     "pro": string,
     "follow_up": string,
-    "coverage": number,
-    "matched_headings": string[]
+    "coverage": number,                        // 0..1 - DIN realistiska skattning
+    "matched_headings": string[]               // exakta rubriker du använt ur Kunskap
   },
   "follow_up": string
 }
+
+Vägledning för coverage (inte för försiktig):
+- ~0.75+: flera direkt relevanta rubriker, steg direkt därifrån.
+- ~0.6–0.75: delvis stöd; komplettera med säkra generella formuleringar.
+- ~0.4–0.6: viss relevans; leverera steg men påminn att verifiera mot rubrikerna.
+- <0.2: för svagt → be om mer info eller säg att manualen saknar tydlighet.
 `.trim();
 
-    // --- USER ---
     const user = `
-Kunskap (manual – fulltext):
+Kunskap:
 """
 ${knowledge}
 """
 
-Rubrikindex:
-- ${allHeadings.join("\n- ")}
-
-Relevanta rubriker (fokus):
-- ${relHeadings.join("\n- ")}
-
 Användarens inmatning:
 "${message}"
 
-Tidigare tur:
+Tidigare tur (för kontext):
 ${prev ? JSON.stringify(prev) : "null"}
 
-Krav för svar:
-- Om detta är en uppföljning på sortbyte och typ ännu saknas → need.clarify=true med ÖPPEN fråga (inga options).
-- Om typ finns → ge lugna, numrerade steg enligt manualen. Lista matched_headings från rubrikindex. Fyll ALLA fält.
+Instruktion:
+- Om frågan är för vag för att ge korrekta steg: returnera need.clarify=true med en kort ÖPPEN fråga.
+- Annars: ge fulla, lugna, numrerade steg enligt manualen. Var utförlig om sortbyte/tapp.
+- Fyll ALLA fält i JSON-schemat. Ingen text utanför JSON.
 `.trim();
 
-    // --- OpenAI ---
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -156,7 +90,7 @@ Krav för svar:
       },
       body: JSON.stringify({
         model: "gpt-4o",
-        temperature: 0.2,
+        temperature: 0.25,
         max_tokens: 2000,
         messages: [
           { role: "system", content: system },
@@ -176,15 +110,15 @@ Krav för svar:
     try { out = JSON.parse(content); }
     catch {
       out = {
-        spoken: content || "Jag saknar tydlig information för att guida dig.",
-        need: { clarify: false },
+        spoken: "Jag behöver lite mer info för att guida rätt. Vad exakt vill du göra?",
+        need: { clarify: true, question: "Vad exakt vill du göra?" },
         cards: {
-          summary: content || "—",
+          summary: "Behöver mer kontext.",
           steps: [],
           explanation: "",
           pitfalls: [],
-          simple: content || "",
-          pro: content || "",
+          simple: "",
+          pro: "",
           follow_up: "",
           coverage: 0,
           matched_headings: []
@@ -193,73 +127,36 @@ Krav för svar:
       };
     }
 
-    // ---- PHASE 1: Klarifiering → returnera direkt (INGEN gate i detta läge) ----
-    const awaitingPair = sortIntent && !pair.hasPair && !typeHint;
-    if (awaitingPair) {
-      if (!out?.need?.clarify) {
-        out.need = { clarify: true, question: "Vilken produkt går du från – och till? (ex: läsk till läsk)", options: [] };
-        out.spoken = "För att guida rätt behöver jag veta vilken produkt du byter från – och till. Säg det så tar vi det steg för steg.";
-      } else {
-        out.spoken = out.need.question || "Vilken produkt går du från – och till?";
-        if (Array.isArray(out.need.options) && out.need.options.length) out.need.options = [];
-      }
+    // Enkel, snäll gate: stoppa bara om det verkligen saknas underlag
+    const cov   = Number(out?.cards?.coverage ?? 0);
+    const heads = Array.isArray(out?.cards?.matched_headings) ? out.cards.matched_headings : [];
+    const steps = Array.isArray(out?.cards?.steps) ? out.cards.steps : [];
+
+    // Om modellen ber om förtydligande → returnera direkt (ingen gate)
+    if (out?.need?.clarify) {
+      out.cards.coverage = cov || 0;
       return res.status(200).json({ reply: out });
     }
 
-    // ---- PHASE 2: Typ finns → coachning, mjuk gate ----
-    const stepsArr = Array.isArray(out?.cards?.steps) ? out.cards.steps : [];
-    let heads = Array.isArray(out?.cards?.matched_headings) ? out.cards.matched_headings : [];
-    let cov = Number(out?.cards?.coverage ?? out?.coverage ?? 0) || 0;
-
-    // Om modellen missade rubriker: fyll på med våra relevanta för att undvika falskt “saknar täckning”
-    if (heads.length === 0 && relHeadings.length > 0) {
-      heads = relHeadings.slice(0, 6);
-      if (out.cards) out.cards.matched_headings = heads;
-    }
-
-    // Bump när vi vet att detta är sortbyte och något substans finns
-    if (sortIntent) {
-      if (stepsArr.length >= 6)  cov = Math.max(cov, 0.58);
-      if (stepsArr.length >= 10) cov = Math.max(cov, 0.68);
-      if (heads.length >= 1)     cov = Math.max(cov, 0.62);
-    }
-
-    // HÅRT STOPP endast om ALLT saknas
-    if (cov < 0.15 && heads.length === 0 && stepsArr.length < 4) {
-      out.cards = out.cards || {};
-      out.cards.summary = "Den informationen finns inte tillräckligt tydligt i manualen.";
+    // HÅRT STOPP endast vid riktigt tunt underlag
+    if ((cov < 0.2 && heads.length === 0) && steps.length < 4) {
+      out.spoken = "Manualen är för tunn för att jag ska kunna guida säkert. Vill du att jag tar generella säkra steg, eller ska vi uppdatera manualen?";
+      out.cards.summary = "Otillräckligt underlag i manualen för detaljerade steg.";
       out.cards.steps = [];
-      out.cards.explanation = "Följ generella säkra rutiner eller kontakta ansvarig. Vi bör uppdatera manualen med detta.";
+      out.cards.explanation = "Följ generella säkra rutiner eller kontakta ansvarig. Uppdatera manualen för detta moment.";
       out.cards.pitfalls = [];
       out.cards.simple = out.cards.summary;
       out.cards.pro = out.cards.summary;
-      out.cards.follow_up = "Vill du att jag noterar att manualen behöver uppdateras för just detta?";
-      out.cards.coverage = cov;
-      out.cards.matched_headings = heads;
-      out.spoken = "Jag saknar täckning i manualen för att guida säkert. Vill du att vi tar generella säkra steg eller uppdaterar manualen?";
-      out.need = out.need || { clarify: false };
-      out.follow_up = out.cards.follow_up;
+      out.cards.follow_up = "Vill du att jag noterar ett behov av uppdatering i manualen?";
+      out.cards.coverage = cov || 0;
       return res.status(200).json({ reply: out });
     }
 
-    // Mjuk varning när coverage är halvlåg → leverera ändå steg
-    if (cov < 0.6) {
-      if (out.cards) {
-        out.cards.coverage = cov;
-        out.cards.matched_headings = heads;
-        out.cards.follow_up = out.cards.follow_up || "Vill du att jag bryter ner nästa del?";
-      }
-      const warn = "Jag guidar enligt relevanta avsnitt — dubbelkolla gärna mot rubrikerna jag visar.";
-      out.spoken = out.spoken ? `${out.spoken} ${warn}` : warn;
-      out.follow_up = out.follow_up || "Säg till när du vill ha nästa steg.";
-      return res.status(200).json({ reply: out });
-    }
-
-    // OK täckning
-    if (out.cards) {
-      out.cards.coverage = cov;
-      out.cards.matched_headings = heads;
-    }
+    // I alla andra fall: leverera som modellen vill (fri, men baserad på manualen)
+    // Säkerställ att fält finns
+    out.cards = out.cards || {
+      summary: "", steps: [], explanation:"", pitfalls:[], simple:"", pro:"", follow_up:"", coverage: cov || 0, matched_headings: heads
+    };
     return res.status(200).json({ reply: out });
   } catch (err) {
     console.error("chat.js internal error:", err);
