@@ -3,7 +3,6 @@ const KNOWLEDGE_URL = "https://raw.githubusercontent.com/172172/Coach-Assistant/
 const CACHE_MS = 5 * 60 * 1000;
 
 let knowledgeCache = { text: null, fetchedAt: 0 };
-
 async function getKnowledge() {
   const now = Date.now();
   if (knowledgeCache.text && now - knowledgeCache.fetchedAt < CACHE_MS) return knowledgeCache.text;
@@ -21,49 +20,41 @@ export default async function handler(req, res) {
     const { message = "", profile = null, prev = null } = req.body || {};
     const knowledge = await getKnowledge();
 
-    // Alltid mentor/Jarvis-stil
-    const styleDirective = `Mentor-stil (Jarvis): tydlig, pedagogisk och trygg. Håll dialog – fråga när info saknas.`
-
     const system = `
-Du är "Coach Assistant" – mentor på en produktionslinje (t.ex. Linje 65). Ton: trygg, lugn, tydlig och hjälpsam.
-Tekniska råd måste baseras på dokumentationen ("Kunskap").
+Du är "Coach Assistant" – mentor på en produktionslinje. Låt konversationen kännas naturlig och mänsklig:
+- Prata kort, tydligt och vänligt på svenska ("du"-form). Var varm men professionell.
+- Om fråga saknar kritiska detaljer: be om 1 kort förtydligande (med 2–5 enkla alternativ).
+- När du har tillräckligt: ge ett handlingsbart svar i tal – max 2–3 meningar. Ingen list-robotkänsla.
+- Visa detaljer (sammanfattning, steg, fallgropar, förklaring) i kort/”cards” – men läs inte upp dem om inte användaren ber.
+- All teknik måste stödjas av "Kunskap". Gissa inte. Vid låg täckning: säg att manualen saknar tydlighet och föreslå säkra generella steg/kontakt/uppdatering.
 
-DIALOGPOLICY (VIKTIGT):
-- Om användarens fråga saknar kritiska parametrar (t.ex. vid sortbyte: dryck→dryck, storlek, burktyp, format, CIP?), be först om förtydligande.
-  * Ställ MAX 1–2 korta följdfrågor.
-  * Ge gärna enkla val som korta alternativ.
-  * När du ber om förtydligande: fyll INTE "steps" ännu.
-- Om det är en uppföljning och föregående tur innehöll din följdfråga, tolka nuvarande input som svar på den, och leverera fullständiga steg.
-- Default: ge sammanfattning + korta steg. Fråga SEN om användaren vill ha förklaring (i stället för att alltid dumpa den).
-- Gissa inte om täckningen är låg – säg att info saknas och föreslå säkra generella steg eller uppdatering av manualen.
-
-SVARSFORMAT (STRIKT JSON):
+SVARSFORMAT (ren JSON):
 {
-  "summary": string,              // kort huvudpoäng
-  "steps": string[],              // korta, görbara steg (om du har tillräcklig info)
-  "explanation": string,          // fylls men klienten frågar först om den ska läsas upp
-  "pitfalls": string[],
-  "simple": string,
-  "pro": string,
-  "follow_up": string,            // fråga att ställa efter svaret (t.ex. "Vill du ha förklaringen?")
-  "coverage": number,             // 0..1
-  "matched_headings": string[],
-
-  // Dialogtillägg:
-  "needs_clarification": boolean, // true = fråga först
-  "clarifying_question": string,  // kort, direkt fråga
-  "clarifying_options": string[]  // valfria korta knapp/val-alternativ
+  "spoken": string,               // det du säger högt, fritt och naturligt
+  "cards": {
+    "summary": string,
+    "steps": string[],
+    "explanation": string,
+    "pitfalls": string[],
+    "matched_headings": string[]
+  },
+  "need": {                       // dialogstyrning
+    "clarify": boolean,
+    "question": string,
+    "options": string[]
+  },
+  "follow_up": string,            // valfri kort fråga efter svaret
+  "coverage": number              // 0..1
 }
-
-Skriv ALLTID dessa fält. ${styleDirective}
 `.trim();
 
     const prevBlock = prev && (prev.question || prev.assistant)
       ? `
 Föregående tur (för uppföljningar):
 - Tidigare fråga: ${prev.question || "(saknas)"}
-- Ditt tidigare svar (JSON): ${JSON.stringify(prev.assistant || {}, null, 2)}
-Om användaren nu ber om "förklara", "varför", "mer detaljer" etc. – leverera en tydlig förklaring baserat på föregående svar och manualens relevanta avsnitt.
+- Ditt tidigare kortsvar: ${prev.assistant?.spoken || "(saknas)"}
+- Ditt tidigare cards: ${JSON.stringify(prev.assistant?.cards || {}, null, 2)}
+Om användaren nu ber om "mer detaljer/förklara", använd cards.explanation och gör den ännu tydligare – men håll spoken högst 2–3 meningar.
 ` : "";
 
     const user = `
@@ -74,14 +65,14 @@ ${knowledge}
 
 ${prevBlock}
 
-Användarens inmatning:
+Nuvarande fråga/uttalande:
 "${message}"
 
 Instruktioner:
-- Matcha relevanta rubriker och fyll "matched_headings".
-- Skatta "coverage" mellan 0 och 1 (>=0.6 = god).
-- Om nödvändigt: sätt "needs_clarification": true och ge "clarifying_question" + 2–5 "clarifying_options".
-- När steg ges: håll dem korta och säkra. Fråga sen: "Vill du ha förklaringen?" via "follow_up".
+- Matcha relevanta rubriker i cards.matched_headings.
+- Sätt coverage 0..1.
+- Om kritiska parametrar saknas (t.ex. sortbyte typ, CIP/ej, format), sätt need.clarify=true och ge question + options.
+- Håll "spoken" samtalsmässig och jordnära – inga rubriker, inga listor i tal.
 `.trim();
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -92,8 +83,9 @@ Instruktioner:
       },
       body: JSON.stringify({
         model: "gpt-4o",
-        temperature: 0.25,
-        max_tokens: 1200,
+        temperature: 0.5,             // lite friare språk
+        top_p: 0.9,
+        max_tokens: 1100,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: system },
@@ -108,46 +100,28 @@ Instruktioner:
       return res.status(500).json({ error: "Chat API error", details: data });
     }
 
-    let content = data.choices?.[0]?.message?.content || "";
-    let structured;
-    try {
-      structured = JSON.parse(content);
-    } catch {
-      structured = {
-        summary: content || "Den informationen har jag tyvärr inte just nu.",
-        steps: [],
-        explanation: "",
-        pitfalls: [],
-        simple: content || "",
-        pro: content || "",
-        follow_up: "",
-        coverage: 0,
-        matched_headings: [],
-        needs_clarification: false,
-        clarifying_question: "",
-        clarifying_options: []
-      };
+    let content = data.choices?.[0]?.message?.content || "{}";
+    let r;
+    try { r = JSON.parse(content); }
+    catch { r = {}; }
+
+    // Safety defaults
+    r.spoken = r.spoken || "Jag har ett förslag, men säg gärna vad du behöver för att jag ska träffa rätt.";
+    r.cards = r.cards || { summary:"", steps:[], explanation:"", pitfalls:[], matched_headings:[] };
+    r.need = r.need || { clarify:false, question:"", options:[] };
+    if (typeof r.coverage !== "number") r.coverage = 0;
+
+    // Gatekeeping vid låg kunskapstäckning
+    if (r.coverage < 0.6) {
+      r.spoken = "Här saknas tydlig täckning i manualen. Ska vi ta säkra generella steg eller vill du att jag flaggar att manualen behöver uppdateras?";
+      r.cards.summary = "Otillräcklig täckning i manualen för exakt svar.";
+      r.cards.steps = [];
+      r.cards.explanation = "Följ generella säkra rutiner eller kontakta ansvarig. Förslag: uppdatera manualen.";
+      r.need = { clarify:false, question:"", options:[] };
+      r.follow_up = "Vill du att jag noterar ett uppdateringsbehov i manualen?";
     }
 
-    // Hård gate vid låg coverage
-    if (typeof structured.coverage !== 'number' || structured.coverage < 0.6) {
-      structured = {
-        summary: "Den informationen finns inte tillräckligt tydligt i manualen.",
-        steps: [],
-        explanation: "För säkerhets skull: följ generella säkra steg eller kontakta ansvarig. Vi bör uppdatera manualen.",
-        pitfalls: [],
-        simple: "Saknar täckning i manualen.",
-        pro: "Saknar täckning i manualen.",
-        follow_up: "Vill du att jag noterar att manualen behöver uppdateras för just detta?",
-        coverage: 0,
-        matched_headings: structured.matched_headings || [],
-        needs_clarification: false,
-        clarifying_question: "",
-        clarifying_options: []
-      };
-    }
-
-    return res.status(200).json({ reply: structured });
+    return res.status(200).json({ reply: r });
   } catch (err) {
     console.error("chat.js internal error:", err);
     return res.status(500).json({ error: "Serverfel i chat.js", details: err.message || String(err) });
