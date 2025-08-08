@@ -6,24 +6,31 @@
   <title>Coach Assistant</title>
   <link rel="icon" href="data:,">
   <style>
-    :root { --bg:#111; --fg:#fff; --acc:#00aaff; --mut:#bbb; }
+    :root { --bg:#0b0b0f; --fg:#fff; --acc:#00aaff; --mut:#b9c0c7; }
     body { font-family: system-ui, sans-serif; padding: 2rem; background: var(--bg); color: var(--fg); }
     .row { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
-    button { padding:.9rem 1.2rem; font-size:1rem; cursor:pointer; border:none; border-radius:10px; background:var(--acc); color:#fff; }
-    #output { margin-top: 1rem; font-size: 1.05rem; }
-    .status { font-size:.95rem; color:#ddd }
-    .pill { background:#1a1a1a; border:1px solid #333; padding:.7rem .9rem; border-radius:10px; margin-top:.6rem }
+    button { padding:.9rem 1.2rem; font-size:1rem; cursor:pointer; border:none; border-radius:12px; background:var(--acc); color:#fff; }
+    #output { margin-top: 1rem; font-size:1.05rem; }
+    .status { font-size:.95rem; color:#cfd6dd }
+    .pill { background:#12141a; border:1px solid #232733; padding:.75rem .9rem; border-radius:12px; margin-top:.6rem }
     .dot { width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:.5rem; vertical-align:middle }
-    .listen { background:#22c55e } .think { background:#facc15 } .speak { background:#60a5fa } .idle { background:#6b7280 }
+    .listen { background:#22c55e } .think{ background:#facc15 } .speak{ background:#60a5fa } .idle{ background:#6b7280 }
+    #vizWrap { margin-top:1rem; background:#0f1220; border:1px solid #20263a; border-radius:16px; padding:.5rem; }
+    canvas { width:100%; height:140px; display:block; border-radius:12px; background:linear-gradient(180deg,#0f1220,#0b0c14); }
+    .src { font-size:.85rem; color:#9aa3ad; margin-top:.3rem }
   </style>
 </head>
 <body>
   <h1>Coach Assistant</h1>
-  <p class="status"><span class="dot idle"></span><span id="recStatus">Redo – tryck start, prata normalt för att avbryta svar.</span></p>
+  <p class="status"><span class="dot idle"></span><span id="recStatus">Redo – tryck start. Presentera dig: “Hej, det är Kevin” för personlig stil.</span></p>
 
   <div class="row">
     <button id="startBtn">▶️ Starta röstloop</button>
     <button id="stopBtn" style="background:#ef4444;display:none">⏹️ Stoppa</button>
+  </div>
+
+  <div id="vizWrap">
+    <canvas id="viz" width="800" height="140"></canvas>
   </div>
 
   <div id="output"></div>
@@ -33,38 +40,37 @@
     const stopBtn  = document.getElementById('stopBtn');
     const output   = document.getElementById('output');
     const recStatus= document.getElementById('recStatus');
+    const canvas   = document.getElementById('viz');
+    const ctx      = canvas.getContext('2d');
 
     // -------- STATE --------
-    // IDLE → LISTENING → THINKING → SPEAKING → LISTENING ...
-    let state = 'IDLE';
-    let running = false;
+    let state = 'IDLE', running = false;
+
+    // Profil (aktiveras med “Hej, det är Kevin” / “Jag heter Kevin”)
+    let profileName = localStorage.getItem('coach_profile') || null;
 
     // Mic / analyser
     let micStream = null, mediaRecorder = null, chunks = [];
     let analyser = null, vadData = null, audioCtxVAD = null;
 
-    // Level monitor (kör kontinuerligt under sessionen)
-    let levelMonitor = null;
-
     // TTS
-    let ttsCtx = null, ttsSource = null;
+    let ttsCtx = null, ttsSource = null, ttsAnalyser = null;
 
-    // Trösklar (tuning för naturlig barge-in)
-    const SILENCE_THRESHOLD = 12;   // tystnadsnivå (0–255)
-    const SILENCE_HOLD_MS   = 900;  // hur länge tyst innan vi skickar
+    // Trösklar (naturlig barge-in)
+    const SILENCE_THRESHOLD = 12;
+    const SILENCE_HOLD_MS   = 900;
     const MAX_RECORD_MS     = 12000;
 
-    // Barge-in: adaptiv mot TTS-läckage
-    let speakBaseline = 0;          // EMA på “läcknivå”
-    const BARGE_MARGIN      = 6;    // så mycket över baseline räcker
-    const BARGE_MIN_LEVEL   = 18;   // kräver minst den här nivån (undviker brus)
-    const BARGE_HOLD_MS     = 250;  // hur länge du behöver prata för att bryta
+    let speakBaseline = 0;      // EMA av läcknivå
+    const BARGE_MARGIN    = 6;  // dB-ish över baseline
+    const BARGE_MIN_LEVEL = 16; // minsta nivå för att tolka som tal
+    const BARGE_HOLD_MS   = 250;
     let bargeHold = 0;
 
     function setStatus(mode, text) {
       const dotClass = mode === 'LISTENING' ? 'listen' : mode === 'THINKING' ? 'think' : mode === 'SPEAKING' ? 'speak' : 'idle';
       recStatus.previousElementSibling.className = `dot ${dotClass}`;
-      recStatus.textContent = text;
+      recStatus.textContent = text + (profileName ? `  • Profil: ${profileName}` : '');
     }
 
     // -------- Utils --------
@@ -75,10 +81,103 @@
       return Math.min(255, Math.max(0, Math.round(rms * 6)));
     }
 
+    // Enkel namndetektion
+    function trySetProfileFrom(text) {
+      const t = (text || '').toLowerCase();
+      const m1 = t.match(/\b(det är|de e|det e|jag heter|mitt namn är)\s+([a-zåäö\- ]{2,})/i);
+      if (m1) {
+        const name = m1[2].trim().split(/\s+/)[0];
+        if (name) {
+          profileName = name.charAt(0).toUpperCase() + name.slice(1);
+          localStorage.setItem('coach_profile', profileName);
+          output.insertAdjacentHTML('beforeend', `<div class="pill">Profil aktiverad: <strong>${profileName}</strong></div>`);
+          return true;
+        }
+      }
+      // rensa profil
+      if (/\b(glöm min profil|ta bort profil)\b/i.test(t)) {
+        profileName = null;
+        localStorage.removeItem('coach_profile');
+        output.insertAdjacentHTML('beforeend', `<div class="pill">Profil rensad – neutral stil.</div>`);
+        return true;
+      }
+      return false;
+    }
+
+    // -------- Visualizer --------
+    let t = 0;
+    function drawViz(levelListen=0, levelSpeak=0) {
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0,0,w,h);
+
+      // Bakgrundsgradient
+      const g = ctx.createLinearGradient(0,0,0,h);
+      g.addColorStop(0,'#0e1222');
+      g.addColorStop(1,'#0a0d18');
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,w,h);
+
+      // Wave + blob puls
+      const base = state === 'SPEAKING' ? levelSpeak : levelListen;
+      const amp = Math.min(1, base/50); // 0..~1
+      t += 0.015 + amp*0.02;
+
+      // Blob
+      const cx = w*0.5, cy = h*0.56;
+      const radius = 26 + amp*18;
+      ctx.beginPath();
+      for (let i=0;i<64;i++){
+        const ang = (i/64)*Math.PI*2;
+        const r = radius + Math.sin(ang*3 + t*3)*4*amp + Math.cos(ang*2.2 + t*2)*3*amp;
+        const x = cx + Math.cos(ang)*r;
+        const y = cy + Math.sin(ang)*r;
+        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      }
+      ctx.closePath();
+      const blobGrad = ctx.createRadialGradient(cx,cy, radius*0.3, cx,cy, radius*1.1);
+      blobGrad.addColorStop(0, state==='SPEAKING' ? '#63b3ff' : '#3fe08a');
+      blobGrad.addColorStop(1, '#0b1022');
+      ctx.fillStyle = blobGrad;
+      ctx.fill();
+
+      // Sine-wave
+      ctx.beginPath();
+      const mid = h*0.78;
+      const A = 10 + amp*22;
+      const freq = 0.018 + amp*0.01;
+      for (let x=0;x<w;x++){
+        const y = mid + Math.sin(x*freq + t*4)*A*Math.cos(x*0.003 + t);
+        if (x===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      }
+      ctx.strokeStyle = state==='SPEAKING' ? 'rgba(99,179,255,0.9)' : 'rgba(63,224,138,0.9)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    function startVizLoop() {
+      function loop() {
+        // Hämta nivåer
+        let lvlListen = 0, lvlSpeak = 0;
+        if (analyser && vadData) {
+          analyser.getByteTimeDomainData(vadData);
+          lvlListen = rmsLevel(vadData);
+        }
+        if (ttsAnalyser) {
+          const arr = new Uint8Array(ttsAnalyser.fftSize);
+          ttsAnalyser.getByteTimeDomainData(arr);
+          lvlSpeak = rmsLevel(arr);
+        }
+        drawViz(lvlListen, lvlSpeak);
+        requestAnimationFrame(loop);
+      }
+      loop();
+    }
+
     // -------- TTS --------
     function stopTTS() {
       try { ttsSource && ttsSource.stop(); } catch {}
       ttsSource = null;
+      ttsAnalyser = null;
       if (ttsCtx) { try { ttsCtx.close(); } catch {} }
       ttsCtx = null;
     }
@@ -86,7 +185,7 @@
     async function speak(text) {
       stopTTS();
       state = 'SPEAKING';
-      setStatus(state, 'Svarar… (prata normalt för att avbryta)');
+      setStatus(state, 'Svarar… (prata för att avbryta)');
 
       try {
         const res = await fetch('/api/tts', {
@@ -101,18 +200,21 @@
 
         ttsCtx = new (window.AudioContext || window.webkitAudioContext)();
         const gainNode = ttsCtx.createGain();
-        gainNode.gain.value = 1.6; // lite lägre än 2.0 för mindre läck
+        gainNode.gain.value = 1.5; // lite lägre för mindre läck
 
         ttsSource = ttsCtx.createBufferSource();
         const audioBuffer = await ttsCtx.decodeAudioData(arrayBuffer);
         ttsSource.buffer = audioBuffer;
-        ttsSource.connect(gainNode).connect(ttsCtx.destination);
+
+        ttsAnalyser = ttsCtx.createAnalyser();
+        ttsAnalyser.fftSize = 1024;
+
+        ttsSource.connect(gainNode).connect(ttsAnalyser).connect(ttsCtx.destination);
         ttsSource.onended = () => { if (running) startListening(); };
         ttsSource.start(0);
 
-        // init baseline för barge-in
-        speakBaseline = 0;
-        bargeHold = 0;
+        // nollställ barge
+        speakBaseline = 0; bargeHold = 0;
       } catch (err) {
         console.error('TTS-fel:', err);
         output.insertAdjacentHTML('beforeend', "<div class='pill'>Kunde inte spela upp ljud.</div>");
@@ -124,21 +226,58 @@
     async function askAssistant(text) {
       state = 'THINKING';
       setStatus(state, 'Bearbetar…');
-      output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
+      output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text} ${profileName ? `(profil: ${profileName})` : ''}</div>`);
 
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text })
+          body: JSON.stringify({ message: text, profile: profileName || null })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data?.error || 'Chat-fel');
 
-        const answer = (typeof data.reply === 'string') ? data.reply
-                      : data.reply?.reply || 'Jag kunde inte formulera ett svar.';
-        output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Svar:</strong><br>${answer}</div>`);
-        await speak(answer);
+        // Försök tolka strukturerat
+        let r = data.reply;
+        if (typeof r === 'string') { try { r = JSON.parse(r); } catch {} }
+
+        let toSpeak = '';
+        let srcNote = '';
+        if (r && typeof r === 'object') {
+          // Kevin-stil: superkort förklaring + åtgärd
+          if (profileName && profileName.toLowerCase() === 'kevin') {
+            const short = r.simple || r.summary || '';
+            const action = Array.isArray(r.steps) && r.steps[0] ? `Åtgärd: ${r.steps[0]}` : '';
+            toSpeak = [short, action].filter(Boolean).join('. ');
+          } else {
+            // neutral: sammanhängande svar
+            toSpeak = r.summary || '';
+            if (Array.isArray(r.steps) && r.steps.length) {
+              toSpeak += (toSpeak ? ' ' : '') + 'Steg: ' + r.steps.slice(0,4).join(', ') + '.';
+            }
+            if (r.explanation) toSpeak += ' ' + r.explanation;
+          }
+          if (Array.isArray(r.matched_headings) && r.matched_headings.length) {
+            srcNote = `Hämtat från: ${r.matched_headings.join(', ')}`;
+          }
+          // Visa snyggt
+          const html = `
+            <div class="pill">
+              <div><strong>Sammanfattning:</strong> ${r.summary || '—'}</div>
+              ${Array.isArray(r.steps)&&r.steps.length ? `<div><strong>Steg:</strong><br>- ${r.steps.join('<br>- ')}</div>`:''}
+              ${r.explanation ? `<div><strong>Förklaring:</strong> ${r.explanation}</div>`:''}
+              ${Array.isArray(r.pitfalls)&&r.pitfalls.length ? `<div><strong>Fallgropar:</strong><br>- ${r.pitfalls.join('<br>- ')}</div>`:''}
+              ${r.follow_up ? `<div><em>${r.follow_up}</em></div>`:''}
+              ${srcNote ? `<div class="src">${srcNote}</div>`:''}
+            </div>`;
+          output.insertAdjacentHTML('beforeend', html);
+        } else {
+          // Fallback: visa text
+          toSpeak = typeof data.reply === 'string' ? data.reply : 'Jag kunde inte formulera ett svar.';
+          output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Svar:</strong><br>${toSpeak}</div>`);
+        }
+
+        await speak(toSpeak || 'Oklart svar.');
       } catch (err) {
         console.error('Chat-fel:', err);
         output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI.</div>`);
@@ -156,39 +295,10 @@
       return (data.text || '').trim();
     }
 
-    // -------- Level monitor (kör hela sessionen) --------
-    function startLevelMonitor() {
-      if (levelMonitor) return;
-      levelMonitor = setInterval(() => {
-        if (!analyser || !vadData) return;
-        analyser.getByteTimeDomainData(vadData);
-        const level = rmsLevel(vadData);
-
-        if (state === 'SPEAKING') {
-          // EMA för baseline (läcknivå från högtalare)
-          speakBaseline = speakBaseline ? (0.85 * speakBaseline + 0.15 * level) : level;
-          const threshold = Math.max(BARGE_MIN_LEVEL, speakBaseline + BARGE_MARGIN);
-
-          if (level > threshold) {
-            bargeHold += 100;
-            if (bargeHold >= BARGE_HOLD_MS) {
-              // naturlig barge-in
-              stopTTS();
-              startListening();
-              bargeHold = 0;
-            }
-          } else {
-            bargeHold = 0;
-          }
-        }
-      }, 100);
-    }
-    function stopLevelMonitor() { if (levelMonitor) { clearInterval(levelMonitor); levelMonitor = null; } }
-
     // -------- Listening --------
     async function startListening() {
       if (!running) return;
-      stopTTS(); // säkerställ tyst
+      stopTTS();
       state = 'LISTENING';
       setStatus(state, 'Lyssnar… (bli tyst för att skicka)');
 
@@ -203,9 +313,16 @@
         if (!running) return;
         try {
           const text = await transcribe(blob);
-          if (text) await askAssistant(text);
-          else {
-            output.insertAdjacentHTML('beforeend', "<div class='pill'>Hörde inget tydligt. Prova igen.</div>");
+
+          // Försök sätta/ta bort profil från tal
+          if (!trySetProfileFrom(text)) {
+            if (text) await askAssistant(text);
+            else {
+              output.insertAdjacentHTML('beforeend', "<div class='pill'>Hörde inget tydligt. Prova igen.</div>");
+              if (running) startListening();
+            }
+          } else {
+            // Profil ändrad – gå direkt till lyssna igen
             if (running) startListening();
           }
         } catch (err) {
@@ -216,7 +333,6 @@
       };
       mediaRecorder.start();
 
-      // enkel VAD i lyssningsläge – auto-stop på tystnad/timeout
       const vadListen = setInterval(() => {
         analyser.getByteTimeDomainData(vadData);
         const level = rmsLevel(vadData);
@@ -229,7 +345,7 @@
       }, 100);
     }
 
-    // -------- Start/Stop loop --------
+    // -------- Start/Stop --------
     async function startLoop() {
       if (running) return;
       running = true;
@@ -238,11 +354,7 @@
 
       try {
         micStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: false
-          }
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false }
         });
       } catch (e) {
         output.insertAdjacentHTML('beforeend', "<div class='pill'>Mikrofon kunde inte startas (behörighet?).</div>");
@@ -259,7 +371,9 @@
       vadData = new Uint8Array(analyser.fftSize);
       src.connect(analyser);
 
-      startLevelMonitor(); // alltid aktiv under sessionen
+      // start visualizer-loop
+      startVizLoop();
+
       startListening();
     }
 
@@ -270,9 +384,9 @@
       startBtn.style.display = 'inline-block';
       stopBtn.style.display  = 'none';
 
-      stopLevelMonitor();
       stopTTS();
       try { mediaRecorder && mediaRecorder.state !== 'inactive' && mediaRecorder.stop(); } catch {}
+
       try { analyser && analyser.disconnect(); } catch {}
       try { audioCtxVAD && audioCtxVAD.close(); } catch {}
       analyser = null; audioCtxVAD = null; vadData = null;
