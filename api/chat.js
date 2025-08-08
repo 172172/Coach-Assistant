@@ -18,36 +18,54 @@ export default async function handler(req, res) {
   try {
     if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
 
-    const { message = "" } = req.body || {};
+    const { message = "", profile = null } = req.body || {};
     const knowledge = await getKnowledge();
 
+    const persona = (profile && typeof profile === 'string') ? profile.trim() : null;
+    const isKevin = persona && persona.toLowerCase() === 'kevin';
+
+    const styleDirective = isKevin
+      ? `Använd "Kevin-stil": extremt kort och enkel svenska, fokusera på 1) mycket kort förklaring och 2) en tydlig åtgärd.`
+      : `Neutral mentor-stil: lugn, tydlig och pedagogisk; anpassa djupet efter frågan.`;
+
     const system = `
-Du är "Coach Assistant" – en mentor på en produktionslinje (t.ex. Linje 65).
-Ton: lugn, tydlig, pedagogisk; som en trygg kollega (lite Jarvis-finess), aldrig stressad.
+Du är "Coach Assistant" – mentor på en produktionslinje (t.ex. Linje 65). Ton: trygg, lugn, tydlig.
+Du får föra lätt konversation (hälsa/mående), men tekniska råd måste vara baserade på dokumentationen.
 
 HÅRDA REGLER:
-- Ge endast tekniska/operativa råd baserat på dokumentationen nedan.
-- Om information saknas i dokumentationen: säg klart och tydligt att du saknar info och föreslå att lägga till det i dokumentet eller rådfråga ansvarig – gissa inte.
-- Det är OK att föra lätt konversation om mående, arbetsdag och generella artigheter – men ge ändå inte tekniska råd utan täckning.
+- Ge endast tekniska/operativa råd som stöds av dokumentationen ("Kunskap") nedan.
+- Om coverage är låg (mindre än 0.6) eller du inte hittar relevanta avsnitt: returnera ett svar som säger att information saknas och föreslå säkra generella steg eller att uppdatera manualen. Gissa inte.
+- Svara i STRIKT JSON med fälten:
+  {
+    "summary": string,
+    "steps": string[],
+    "explanation": string,
+    "pitfalls": string[],
+    "simple": string,
+    "pro": string,
+    "follow_up": string,
+    "coverage": number,                // 0..1, hur väl kunskapen täcker svaret
+    "matched_headings": string[]       // t.ex. ["Avsnitt: Sortbyte Tapp"]
+  }
 
-SVARSFORMAT (sammanhängande stycken, inte mening-för-mening):
-1) Kort sammanfattning (1–2 meningar).
-2) Steg-för-steg (3–8 konkreta steg) – endast om dokumentationen täcker det.
-3) Förklaring/varför (enkelt språk, 2–4 meningar).
-4) Vanliga fallgropar & tips (kort punktlista om relevant).
-5) EN uppföljningsfråga längst ner för att guida vidare.
+Skriv alltid alla fält. ${styleDirective}
 `.trim();
 
     const user = `
-Arbetsplatsens dokumentation (källan du får luta dig mot):
+Kunskap (manual/arbetsplatsdokumentation):
 """
 ${knowledge}
 """
 
-Användarens fråga eller påstående:
+Användarens inmatning:
 "${message}"
 
-Kom ihåg: Om dokumentet inte har svaret – säg att info saknas och föreslå nästa säkra steg. Småprat om mående är okej.
+Instruktioner:
+- Matcha relevanta rubriker i kunskapen och fyll "matched_headings".
+- Skatta "coverage" mellan 0 och 1 (>=0.6 betyder god täckning).
+- "simple" ska vara den enklaste möjliga förklaringen (passar nybörjare).
+- "pro" ska vara mer teknisk och kompakt (för erfarna).
+- Om "Kevin-stil" används: prioritera "simple" + konkret första åtgärd.
 `.trim();
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -57,9 +75,9 @@ Kom ihåg: Om dokumentet inte har svaret – säg att info saknas och föreslå 
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "gpt-4o",       // behåller din modell
-        temperature: 0.25,     // låg för att minska gissningar
-        max_tokens: 900,
+        model: "gpt-4o",
+        temperature: 0.25,
+        max_tokens: 950,
         messages: [
           { role: "system", content: system },
           { role: "user", content: user }
@@ -73,8 +91,37 @@ Kom ihåg: Om dokumentet inte har svaret – säg att info saknas och föreslå 
       return res.status(500).json({ error: "Chat API error", details: data });
     }
 
-    const reply = data.choices?.[0]?.message?.content || "Den informationen har jag tyvärr inte just nu.";
-    return res.status(200).json({ reply });
+    // Försäkra strukturerat JSON som svar
+    let content = data.choices?.[0]?.message?.content || "";
+    let structured;
+    try {
+      structured = JSON.parse(content);
+    } catch {
+      structured = {
+        summary: content || "Den informationen har jag tyvärr inte just nu.",
+        steps: [],
+        explanation: "",
+        pitfalls: [],
+        simple: content || "",
+        pro: content || "",
+        follow_up: "",
+        coverage: 0,
+        matched_headings: []
+      };
+    }
+
+    // Gatekeeping: om coverage < 0.6 och det är en teknisk fråga → varna
+    if (structured.coverage < 0.6 && (structured.steps?.length || structured.explanation)) {
+      structured.summary = "Den informationen finns inte tillräckligt tydligt i manualen.";
+      structured.steps = [];
+      structured.explanation = "För att vara säker, följ generella säkra rutiner eller kontakta ansvarig. Vi bör uppdatera manualen med detta.";
+      structured.pitfalls = [];
+      structured.simple = structured.summary;
+      structured.pro = structured.summary;
+      structured.follow_up = "Vill du att jag noterar att manualen behöver uppdateras för just detta?";
+    }
+
+    return res.status(200).json({ reply: structured });
   } catch (err) {
     console.error("chat.js internal error:", err);
     return res.status(500).json({ error: "Serverfel i chat.js", details: err.message || String(err) });
