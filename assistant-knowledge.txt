@@ -3,7 +3,6 @@ const KNOWLEDGE_URL = "https://raw.githubusercontent.com/172172/Coach-Assistant/
 const CACHE_MS = 5 * 60 * 1000;
 
 let knowledgeCache = { text: null, fetchedAt: 0 };
-
 async function getKnowledge() {
   const now = Date.now();
   if (knowledgeCache.text && now - knowledgeCache.fetchedAt < CACHE_MS) return knowledgeCache.text;
@@ -16,7 +15,8 @@ async function getKnowledge() {
 
 // ---------- helpers ----------
 function normalize(s = "") {
-  return s.toLowerCase()
+  return (s || "")
+    .toLowerCase()
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/ö/g,"o").replace(/ä/g,"a").replace(/å/g,"a")
     .replace(/\s+/g," ").trim();
@@ -35,28 +35,32 @@ function extractTypePair(msg = "") {
   if (m) return { from: m[1], to: m[2], hasPair: true };
   return { from: null, to: null, hasPair: false };
 }
-// Plocka ut rubriker ur manualen (endast själva rubrikraden, inte innehåll)
 function extractHeadings(knowledgeText) {
-  const lines = knowledgeText.split(/\r?\n/);
+  const lines = (knowledgeText || "").split(/\r?\n/);
   const heads = [];
   for (const ln of lines) {
     if (/^\s*#{2,}\s+/.test(ln) || /^\s*[-*]\s*Avsnitt:/i.test(ln) || /^\s*Avsnitt:/i.test(ln)) {
-      const h = ln.replace(/^\s*[-*]\s*/,'').trim();
-      if (h) heads.push(h);
+      heads.push(ln.replace(/^\s*[-*]\s*/,'').trim());
     }
   }
-  // fallback: även rader med "Avsnitt:" mitt i
   if (heads.length < 3) {
-    for (const ln of lines) {
-      if (/Avsnitt\s*:/.test(ln)) heads.push(ln.trim());
-    }
+    for (const ln of lines) if (/Avsnitt\s*:/.test(ln)) heads.push(ln.trim());
   }
-  // dedupe + begränsa
   return [...new Set(heads)].slice(0, 200);
 }
 function relevantHeadings(headings) {
   const kw = /(sort|byte|tapp|tappa|fyll|cip|skolj|flush|omkoppl|vaxl|rengor|sanit)/i;
   return headings.filter(h => kw.test(h)).slice(0, 12);
+}
+
+// ---- sort-intent from previous turn ----
+function prevImpliesSortbyte(prev) {
+  if (!prev) return false;
+  const q = normalize(prev.question || "");
+  const aSpoken = normalize(prev.assistant?.spoken || "");
+  const aQuestion = normalize(prev.assistant?.need?.question || "");
+  const askedPair = /fran.*till/.test(aSpoken) || /fran.*till/.test(aQuestion) || /produkt.*fran.*till/.test(aQuestion);
+  return askedPair || isSortbyteQuery(q);
 }
 
 export default async function handler(req, res) {
@@ -66,38 +70,39 @@ export default async function handler(req, res) {
     const { message = "", prev = null } = req.body || {};
     const knowledge = await getKnowledge();
 
-    const sortIntent = isSortbyteQuery(message);
-    const typeHint = hasTypeHint(message);
+    // intent + context
+    const fromPrevSort = prevImpliesSortbyte(prev);
+    const sortIntent = isSortbyteQuery(message) || fromPrevSort;
+    const typeHint = hasTypeHint(message) || hasTypeHint(prev?.question || "");
     const pair = extractTypePair(message);
+
     const allHeadings = extractHeadings(knowledge);
     const relHeadings = relevantHeadings(allHeadings);
 
     // --- SYSTEM ---
     const system = `
 Du är "Coach Assistant" – mentor på produktionslinjen (t.ex. Linje 65).
-Ton: varm, lugn, naturlig, pedagogisk. Tala som till en kollega.
+Ton: varm, lugn, naturlig, pedagogisk.
 
 ABSOLUT:
 - Råd måste stödas av "Kunskap" (manual).
-- Svara i EXAKT JSON enligt schemat. Ingen text utanför JSON.
-- Hårt stopp endast vid mycket låg täckning (<0.25) och inga relevanta rubriker.
+- Svara i EXAKT JSON (schemat nedan). Ingen text utanför JSON.
+- Hårt stopp endast vid mycket låg täckning (<0.15) OCH inga relevanta rubriker OCH nästan inga steg.
 
-DIALOG:
-- Vid vag fråga: ställ EN tydlig följdfråga (öppen). Inga påhittade alternativ om manualen inte listar dem.
-- "spoken" ska låta mänskligt och erbjuda stegvis guidning (“säg till så tar vi nästa del”).
+KLARIFIERING:
+- Om frågan är för vag: ställ EN öppen följdfråga (“Vilken produkt går du från – och till?”). Inga påhittade alternativ.
 
 SORTBYTE:
-- Om typ saknas: be med öppen fråga: "Vilken produkt går du från – och till?"
-- När typ finns: ge lugna, numrerade steg (förberedelser, säkringar, switch/flush/CIP om manualen nämner det, kontroller, återstart).
+- När typ finns: ge lugna, NUMRERADE steg (förberedelser, säkringar, switch/flush/CIP om manualen nämner det, kontroller, återstart).
   * Sikta på 8–20 steg om manualen tillåter.
   * Lista exakta rubrikträffar i "matched_headings".
-  * Inga egna siffror/parametrar: använd generella formuleringar om manualen saknar värden.
+  * Inga egna siffror – använd generella formuleringar om manualen saknar värden.
 
-COVERAGE-KALIBRERING (sätt rimlig siffra – inte för låg när rubriker matchar):
+COVERAGE (sätt rimligt):
 - ≥0.75: flera starka rubriker direkt relevanta.
 - 0.6–0.75: delvis stöd; generella formuleringar OK.
-- 0.4–0.6: viss relevans; leverera steg men uppmana att verifiera mot rubrikerna.
-- <0.25: för svagt → ingen detaljerad vägledning.
+- 0.4–0.6: viss relevans; leverera steg men be att verifiera mot rubrikerna.
+- <0.15: för svagt → ingen detaljerad vägledning.
 
 JSON-SCHEMA:
 {
@@ -125,22 +130,21 @@ Kunskap (manual – fulltext):
 ${knowledge}
 """
 
-Rubrikindex (för referens – använd dessa strängar för "matched_headings" när relevant):
+Rubrikindex:
 - ${allHeadings.join("\n- ")}
 
-Relevanta rubriker (extra fokus):
+Relevanta rubriker (fokus):
 - ${relHeadings.join("\n- ")}
 
 Användarens inmatning:
 "${message}"
 
-Typ-hint:
-${pair.hasPair ? `${pair.from} → ${pair.to}` : (typeHint ? "typ nämnd" : "saknas")}
+Tidigare tur:
+${prev ? JSON.stringify(prev) : "null"}
 
-Instruktioner:
-- Om sortbyte men typ saknas: returnera need.clarify=true med öppen fråga (inga options).
-- Om typ finns: ge lugna, numrerade steg enligt manualen. Var utförlig och lista korrekta matched_headings från rubrikindex.
-- Fyll ALLA fält i JSON-schemat.
+Krav för svar:
+- Om detta är en uppföljning på sortbyte och typ ännu saknas → need.clarify=true med ÖPPEN fråga (inga options).
+- Om typ finns → ge lugna, numrerade steg enligt manualen. Lista matched_headings från rubrikindex. Fyll ALLA fält.
 `.trim();
 
     // --- OpenAI ---
@@ -189,38 +193,39 @@ Instruktioner:
       };
     }
 
-    // ---- PHASE 1: Klarifiering → returnera direkt (ingen gate) ----
-    if (sortIntent && !typeHint && !pair.hasPair) {
+    // ---- PHASE 1: Klarifiering → returnera direkt (INGEN gate i detta läge) ----
+    const awaitingPair = sortIntent && !pair.hasPair && !typeHint;
+    if (awaitingPair) {
       if (!out?.need?.clarify) {
         out.need = { clarify: true, question: "Vilken produkt går du från – och till? (ex: läsk till läsk)", options: [] };
         out.spoken = "För att guida rätt behöver jag veta vilken produkt du byter från – och till. Säg det så tar vi det steg för steg.";
       } else {
         out.spoken = out.need.question || "Vilken produkt går du från – och till?";
-        if (Array.isArray(out.need.options) && out.need.options.length) out.need.options = []; // inga påhittade val
+        if (Array.isArray(out.need.options) && out.need.options.length) out.need.options = [];
       }
       return res.status(200).json({ reply: out });
     }
 
     // ---- PHASE 2: Typ finns → coachning, mjuk gate ----
-    const steps = Array.isArray(out?.cards?.steps) ? out.cards.steps : [];
+    const stepsArr = Array.isArray(out?.cards?.steps) ? out.cards.steps : [];
     let heads = Array.isArray(out?.cards?.matched_headings) ? out.cards.matched_headings : [];
     let cov = Number(out?.cards?.coverage ?? out?.coverage ?? 0) || 0;
 
-    // Om modellen missade rubriker: fyll på med våra relevanta
+    // Om modellen missade rubriker: fyll på med våra relevanta för att undvika falskt “saknar täckning”
     if (heads.length === 0 && relHeadings.length > 0) {
       heads = relHeadings.slice(0, 6);
       if (out.cards) out.cards.matched_headings = heads;
     }
 
-    // Bump vid sortbyte + substans
+    // Bump när vi vet att detta är sortbyte och något substans finns
     if (sortIntent) {
-      if (steps.length >= 6)  cov = Math.max(cov, 0.58);
-      if (steps.length >= 10) cov = Math.max(cov, 0.65);
-      if (heads.length >= 1)  cov = Math.max(cov, 0.6);
+      if (stepsArr.length >= 6)  cov = Math.max(cov, 0.58);
+      if (stepsArr.length >= 10) cov = Math.max(cov, 0.68);
+      if (heads.length >= 1)     cov = Math.max(cov, 0.62);
     }
 
-    // HÅRT STOPP: bara om det verkligen saknas
-    if (cov < 0.15 && heads.length === 0 && steps.length < 4) {
+    // HÅRT STOPP endast om ALLT saknas
+    if (cov < 0.15 && heads.length === 0 && stepsArr.length < 4) {
       out.cards = out.cards || {};
       out.cards.summary = "Den informationen finns inte tillräckligt tydligt i manualen.";
       out.cards.steps = [];
@@ -237,7 +242,7 @@ Instruktioner:
       return res.status(200).json({ reply: out });
     }
 
-    // Mjuk varning: leverera steg, men be om verifiering (om <0.6)
+    // Mjuk varning när coverage är halvlåg → leverera ändå steg
     if (cov < 0.6) {
       if (out.cards) {
         out.cards.coverage = cov;
