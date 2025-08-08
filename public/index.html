@@ -94,6 +94,28 @@
     // Vanliga tystnadshallisar → svartlista
     const HALLUCINATION_PATTERNS = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
 
+    // --- Pep interjections for spoken replies ---
+    const PEP_ENABLED = true;
+    const PEP_PREFIX_ANSWER = [
+      "Absolut, chefen! Det löser vi.",
+      "Självklart — det fixar vi.",
+      "Yes, det tar vi direkt.",
+      "Inga problem — så här gör du.",
+      "Grymt, vi kör."
+    ];
+    const PEP_PREFIX_CLARIFY = [
+      "Absolut — bara en snabb sak först:",
+      "Yes — för att göra det rätt:",
+      "Toppen — behöver bara veta en grej:"
+    ];
+    function pep(text, kind = "answer") {
+      if (!PEP_ENABLED || !text) return text;
+      const arr = kind === "clarify" ? PEP_PREFIX_CLARIFY : PEP_PREFIX_ANSWER;
+      const lead = arr[Math.floor(Math.random() * arr.length)];
+      const cleaned = String(text).replace(/^(\s*[–-]\s*)/,'').trim();
+      return `${lead} ${cleaned}`;
+    }
+
     function setStatus(mode, text) {
       const dotClass = mode === 'LISTENING' ? 'listen' : mode === 'THINKING' ? 'think' : mode === 'SPEAKING' ? 'speak' : 'idle';
       recStatus.previousElementSibling.className = `dot ${dotClass}`;
@@ -245,7 +267,7 @@
         let toSpeak=''; let srcNote='';
 
         if(r && typeof r==='object'){
-          // Klarifieringsläge
+          // --- Klarifieringsläge ---
           if (r.needs_clarification) {
             const opts = Array.isArray(r.clarifying_options) ? r.clarifying_options : [];
             const html = `
@@ -254,6 +276,8 @@
                 ${opts.length ? `<div class="opts">${opts.map(o => `<button class="opt" data-opt="${o}">${o}</button>`).join('')}</div>` : ''}
               </div>`;
             output.insertAdjacentHTML('beforeend', html);
+
+            // klickbara snabbval
             document.querySelectorAll('.opt').forEach(btn=>{
               btn.addEventListener('click', ()=>{
                 const val = btn.getAttribute('data-opt');
@@ -261,13 +285,19 @@
                 askAssistant(val);
               });
             });
-            toSpeak = (r.clarifying_question || 'Behöver lite mer info.') + (opts.length ? ' Alternativ: ' + opts.join(', ') + '.' : '');
+
+            toSpeak = pep(
+              (r.clarifying_question || 'Behöver lite mer info.') +
+              (opts.length ? ' Alternativ: ' + opts.join(', ') + '.' : ''),
+              'clarify'
+            );
             await speak(toSpeak);
+            // Spara kontext
             lastQ = text; lastA = r;
             return;
           }
 
-          // Vanligt svar (utan default-förklaring)
+          // --- Vanligt svar (utan default-förklaring) ---
           toSpeak = r.summary || '';
           if(Array.isArray(r.steps)&&r.steps.length){ toSpeak += (toSpeak?' ':'') + 'Steg: ' + r.steps.slice(0,4).join(', ') + '.'; }
 
@@ -285,6 +315,7 @@
           lastQ = text;
           lastA = r;
 
+          toSpeak = pep(toSpeak, 'answer');
           await speak(toSpeak || 'Oklart svar.');
           return;
         }
