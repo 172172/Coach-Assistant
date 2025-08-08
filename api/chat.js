@@ -21,39 +21,49 @@ export default async function handler(req, res) {
     const { message = "", profile = null, prev = null } = req.body || {};
     const knowledge = await getKnowledge();
 
-    // Alltid mentor/Jarvis-stil – ingen "kort Kevin-stil" längre
-    const styleDirective = `Mentor-stil (Jarvis): tydlig, pedagogisk, trygg ton. Ge sammanfattning, steg, förklaring, fallgropar och en uppföljningsfråga. Var konkret men inte torr.`
+    // Alltid mentor/Jarvis-stil
+    const styleDirective = `Mentor-stil (Jarvis): tydlig, pedagogisk och trygg. Håll dialog – fråga när info saknas.`
 
     const system = `
-Du är "Coach Assistant" – mentor på en produktionslinje (t.ex. Linje 65). Ton: trygg, lugn, tydlig.
-Du får föra lätt konversation (hälsa/mående), men tekniska råd måste vara baserade på dokumentationen.
+Du är "Coach Assistant" – mentor på en produktionslinje (t.ex. Linje 65). Ton: trygg, lugn, tydlig och hjälpsam.
+Tekniska råd måste baseras på dokumentationen ("Kunskap").
 
-HÅRDA REGLER:
-- Ge endast tekniska/operativa råd som stöds av dokumentationen ("Kunskap") nedan.
-- Om coverage är låg (mindre än 0.6) eller du inte hittar relevanta avsnitt: returnera ett svar som säger att information saknas och föreslå säkra generella steg eller att uppdatera manualen. Gissa inte.
-- Svara i STRIKT JSON med fälten:
-  {
-    "summary": string,
-    "steps": string[],
-    "explanation": string,
-    "pitfalls": string[],
-    "simple": string,
-    "pro": string,
-    "follow_up": string,
-    "coverage": number,
-    "matched_headings": string[]
-  }
+DIALOGPOLICY (VIKTIGT):
+- Om användarens fråga saknar kritiska parametrar (t.ex. vid sortbyte: dryck→dryck, storlek, burktyp, format, CIP?), be först om förtydligande.
+  * Ställ MAX 1–2 korta följdfrågor.
+  * Ge gärna enkla val som korta alternativ.
+  * När du ber om förtydligande: fyll INTE "steps" ännu.
+- Om det är en uppföljning och föregående tur innehöll din följdfråga, tolka nuvarande input som svar på den, och leverera fullständiga steg.
+- Default: ge sammanfattning + korta steg. Fråga SEN om användaren vill ha förklaring (i stället för att alltid dumpa den).
+- Gissa inte om täckningen är låg – säg att info saknas och föreslå säkra generella steg eller uppdatering av manualen.
 
-Skriv alltid alla fält. ${styleDirective}
+SVARSFORMAT (STRIKT JSON):
+{
+  "summary": string,              // kort huvudpoäng
+  "steps": string[],              // korta, görbara steg (om du har tillräcklig info)
+  "explanation": string,          // fylls men klienten frågar först om den ska läsas upp
+  "pitfalls": string[],
+  "simple": string,
+  "pro": string,
+  "follow_up": string,            // fråga att ställa efter svaret (t.ex. "Vill du ha förklaringen?")
+  "coverage": number,             // 0..1
+  "matched_headings": string[],
+
+  // Dialogtillägg:
+  "needs_clarification": boolean, // true = fråga först
+  "clarifying_question": string,  // kort, direkt fråga
+  "clarifying_options": string[]  // valfria korta knapp/val-alternativ
+}
+
+Skriv ALLTID dessa fält. ${styleDirective}
 `.trim();
 
     const prevBlock = prev && (prev.question || prev.assistant)
       ? `
-Föregående tur (kontext för uppföljning):
+Föregående tur (för uppföljningar):
 - Tidigare fråga: ${prev.question || "(saknas)"}
 - Ditt tidigare svar (JSON): ${JSON.stringify(prev.assistant || {}, null, 2)}
-
-Om den nya frågan typiskt betyder "förklara tydligare/mer detaljer/andra exempel", gör en fördjupad, tydligare version baserat på föregående svar.
+Om användaren nu ber om "förklara", "varför", "mer detaljer" etc. – leverera en tydlig förklaring baserat på föregående svar och manualens relevanta avsnitt.
 ` : "";
 
     const user = `
@@ -68,10 +78,10 @@ Användarens inmatning:
 "${message}"
 
 Instruktioner:
-- Matcha relevanta rubriker i kunskapen och fyll "matched_headings".
-- Skatta "coverage" mellan 0 och 1 (>=0.6 betyder god täckning).
-- "simple" ska vara den enklaste möjliga förklaringen (för nybörjare).
-- "pro" ska vara mer teknisk och kompakt (för erfarna).
+- Matcha relevanta rubriker och fyll "matched_headings".
+- Skatta "coverage" mellan 0 och 1 (>=0.6 = god).
+- Om nödvändigt: sätt "needs_clarification": true och ge "clarifying_question" + 2–5 "clarifying_options".
+- När steg ges: håll dem korta och säkra. Fråga sen: "Vill du ha förklaringen?" via "follow_up".
 `.trim();
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -83,8 +93,8 @@ Instruktioner:
       body: JSON.stringify({
         model: "gpt-4o",
         temperature: 0.25,
-        max_tokens: 950,
-        response_format: { type: "json_object" }, // tvingar ren JSON
+        max_tokens: 1200,
+        response_format: { type: "json_object" },
         messages: [
           { role: "system", content: system },
           { role: "user", content: user }
@@ -112,7 +122,10 @@ Instruktioner:
         pro: content || "",
         follow_up: "",
         coverage: 0,
-        matched_headings: []
+        matched_headings: [],
+        needs_clarification: false,
+        clarifying_question: "",
+        clarifying_options: []
       };
     }
 
@@ -127,7 +140,10 @@ Instruktioner:
         pro: "Saknar täckning i manualen.",
         follow_up: "Vill du att jag noterar att manualen behöver uppdateras för just detta?",
         coverage: 0,
-        matched_headings: structured.matched_headings || []
+        matched_headings: structured.matched_headings || [],
+        needs_clarification: false,
+        clarifying_question: "",
+        clarifying_options: []
       };
     }
 
