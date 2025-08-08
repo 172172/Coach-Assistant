@@ -1,10 +1,10 @@
 {
-  "name": "coach-assistant-api",
+  "name": "coach-assistant",
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
+    "formidable": "^3.8.0",
     "form-data": "^4.0.0",
-    "formidable": "^3.5.1",
     "node-fetch": "^2.6.7"
   }
 }
