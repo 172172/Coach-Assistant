@@ -9,9 +9,7 @@
     :root { --bg:#0b0b0f; --fg:#fff; --acc:#00aaff; --mut:#b9c0c7; }
     body { font-family: system-ui, sans-serif; padding: 2rem; background: var(--bg); color: var(--fg); }
     .row { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
-    button, select { padding:.9rem 1.2rem; font-size:1rem; border:none; border-radius:12px; }
-    button { cursor:pointer; background:var(--acc); color:#fff; }
-    select { background:#12141a; color:#fff; border:1px solid #232733; }
+    button { padding:.9rem 1.2rem; font-size:1rem; border:none; border-radius:12px; cursor:pointer; background:var(--acc); color:#fff; }
     #output { margin-top: 1rem; font-size:1.05rem; }
     .status { font-size:.95rem; color:#cfd6dd }
     .pill { background:#12141a; border:1px solid #232733; padding:.75rem .9rem; border-radius:12px; margin-top:.6rem }
@@ -31,12 +29,6 @@
   <div class="row">
     <button id="startBtn">▶️ Starta röstloop</button>
     <button id="stopBtn" style="background:#ef4444;display:none">⏹️ Stoppa</button>
-    <select id="toneSel" title="Röstton">
-      <option value="cheerful" selected>Pepp</option>
-      <option value="energetic">Energi ++</option>
-      <option value="neutral">Neutral</option>
-      <option value="calm">Lugn</option>
-    </select>
   </div>
 
   <div id="vizWrap"><canvas id="viz" width="800" height="140"></canvas></div>
@@ -49,12 +41,11 @@
     const recStatus= document.getElementById('recStatus');
     const canvas   = document.getElementById('viz');
     const ctx      = canvas.getContext('2d');
-    const toneSel  = document.getElementById('toneSel');
 
     // ---------- STATE ----------
     let state = 'IDLE', running = false;
 
-    // Profil via presentation (behålls – servern kör Jarvis-stil ändå)
+    // Profil via presentation (servern kör Jarvis-stil ändå)
     let profileName = localStorage.getItem('coach_profile') || null;
 
     // Mic / analyser
@@ -211,7 +202,7 @@
         const res = await fetch('/api/tts',{
           method:'POST',
           headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ text, tone: toneSel ? toneSel.value : 'cheerful' })
+          body: JSON.stringify({ text })
         });
         if(!res.ok) throw new Error('Fel vid TTS-svar');
         const blob=await res.blob(); const arrayBuffer=await blob.arrayBuffer();
@@ -254,7 +245,7 @@
         let toSpeak=''; let srcNote='';
 
         if(r && typeof r==='object'){
-          // --- Klarifieringsläge ---
+          // Klarifieringsläge
           if (r.needs_clarification) {
             const opts = Array.isArray(r.clarifying_options) ? r.clarifying_options : [];
             const html = `
@@ -263,25 +254,20 @@
                 ${opts.length ? `<div class="opts">${opts.map(o => `<button class="opt" data-opt="${o}">${o}</button>`).join('')}</div>` : ''}
               </div>`;
             output.insertAdjacentHTML('beforeend', html);
-
-            // klickbara snabbval
             document.querySelectorAll('.opt').forEach(btn=>{
               btn.addEventListener('click', ()=>{
                 const val = btn.getAttribute('data-opt');
-                // skriv även i chatten för spårbarhet
                 output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${val}</div>`);
                 askAssistant(val);
               });
             });
-
             toSpeak = (r.clarifying_question || 'Behöver lite mer info.') + (opts.length ? ' Alternativ: ' + opts.join(', ') + '.' : '');
             await speak(toSpeak);
-            // Spara kontext
             lastQ = text; lastA = r;
             return;
           }
 
-          // --- Vanligt svar (utan default-förklaring) ---
+          // Vanligt svar (utan default-förklaring)
           toSpeak = r.summary || '';
           if(Array.isArray(r.steps)&&r.steps.length){ toSpeak += (toSpeak?' ':'') + 'Steg: ' + r.steps.slice(0,4).join(', ') + '.'; }
 
