@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Coach Assistant — Debug</title>
+  <title>Coach Assistant — Debug VAD</title>
   <link rel="icon" href="data:,">
   <style>
     :root { --bg:#0b0b0f; --fg:#fff; --acc:#00aaff; --mut:#b9c0c7; }
@@ -22,26 +22,18 @@
     .opt { padding:.4rem .6rem; border-radius:10px; border:1px solid #2a3040; background:#171b27; cursor:pointer; }
     .link { color:#8ecbff; cursor:pointer; text-decoration:underline; }
     .muted { color:#9aa3ad; font-size:.9rem; }
-    #debug { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.85rem; white-space:pre-wrap; background:#0c101a; border:1px dashed #2a3040; border-radius:10px; padding:.6rem; margin-top:.8rem; color:#a7b3c2; max-height:220px; overflow:auto; }
-    .warn { color:#ffd166 }
+    #debug { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:.85rem; white-space:pre-wrap; background:#0c101a; border:1px dashed #2a3040; border-radius:10px; padding:.6rem; margin-top:.8rem; color:#a7b3c2; max-height:260px; overflow:auto; }
     .err { color:#ff6b6b }
-    select { padding:.45rem .6rem; border-radius:8px; background:#10131c; color:#e6edf5; border:1px solid #2a3040; }
   </style>
 </head>
 <body>
   <h1>Coach Assistant</h1>
-  <p class="status"><span class="dot idle"></span><span id="recStatus">Redo – tryck start. Om inget händer, kör “Testa mic (2s)” och kika på debug nedan.</span></p>
+  <p class="status"><span class="dot idle"></span><span id="recStatus">Redo – tryck start. Om inget händer: tala 1–2 s och pausa.</span></p>
 
   <div class="row">
     <button id="startBtn">▶️ Starta röstloop</button>
     <button id="stopBtn" style="background:#ef4444;display:none">⏹️ Stoppa</button>
     <button id="testBtn" style="background:#6b5bff">🎙️ Testa mic (2s)</button>
-    <span id="secureHint" class="warn" style="margin-left:.5rem;"></span>
-  </div>
-
-  <div class="row" style="margin-top:.6rem">
-    <label for="micSel">Mikrofon:</label>
-    <select id="micSel"></select>
     <span id="permState" class="muted"></span>
   </div>
 
@@ -51,27 +43,24 @@
 
   <script>
     const DEBUG_UI = true;
-    function dlog(...args){ console.log("[DBG]", ...args); if(!DEBUG_UI) return;
+    function dlog(...args){ console.log("[DBG]", ...args);
+      if(!DEBUG_UI) return;
       const el = document.getElementById('debug');
       const line = args.map(a => (typeof a==='object'? JSON.stringify(a): String(a))).join(' ');
-      el.textContent += line + "\\n";
+      el.textContent += line + "\n";
       el.scrollTop = el.scrollHeight;
     }
 
     const startBtn = document.getElementById('startBtn');
     const stopBtn  = document.getElementById('stopBtn');
     const testBtn  = document.getElementById('testBtn');
-    const micSel   = document.getElementById('micSel');
-    const permState= document.getElementById('permState');
     const output   = document.getElementById('output');
     const recStatus= document.getElementById('recStatus');
-    const secureHint = document.getElementById('secureHint');
     const canvas   = document.getElementById('viz');
     const ctx      = canvas.getContext('2d');
 
     // ---------- STATE ----------
     let state = 'IDLE', running = false;
-    let profileName = localStorage.getItem('coach_profile') || null;
 
     // Mic / analyser
     let micStream = null, mediaRecorder = null, chunks = [];
@@ -82,47 +71,33 @@
     let ttsAudio = null;
     const TTS_BASE_GAIN = 0.9, TTS_DUCK_GAIN = 0.22;
 
-    // Loop timers
+    // Loop timer
     let rafId = null;
 
-    // VAD (enkel)
-    const SILENCE_HOLD_MS   = 800;
+    // VAD params
     const MAX_RECORD_MS     = 10000;
+    const SILENCE_HOLD_MS   = 800;
 
-    // MIME fallback-order
-    const MIME_CANDIDATES = [
-      'audio/webm;codecs=opus',
-      'audio/webm',
-      'audio/mp4',
-      'audio/ogg',
-      '' // låt browsern välja
-    ];
-    let REC_MIME = '';
-    let REC_EXT  = 'webm';
+    // MIME
+    const MIME_CANDIDATES = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg',''];
+    let REC_MIME = '', REC_EXT = 'webm';
 
-    // Minigränser (väldigt snällt)
-    const MIN_SPEECH_MS  = 140;
+    // Gates (snälla) + forced accept
+    const MIN_SPEECH_MS  = 120;
     const MIN_BLOB_BYTES = 800;
+    const FORCED_ACCEPT_BYTES = 4000; // acceptera ändå om stor fil, även om talkMs missas
 
-    // hallu-kill
+    // Kill vanlig hallu
     const HALLUCINATION_PATTERNS = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
 
-    // ---------- UI helpers ----------
+    // ---------- UI ----------
     function setStatus(mode, text) {
-      const dotClass = mode === 'LISTENING' ? 'listen' : mode === 'THINKING' ? 'think' : mode === 'SPEAKING' ? 'speak' : 'idle';
-      recStatus.previousElementSibling.className = `dot ${dotClass}`;
-      recStatus.textContent = text + (profileName ? `  • Profil: ${profileName}` : '');
+      const dot = mode === 'LISTENING' ? 'listen' : mode === 'THINKING' ? 'think' : mode === 'SPEAKING' ? 'speak' : 'idle';
+      recStatus.previousElementSibling.className = `dot ${dot}`;
+      recStatus.textContent = text;
     }
 
-    function trySetProfileFrom(text) {
-      const t=(text||'').toLowerCase();
-      const m=t.match(/\b(det är|de e|det e|jag heter|mitt namn är)\s+([a-zåäö\- ]{2,})/i);
-      if (m){ const name=m[2].trim().split(/\s+/)[0]; if(name){ profileName=name.charAt(0).toUpperCase()+name.slice(1); localStorage.setItem('coach_profile',profileName); output.insertAdjacentHTML('beforeend',`<div class="pill">Profil aktiverad: <strong>${profileName}</strong></div>`); return true; } }
-      if (/\b(glöm min profil|ta bort profil)\b/i.test(t)){ profileName=null; localStorage.removeItem('coach_profile'); output.insertAdjacentHTML('beforeend',`<div class="pill">Profil rensad – neutral stil.</div>`); return true; }
-      return false;
-    }
-
-    // ---------- Visualizer ----------
+    // ---------- Viz & level ----------
     function rmsLevel(uint8PCM) {
       let sum=0; for (let i=0;i<uint8PCM.length;i++){ const v=uint8PCM[i]-128; sum+=v*v; }
       const rms=Math.sqrt(sum/uint8PCM.length);
@@ -148,7 +123,6 @@
       blobGrad.addColorStop(0, state==='SPEAKING'?'#63b3ff':'#3fe08a'); blobGrad.addColorStop(1,'#0b1022');
       ctx.fillStyle=blobGrad; ctx.fill();
     }
-
     function loop(){
       let micLevel = 0, ttsLevel = 0;
       if (analyser && micArr){ analyser.getByteTimeDomainData(micArr); micLevel = rmsLevel(micArr); }
@@ -161,7 +135,7 @@
       rafId = requestAnimationFrame(loop);
     }
 
-    // ---------- TTS (stream via /api/tts-stream) ----------
+    // ---------- TTS ----------
     function stopTTS(){
       try { if (ttsAudio) { ttsAudio.pause(); ttsAudio.src = ""; ttsAudio.load(); } } catch {}
       ttsAudio = null; ttsAnalyser = null;
@@ -182,74 +156,48 @@
         ttsAudio.onended = ()=>{ if(running) startListening(); };
         ttsAudio.onerror = (e)=>{ dlog("TTS error", e); if (running) startListening(); };
       }catch(err){
-        dlog("TTS-stream-fel", err); output.insertAdjacentHTML('beforeend',"<div class='pill'>Kunde inte spela upp ljud (stream).</div>");
+        dlog("TTS-stream-fel", err);
+        output.insertAdjacentHTML('beforeend',"<div class='pill'>Kunde inte spela upp ljud (stream).</div>");
         if(running) startListening();
       }
     }
 
     // ---------- Chat ----------
     function renderDetails(cards, followUp){
-      const srcNote = (Array.isArray(cards.matched_headings) && cards.matched_headings.length)
+      const srcNote = (Array.isArray(cards?.matched_headings) && cards.matched_headings.length)
         ? `<div class="src">Hämtat från: ${cards.matched_headings.join(', ')}</div>` : '';
       return `
-        <div class="muted"><strong>Sammanfattning:</strong> ${cards.summary||'—'}</div>
-        ${cards.steps?.length ? `<div class="muted"><strong>Steg:</strong><br>- ${cards.steps.join('<br>- ')}</div>` : ''}
-        ${cards.pitfalls?.length ? `<div class="muted"><strong>Fallgropar:</strong><br>- ${cards.pitfalls.join('<br>- ')}</div>` : ''}
-        ${cards.explanation ? `<details style="margin-top:.4rem"><summary class="link">Förklaring</summary><div class="muted" style="margin-top:.4rem">${cards.explanation}</div></details>` : ''}
+        <div class="muted"><strong>Sammanfattning:</strong> ${cards?.summary||'—'}</div>
+        ${cards?.steps?.length ? `<div class="muted"><strong>Steg:</strong><br>- ${cards.steps.join('<br>- ')}</div>` : ''}
+        ${cards?.pitfalls?.length ? `<div class="muted"><strong>Fallgropar:</strong><br>- ${cards.pitfalls.join('<br>- ')}</div>` : ''}
+        ${cards?.explanation ? `<details style="margin-top:.4rem"><summary class="link">Förklaring</summary><div class="muted" style="margin-top:.4rem">${cards.explanation}</div></details>` : ''}
         ${srcNote}
         ${followUp ? `<div style="margin-top:.4rem;opacity:.9"><em>${followUp}</em></div>` : ''}
       `;
     }
-
     async function askAssistant(text){
       state='THINKING'; setStatus(state,'Bearbetar…');
       output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
       try{
         const res = await fetch('/api/chat',{
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ message:text, profile: profileName||null, prev: { question: null, assistant: null } })
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ message:text })
         });
         const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Chat-fel');
-
         let r=data.reply; if(typeof r==='string'){ try{ r=JSON.parse(r); }catch{} }
-        if(!r || typeof r!=='object'){ r = { spoken: 'Jag kunde inte formulera ett svar.' }; }
-
-        if (r.need?.clarify) {
-          const opts = Array.isArray(r.need.options) ? r.need.options : [];
-          const html = `
-            <div class="pill">
-              <div>${r.need.question || 'Behöver lite mer info.'}</div>
-              ${opts.length ? `<div class="opts">${opts.map(o => `<button class="opt" data-opt="${o}">${o}</button>`).join('')}</div>` : ''}
-            </div>`;
-          output.insertAdjacentHTML('beforeend', html);
-          document.querySelectorAll('.opt').forEach(btn=>{
-            btn.addEventListener('click', ()=> askAssistant(btn.getAttribute('data-opt')));
-          });
-          await speak(r.spoken || r.need.question || 'En sak till…');
-          return;
-        }
-
-        const bubble = document.createElement('div');
-        bubble.className = 'pill';
+        r = r && typeof r==='object' ? r : { spoken: 'Jag kunde inte formulera ett svar.' };
+        const bubble = document.createElement('div'); bubble.className = 'pill';
         const uid = Date.now().toString();
         bubble.innerHTML = `<div>${r.spoken || 'Klart.'}</div>
-                            <div style="margin-top:.5rem"><span class="link" id="toggle_${uid}">Visa detaljer</span></div>
-                            <div id="details_${uid}" style="display:none;margin-top:.5rem">${renderDetails(r.cards||{}, r.follow_up||'')}</div>`;
+          <div style="margin-top:.5rem"><span class="link" id="toggle_${uid}">Visa detaljer</span></div>
+          <div id="details_${uid}" style="display:none;margin-top:.5rem">${renderDetails(r.cards||{}, r.follow_up||'')}</div>`;
         output.appendChild(bubble);
-
-        const toggle = bubble.querySelector(`#toggle_${uid}`);
-        const details = bubble.querySelector(`#details_${uid}`);
-        toggle.addEventListener('click', ()=>{
-          const open = details.style.display !== 'none';
-          details.style.display = open ? 'none' : 'block';
-          toggle.textContent = open ? 'Visa detaljer' : 'Dölj detaljer';
-        });
-
+        const toggle = bubble.querySelector(`#toggle_${uid}`), details = bubble.querySelector(`#details_${uid}`);
+        toggle.addEventListener('click', ()=>{ const open = details.style.display !== 'none'; details.style.display = open ? 'none':'block'; toggle.textContent = open ? 'Visa detaljer':'Dölj detaljer'; });
         await speak(r.spoken || 'Okej.');
       }catch(err){
         dlog("Chat-fel", err);
-        output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI.</div>`);
+        output.insertAdjacentHTML('beforeend', `<div class="pill err">Kunde inte få svar från AI.</div>`);
         if(running) startListening();
       }
     }
@@ -264,18 +212,41 @@
       return (data.text||'').trim();
     }
 
+    // ---------- VAD helpers ----------
+    async function calibrateThreshold(){
+      // Mät baseline i ~500ms
+      const t0 = performance.now();
+      let acc=0, n=0, maxL=0;
+      while (performance.now()-t0 < 500){
+        analyser.getByteTimeDomainData(micArr);
+        const lvl = rmsLevel(micArr);
+        acc += lvl; n++; if (lvl>maxL) maxL=lvl;
+        await new Promise(r=>setTimeout(r, 20));
+      }
+      const baseline = Math.round(acc/Math.max(1,n));
+      // Tröskel: baseline + 1 (min 4), men klipp uppåt så det inte blir för högt
+      const thr = Math.max(4, Math.min(20, baseline + 1));
+      dlog("VAD baseline/thr", { baseline, thr, peak:maxL });
+      return thr;
+    }
+
     // ---------- LISTEN ----------
     async function startListening(){
       if(!running) return;
       stopTTS();
       state='LISTENING'; setStatus(state,'Lyssnar… (bli tyst för att skicka)');
-      chunks=[]; const startedAt=performance.now(); let silentMs=0, talkMs=0;
 
+      chunks=[]; const startedAt=performance.now();
+      let silentMs=0, talkMs=0;
+
+      const speechThreshold = await calibrateThreshold();
+
+      // MediaRecorder
       try{
         mediaRecorder = new MediaRecorder(micStream, REC_MIME ? { mimeType: REC_MIME, audioBitsPerSecond: 128000 } : undefined);
       }catch(e){
         dlog("MediaRecorder start fail w/mime", REC_MIME, e);
-        mediaRecorder = new MediaRecorder(micStream); // sista fallback
+        mediaRecorder = new MediaRecorder(micStream);
       }
 
       mediaRecorder.ondataavailable = (e)=>{ if(e.data.size>0) chunks.push(e.data); };
@@ -284,8 +255,10 @@
         const blob = new Blob(chunks, { type });
         dlog("onstop blob", { size: blob.size, type, talkMs });
 
-        if (talkMs < MIN_SPEECH_MS || blob.size < MIN_BLOB_BYTES) {
-          dlog("drop: gate", { talkMs, size: blob.size });
+        // Acceptera om VAD OK, ELLER om filen är stor nog (forced accept)
+        const accept = (talkMs >= MIN_SPEECH_MS) || (blob.size >= FORCED_ACCEPT_BYTES);
+        if (!accept || blob.size < MIN_BLOB_BYTES) {
+          dlog("drop: gate", { talkMs, size: blob.size, thr: speechThreshold });
           if(running) startListening();
           return;
         }
@@ -294,10 +267,8 @@
           const text = await transcribe(blob);
           dlog("whisper text:", text);
           if (!text || HALLUCINATION_PATTERNS.test(text)) { if(running) startListening(); return; }
-          if(!trySetProfileFrom(text)){
-            if(text) await askAssistant(text);
-            else { output.insertAdjacentHTML('beforeend',"<div class='pill'>Hörde inget tydligt. Prova igen.</div>"); if(running) startListening(); }
-          } else { if(running) startListening(); }
+          output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
+          await askAssistant(text);
         }catch(err){
           dlog("Whisper-fel", err);
           output.insertAdjacentHTML('beforeend',"<div class='pill err'>Kunde inte transkribera ljudet.</div>");
@@ -306,13 +277,16 @@
       };
       mediaRecorder.start();
 
+      // Enkel energi-VAD
+      let tick=0;
       const vadTimer=setInterval(()=>{
         if (!running || !mediaRecorder || mediaRecorder.state==='inactive'){ clearInterval(vadTimer); return; }
         analyser.getByteTimeDomainData(micArr);
         const lvl = rmsLevel(micArr);
-        // dlog("lvl", lvl); // avkommentera vid behov
-        if (lvl >= 12) { talkMs += 100; silentMs = 0; }
+        if (lvl >= speechThreshold) { talkMs += 100; silentMs = 0; }
         else { silentMs += 100; }
+        if ((tick++ % 5) === 0) dlog("lvl/thr", { lvl, thr: speechThreshold, talkMs }); // logga var 500ms
+
         const elapsed = performance.now()-startedAt;
         if (silentMs >= SILENCE_HOLD_MS || elapsed > MAX_RECORD_MS){
           clearInterval(vadTimer);
@@ -322,35 +296,22 @@
     }
 
     // ---------- START/STOP ----------
-    async function initDevices(){
-      if (!navigator.mediaDevices?.enumerateDevices) return;
-      const list = await navigator.mediaDevices.enumerateDevices();
-      micSel.innerHTML = "";
-      list.filter(d=>d.kind==='audioinput').forEach(d=>{
-        const opt = document.createElement('option');
-        opt.value = d.deviceId; opt.textContent = d.label || `Mikrofon ${micSel.length+1}`;
-        micSel.appendChild(opt);
-      });
-    }
-
     async function getMicStream(){
-      const constraintsBase = {
-        audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:false }
-      };
-      if (micSel.value) constraintsBase.audio.deviceId = { exact: micSel.value };
-
-      // välj första stödda MIME
+      const constraints = { audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:false } };
+      // MIME pick
       REC_MIME = MIME_CANDIDATES.find(m => !m || MediaRecorder.isTypeSupported(m)) || '';
       REC_EXT  = REC_MIME.includes('mp4') ? 'm4a' : REC_MIME.includes('ogg') ? 'ogg' : 'webm';
       dlog("REC_MIME picked:", REC_MIME || "(browser default)");
 
-      micStream = await navigator.mediaDevices.getUserMedia(constraintsBase);
+      micStream = await navigator.mediaDevices.getUserMedia(constraints);
       audioCtxVAD = new (window.AudioContext||window.webkitAudioContext)();
       await audioCtxVAD.resume().catch(()=>{});
       const src = audioCtxVAD.createMediaStreamSource(micStream);
-      analyser = audioCtxVAD.createAnalyser(); analyser.fftSize = 2048;
+      analyser = audioCtxVAD.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.6;
       micArr = new Uint8Array(analyser.fftSize); src.connect(analyser);
       if(!rafId) rafId = requestAnimationFrame(loop);
+      const st = (navigator.permissions && await navigator.permissions.query({name:'microphone'}).catch(()=>null))?.state;
+      document.getElementById('permState').textContent = `Behörighet: ${st || 'okänd'}`;
       dlog("Mic OK. Tracks:", micStream.getTracks().map(t=>({kind:t.kind, enabled:t.enabled, ready:t.readyState})));
     }
 
@@ -380,59 +341,35 @@
       if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
     }
 
-    // ---------- One-shot MIC TEST (2s) ----------
+    // ---------- MIC TEST ----------
     async function testMic(){
       dlog("=== MIC TEST start ===");
       try{
         if(!micStream) await getMicStream();
-        const mime = MIME_CANDIDATES.find(m => !m || MediaRecorder.isTypeSupported(m)) || '';
+        let mime = MIME_CANDIDATES.find(m => !m || MediaRecorder.isTypeSupported(m)) || '';
         let rec;
         try { rec = new MediaRecorder(micStream, mime ? { mimeType: mime, audioBitsPerSecond: 128000 } : undefined); }
-        catch { rec = new MediaRecorder(micStream); }
+        catch { rec = new MediaRecorder(micStream); mime=''; }
         const bufs = [];
         rec.ondataavailable = (e)=>{ if(e.data.size) bufs.push(e.data); };
         rec.onstop = async ()=>{
           const type = mime || (bufs[0]?.type || 'audio/webm');
           const blob = new Blob(bufs, { type });
           dlog("MIC TEST blob", { size: blob.size, type });
-          output.insertAdjacentHTML('beforeend', `<div class="pill">Mic test → ${Math.round(blob.size/1024)} KB, ${type}</div>`);
           try{
             const txt = await transcribe(blob);
-            output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Transkribering:</strong> ${txt || '— (tom)'}</div>`);
-          }catch(err){
-            dlog("MIC TEST whisper error", err);
-            output.insertAdjacentHTML('beforeend', `<div class="pill err">Transkribering misslyckades: ${err?.message||err}</div>`);
-          }
+            output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Transkribering (test):</strong> ${txt || '— (tom)'}</div>`);
+          }catch(err){ dlog("MIC TEST whisper error", err); }
           dlog("=== MIC TEST end ===");
         };
-        rec.start();
-        setTimeout(()=>{ try{ rec.stop(); }catch{} }, 2000);
-      }catch(e){
-        dlog("MIC TEST error", e);
-        output.insertAdjacentHTML('beforeend', `<div class="pill err">Mic test fail: ${e?.message||e}</div>`);
-      }
+        rec.start(); setTimeout(()=>{ try{ rec.stop(); }catch{} }, 2000);
+      }catch(e){ dlog("MIC TEST error", e); }
     }
-
-    // ---------- Permissions / Hints ----------
-    (async ()=>{
-      if (!isSecureContext && !location.hostname.includes('localhost')) {
-        secureHint.textContent = "⚠️ Körs utan HTTPS – mic kan blockas. Testa localhost eller https://";
-      }
-      if (navigator.permissions?.query) {
-        try {
-          const st = await navigator.permissions.query({name:'microphone'});
-          permState.textContent = `Behörighet: ${st.state}`;
-          st.onchange = ()=> permState.textContent = `Behörighet: ${st.state}`;
-        } catch {}
-      }
-      await initDevices();
-    })();
 
     // ---------- Events ----------
     startBtn.addEventListener('click', startLoop);
     stopBtn.addEventListener('click', stopLoop);
     testBtn.addEventListener('click', testMic);
-    micSel.addEventListener('change', async ()=>{ if(running){ stopLoop(); await startLoop(); } });
 
     // Manuell avbryt tts
     document.addEventListener('click', ()=>{ if (running && state==='SPEAKING'){ stopTTS(); startListening(); }});
