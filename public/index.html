@@ -59,7 +59,7 @@
     const TTS_BASE_GAIN = 0.85;
     const TTS_DUCK_GAIN = 0.22;
 
-    // Enkel kontext för uppföljningar
+    // Enkel kontext
     let lastQ = null;
     let lastA = null;
 
@@ -74,7 +74,7 @@
     const BARGE_HOLD_MS   = 130;
     let bargeHold = 0;
 
-    // MIME (Safari iOS behöver mp4/m4a)
+    // MIME (Safari iOS → m4a/mp4)
     const REC_MIME =
       MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' :
       MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' :
@@ -89,13 +89,14 @@
     let BASE_NOISE = 0;
     let DYNAMIC_SILENCE = SILENCE_THRESHOLD;
 
-    // Minimikrav så vi inte skickar tystnad
-    const MIN_SPEECH_MS = 400;
-    const MIN_BLOB_BYTES = 20000;
+    // ---- SNÄLLARE GATE (fixen) ----
+    const MIN_SPEECH_MS = 250;
+    const MIN_BLOB_BYTES = (REC_MIME && REC_MIME.includes('mp4')) ? 3500 : 9000; // m4a är superkomprimerad
 
+    // Svartlista kända tystnadshallisar
     const HALLUCINATION_PATTERNS = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
 
-    // Mindre “robot”, mer mänsklig: pepp ibland (låg sannolikhet)
+    // Mindre “robot”: pepp ibland
     function maybePep(text, kind="answer"){
       const chance = 0.18;
       if (Math.random()>chance) return text;
@@ -211,7 +212,6 @@
       try {
         if (ttsAudio) {
           ttsAudio.pause();
-          // töm src så nätverksströmmen avbryts direkt
           ttsAudio.src = "";
           ttsAudio.load();
         }
@@ -226,15 +226,11 @@
       stopTTS();
       state='SPEAKING'; setStatus(state,'Svarar… (prata för att avbryta)');
       try{
-        // Låt modellen låta mänsklig – kort och tydlig, men vi lägger en liten pep ibland
-        const say = text;
-
-        // Streama från vår proxy
-        const url = `/api/tts-stream?text=${encodeURIComponent(say)}&latency=3`;
+        const url = `/api/tts-stream?text=${encodeURIComponent(text)}&latency=3`;
         ttsAudio = new Audio();
         ttsAudio.src = url;
         ttsAudio.preload = "auto";
-        ttsAudio.crossOrigin = "anonymous"; // behövs för MediaElementSource i vissa browsers
+        ttsAudio.crossOrigin = "anonymous";
 
         // Web Audio-kedja för barge-in/ducking/visualisering
         ttsCtx = new (window.AudioContext||window.webkitAudioContext)();
@@ -249,15 +245,11 @@
 
         speakBaseline = 0; bargeHold = 0;
 
-        // Spela
         await ttsCtx.resume().catch(()=>{});
         await ttsAudio.play();
 
         ttsAudio.onended = ()=>{ if(running) startListening(); };
-        ttsAudio.onerror = ()=>{ 
-          // Fallback: gå tillbaka till lyssna om streamen failar
-          if (running) startListening();
-        };
+        ttsAudio.onerror = ()=>{ if (running) startListening(); };
       }catch(err){
         console.error('TTS-stream-fel:',err);
         output.insertAdjacentHTML('beforeend',"<div class='pill'>Kunde inte spela upp ljud (stream).</div>");
@@ -265,7 +257,7 @@
       }
     }
 
-    // ---------- UI för “Visa detaljer” ----------
+    // ---------- UI “Visa detaljer” ----------
     function renderDetails(cards, followUp){
       const srcNote = (Array.isArray(cards.matched_headings) && cards.matched_headings.length)
         ? `<div class="src">Hämtat från: ${cards.matched_headings.join(', ')}</div>` : '';
@@ -371,8 +363,16 @@
       mediaRecorder.onstop = async ()=>{
         const blob=new Blob(chunks,{type: REC_MIME || 'audio/webm'}); if(!running) return;
 
-        // Gate mot tystnad/hallisar
+        // ---- Gate: snäll + debug (fixen) ----
         if (!everAbove || talkMs < MIN_SPEECH_MS || blob.size < MIN_BLOB_BYTES) {
+          const why = !everAbove ? "hörde ingen tydlig röst"
+                   : (talkMs < MIN_SPEECH_MS ? `för kort (${talkMs} ms)`
+                   : `för liten inspelning (${blob.size} B, ${REC_MIME||'okänd mime'})`);
+          console.log("Gate drop", { everAbove, talkMs, blobSize: blob.size, mime: REC_MIME });
+          output.insertAdjacentHTML(
+            'beforeend',
+            `<div class="pill">Hörde dig men det blev ${why}. Säg en aning längre (0,5–1 s) och pausa en halv sekund efter.</div>`
+          );
           if(running) startListening();
           return;
         }
