@@ -69,13 +69,10 @@
       output.innerHTML = "<strong>Du frågade:</strong> " + text + "<br><em>Väntar på svar...</em>";
 
       try {
-        const fileResponse = await fetch("https://raw.githubusercontent.com/172172/Coach-Assistant/main/assistant-knowledge.txt");
-        const knowledge = await fileResponse.text();
-
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ knowledge, message: text })
+          body: JSON.stringify({ message: text })
         });
 
         const data = await response.json();
