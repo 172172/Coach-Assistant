@@ -1,278 +1,77 @@
-<!DOCTYPE html>
-<html lang="sv">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Coach Assistant</title>
-  <link rel="icon" href="data:,"><!-- tysta favicon 404 -->
-  <style>
-    :root { --bg:#111; --fg:#fff; --acc:#00aaff; --mut:#bbb; }
-    body { font-family: system-ui, sans-serif; padding: 2rem; background: var(--bg); color: var(--fg); }
-    .row { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
-    button {
-      padding: 0.9rem 1.2rem; font-size: 1rem; cursor: pointer; border: none; border-radius: 10px;
-      background: var(--acc); color:#fff;
-    }
-    #output { margin-top: 1rem; font-size: 1.05rem; }
-    .status { font-size: .95rem; color: #ddd }
-    .pill { background:#1a1a1a; border:1px solid #333; padding:.7rem .9rem; border-radius:10px; margin-top:.6rem }
-    .muted { color: var(--mut); font-size:.95rem }
-    .dot { width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:.5rem; vertical-align:middle }
-    .listen { background:#22c55e }  /* green */
-    .think  { background:#facc15 }  /* yellow */
-    .speak  { background:#60a5fa }  /* blue */
-    .idle   { background:#6b7280 }  /* gray  */
-  </style>
-</head>
-<body>
-  <h1>Coach Assistant</h1>
-  <p class="muted">Tryck start en gång. Prata → bli tyst så svarar den. Börja prata under svar för att avbryta (barge-in).</p>
+// /api/chat.js
+const KNOWLEDGE_URL = "https://raw.githubusercontent.com/172172/Coach-Assistant/main/assistant-knowledge.txt";
+const CACHE_MS = 5 * 60 * 1000;
 
-  <div class="row">
-    <button id="startBtn">▶️ Starta röstloop</button>
-    <button id="stopBtn" style="background:#ef4444;display:none">⏹️ Stoppa</button>
-    <span id="recStatus" class="status"><span class="dot idle"></span>Redo</span>
-  </div>
+let knowledgeCache = { text: null, fetchedAt: 0 };
 
-  <div id="output"></div>
+async function getKnowledge() {
+  const now = Date.now();
+  if (knowledgeCache.text && now - knowledgeCache.fetchedAt < CACHE_MS) return knowledgeCache.text;
+  const res = await fetch(KNOWLEDGE_URL, { cache: "no-store" });
+  if (!res.ok) throw new Error(`Misslyckades hämta kunskap: ${res.status}`);
+  const text = await res.text();
+  knowledgeCache = { text, fetchedAt: now };
+  return text;
+}
 
-  <script>
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn  = document.getElementById('stopBtn');
-    const output   = document.getElementById('output');
-    const recStatus= document.getElementById('recStatus');
+export default async function handler(req, res) {
+  try {
+    if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
 
-    // ---------- STATE ----------
-    // IDLE → LISTENING → THINKING → SPEAKING → LISTENING ...
-    let state = 'IDLE';
-    let running = false;
+    const { message = "" } = req.body || {};
+    const knowledge = await getKnowledge();
 
-    // Mic & VAD
-    let micStream = null;
-    let mediaRecorder = null;
-    let chunks = [];
-    let vadInterval = null;
-    let audioCtxVAD = null;
-    let analyser = null;
-    let vadData = null;
+    const system = `
+Du är "Coach Assistant" – en mentor på en produktionslinje (t.ex. Linje 65).
+Ton: mycket lugn, tydlig och pedagogisk – som din bästa mentor (lite Jarvis-finess).
+Bygg alltid ett sammanhängande svar – inte mening-för-mening.
+Svara enligt denna struktur:
+1) Kort sammanfattning (1–2 meningar).
+2) Steg-för-steg-checklista (3–8 steg, konkreta handlingar).
+3) Förklaring/varför (2–4 meningar, lätt svenska).
+4) Vanliga fallgropar & tips (punktlista).
+5) EN uppföljningsfråga på slutet för att guida vidare.
 
-    // TTS
-    let ttsCtx = null;
-    let ttsSource = null;
+Begränsa dig till arbetsplatsens dokumentation nedan. Om svaret saknas, säg: "Den informationen har jag tyvärr inte just nu.".
+`.trim();
 
-    // Thresholds
-    const SILENCE_THRESHOLD = 12;   // 0-255 (lägre = känsligare)
-    const SILENCE_HOLD_MS   = 900;  // hur länge tyst innan vi stoppar inspelning
-    const MAX_RECORD_MS     = 10000;// safety cap
-    const BARGE_THRESHOLD   = 22;   // röstnivå för att bryta TTS
-    const BARGE_HOLD_MS     = 200;  // hur länge nivå över tröskel krävs
+    const user = `
+Arbetsplatsens dokumentation:
+"""
+${knowledge}
+"""
 
-    function setStatus(mode, text) {
-      const dotClass = mode === 'LISTENING' ? 'listen' :
-                       mode === 'THINKING'  ? 'think'  :
-                       mode === 'SPEAKING'  ? 'speak'  : 'idle';
-      recStatus.innerHTML = `<span class="dot ${dotClass}"></span>${text}`;
-    }
+Användarens fråga:
+"${message}"
+`.trim();
 
-    // ---------- TTS ----------
-    function stopTTS() {
-      try { ttsSource && ttsSource.stop(); } catch {}
-      ttsSource = null;
-      if (ttsCtx) { try { ttsCtx.close(); } catch {} }
-      ttsCtx = null;
-    }
-
-    async function speak(text) {
-      stopTTS();
-      state = 'SPEAKING';
-      setStatus(state, 'Svarar… (prata för att avbryta)');
-
-      try {
-        const res = await fetch('/api/tts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text })
-        });
-        if (!res.ok) throw new Error('Fel vid TTS-svar');
-
-        const blob = await res.blob();
-        const arrayBuffer = await blob.arrayBuffer();
-
-        ttsCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const gainNode = ttsCtx.createGain();
-        gainNode.gain.value = 2.0;
-
-        ttsSource = ttsCtx.createBufferSource();
-        const audioBuffer = await ttsCtx.decodeAudioData(arrayBuffer);
-        ttsSource.buffer = audioBuffer;
-        ttsSource.connect(gainNode).connect(ttsCtx.destination);
-        ttsSource.onended = () => { if (running) startListening(); };
-        ttsSource.start(0);
-      } catch (err) {
-        console.error('TTS-fel:', err);
-        output.insertAdjacentHTML('beforeend', "<div class='pill'>Kunde inte spela upp ljud.</div>");
-        if (running) startListening();
-      }
-    }
-
-    // ---------- CHAT ----------
-    async function askAssistant(text) {
-      state = 'THINKING';
-      setStatus(state, 'Bearbetar…');
-      output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
-
-      try {
-        const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text })
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error || 'Chat-fel');
-        const answer = (typeof data.reply === 'string') ? data.reply
-                      : data.reply?.reply || 'Jag kunde inte formulera ett svar.';
-        output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Svar:</strong><br>${answer}</div>`);
-        await speak(answer);
-      } catch (err) {
-        console.error('Chat-fel:', err);
-        output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI.</div>`);
-        if (running) startListening();
-      }
-    }
-
-    // ---------- WHISPER ----------
-    async function transcribe(blob) {
-      const formData = new FormData();
-      formData.append('audio', blob, 'audio.webm');
-
-      const res = await fetch('/api/whisper', { method: 'POST', body: formData });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || 'Transkriberingsfel');
-      return (data.text || '').trim();
-    }
-
-    // ---------- VAD utils ----------
-    function rmsLevel(uint8PCM) {
-      let sum = 0;
-      for (let i = 0; i < uint8PCM.length; i++) {
-        const v = uint8PCM[i] - 128;
-        sum += v * v;
-      }
-      const rms = Math.sqrt(sum / uint8PCM.length);
-      return Math.min(255, Math.max(0, Math.round(rms * 6)));
-    }
-
-    // ---------- LISTENING ----------
-    async function startListening() {
-      if (!running) return;
-      stopTTS(); // säkerställ att tyst
-      state = 'LISTENING';
-      setStatus(state, 'Lyssnar… (bli tyst för att skicka)');
-
-      chunks = [];
-      const startedAt = performance.now();
-      let silentMs = 0;
-      let bargeHold = 0;
-
-      mediaRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm' });
-      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-      mediaRecorder.onstop = async () => {
-        clearInterval(vadInterval);
-        const blob = new Blob(chunks, { type: 'audio/webm' });
-        if (!running) return;
-        try {
-          const text = await transcribe(blob);
-          if (text) await askAssistant(text);
-          else {
-            output.insertAdjacentHTML('beforeend', "<div class='pill'>Hörde inget tydligt. Prova igen.</div>");
-            if (running) startListening();
-          }
-        } catch (err) {
-          console.error('Whisper-fel:', err);
-          output.insertAdjacentHTML('beforeend', "<div class='pill'>Kunde inte transkribera ljudet.</div>");
-          if (running) startListening();
-        }
-      };
-      mediaRecorder.start();
-
-      // Kör VAD mot mic: auto-stop på tystnad + barge-in
-      vadInterval = setInterval(() => {
-        analyser.getByteTimeDomainData(vadData);
-        const level = rmsLevel(vadData);
-
-        // auto-stop när det varit tyst en stund eller maxlängd
-        if (level < SILENCE_THRESHOLD) silentMs += 100; else silentMs = 0;
-        const overMax = performance.now() - startedAt > MAX_RECORD_MS;
-        if (silentMs >= SILENCE_HOLD_MS || overMax) {
-          try { mediaRecorder.state !== 'inactive' && mediaRecorder.stop(); } catch {}
-        }
-
-        // barge-in: om TTS skulle vara igång, stoppa den vid röstnivå
-        if (state === 'SPEAKING') {
-          if (level > BARGE_THRESHOLD) bargeHold += 100; else bargeHold = 0;
-          if (bargeHold >= BARGE_HOLD_MS) {
-            stopTTS();
-            // vi låter LISTENING rulla vidare och fånga talet
-          }
-        }
-      }, 100);
-    }
-
-    // ---------- START / STOP ----------
-    async function startLoop() {
-      if (running) return;
-      running = true;
-      startBtn.style.display = 'none';
-      stopBtn.style.display = 'inline-block';
-
-      // Mic + analyser för VAD
-      try {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (e) {
-        output.insertAdjacentHTML('beforeend', "<div class='pill'>Mikrofon kunde inte startas (behörighet?).</div>");
-        running = false;
-        startBtn.style.display = 'inline-block';
-        stopBtn.style.display = 'none';
-        return;
-      }
-
-      audioCtxVAD = new (window.AudioContext || window.webkitAudioContext)();
-      const src = audioCtxVAD.createMediaStreamSource(micStream);
-      analyser = audioCtxVAD.createAnalyser();
-      analyser.fftSize = 2048;
-      vadData = new Uint8Array(analyser.fftSize);
-      src.connect(analyser);
-
-      startListening();
-    }
-
-    function stopLoop() {
-      running = false;
-      state = 'IDLE';
-      setStatus(state, 'Stoppad');
-      startBtn.style.display = 'inline-block';
-      stopBtn.style.display  = 'none';
-
-      stopTTS();
-      try { mediaRecorder && mediaRecorder.state !== 'inactive' && mediaRecorder.stop(); } catch {}
-      if (vadInterval) { clearInterval(vadInterval); vadInterval = null; }
-      try { analyser && analyser.disconnect(); } catch {}
-      try { audioCtxVAD && audioCtxVAD.close(); } catch {}
-      analyser = null; audioCtxVAD = null; vadData = null;
-
-      if (micStream) {
-        micStream.getTracks().forEach(t => t.stop());
-        micStream = null;
-      }
-    }
-
-    startBtn.addEventListener('click', startLoop);
-    stopBtn.addEventListener('click', stopLoop);
-
-    // Bonus: ESC för att stoppa snabbt
-    window.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') stopLoop();
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        temperature: 0.3,
+        max_tokens: 900,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user }
+        ],
+      }),
     });
-  </script>
-</body>
-</html>
+
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("OpenAI chat error:", data);
+      return res.status(500).json({ error: "Chat API error", details: data });
+    }
+
+    const reply = data.choices?.[0]?.message?.content || "Den informationen har jag tyvärr inte just nu.";
+    return res.status(200).json({ reply });
+  } catch (err) {
+    console.error("chat.js internal error:", err);
+    return res.status(500).json({ error: "Serverfel i chat.js", details: err.message || String(err) });
+  }
+}
