@@ -28,37 +28,38 @@ export default async function handler(req, res) {
 
     const { message = "", profile = null, prev = null } = req.body || {};
     const knowledge = await getKnowledge();
-
     const { isSort, hasTypeHint } = detectSortbyte(message);
 
-    // --- SYSTEMPROMPT ---
     const system = `
-Du är "Coach Assistant" – en mentor på produktionslinjen (t.ex. Linje 65).
+Du är "Coach Assistant" – mentor på en produktionslinje (t.ex. Linje 65).
 Ton: trygg, lugn, pedagogisk, naturlig och mänsklig. Var inte stel.
 
 ABSOLUTA REGLER
 - Ge endast tekniska/operativa råd som stöds av dokumentationen ("Kunskap") nedan.
-- Om täckning ("coverage") är < 0.6 eller relevanta avsnitt saknas: säg tydligt att info saknas och ge säkra, generella steg eller be om att uppdatera manualen.
+- Om täckning ("coverage") är < 0.4 ELLER du inte hittar relevanta rubriker: säg tydligt att info saknas och ge säkra, generella steg eller be om att uppdatera manualen.
 - Svara i EXAKT JSON enligt schemat längre ned. Ingen prosa utanför JSON.
 
-DIALOG- & COACHNINGSPOLICY
-- Fråga alltid om förtydligande när input är för vag för att kunna ge korrekt svar (ställ EN tydlig fråga + 2–5 korta val).
-- Tala naturligt. Använd korta meningar och “pausord” ibland (men inga emojis). 
-- I "spoken": prata som till en kollega: varm, lugn, tydlig, och säg t.ex. ”säg till om du vill att jag tar det steg för steg”.
+DIALOG- & COACHNING
+- Fråga om förtydligande när input är för vag (EN tydlig fråga + 2–5 korta val).
+- "spoken": prata som till en kollega: varm, lugn, tydlig. Säg gärna “säg till om du vill ha nästa del”.
 
-FÖR "SORTBYTE" (och relaterade tapp/fyllare-bitar)
-- Om användaren inte specificerat typ (t.ex. läsk→öl / öl→öl), returnera en klarifiering:
+FÖR "SORTBYTE" (tapp/fyllare)
+- Om typ saknas (t.ex. läsk→öl / öl→öl): returnera klarifiering med:
   need = { clarify: true, question: "...", options: ["Läsk → läsk", "Läsk → öl", "Öl → öl", "Öl → läsk"] }.
-  spoken: ställ frågan naturligt (“För att göra rätt behöver jag veta…”).
-- När typ är känd: gå in i COACH-LÄGE och ge lugna, tydliga steg som täcker förberedelser, säkringar, switch/flush/CIP (endast om manualen beskriver det), kontroller, och återstart.
-  * Steg ska vara numrerade, konkreta och inte hopklippta. 8–20 steg är ok om manualen täcker dem.
-  * Markera kontroller (“verifiera tryck/temperatur/flöde enligt manualen” etc.) när manualen nämner dem.
-  * Lägg ev. till korta mikro-pausfrågor i spoken (“redo för nästa del?”) men håll dig till manualen.
-- Hitta och fyll "matched_headings" med rubrikerna från manualen som stödjer stegen.
+  spoken: ställ frågan naturligt.
+- När typ finns: ge lugna, tydliga, NUMRERADE steg (förbered, säkra, switch/flush/CIP enligt manual, kontroller, återstart). 8–20 steg är OK om manualen täcker det.
+- Markera kontroller (tryck/temperatur/flöde osv.) bara om manualen nämner dem.
+- Fyll "matched_headings" med EXAKTA rubriksträngar från manualen som stöder stegen.
+
+COVERAGE–GUIDE (var realistisk, inte överförsiktig)
+- ≥ 0.75: Minst 2 relevanta rubriker täcker exakt uppgiften + dina steg kommer direkt därifrån.
+- ~0.6–0.75: 1–2 rubriker delvis relevanta; du fyller luckor med allmänt säkra formuleringar (utan egna siffror).
+- ~0.4–0.6: Det finns något stöd, men inte komplett; var försiktig och uppmana att verifiera mot manualen.
+- ≤ 0.4: För litet stöd → ge INTE operativa steg.
 
 JSON-SCHEMA (måste följas exakt):
 {
-  "spoken": string,                            // det du säger högt (naturligt)
+  "spoken": string,
   "need": { "clarify": boolean, "question"?: string, "options"?: string[] },
   "cards": {
     "summary": string,
@@ -68,20 +69,18 @@ JSON-SCHEMA (måste följas exakt):
     "simple": string,
     "pro": string,
     "follow_up": string,
-    "coverage": number,                        // 0..1 hur väl manualen täcker svaret
+    "coverage": number,
     "matched_headings": string[]
   },
   "follow_up": string
 }
 
 VIKTIGT
-- Hitta rubriker i manualen och fyll matched_headings.
-- “simple” = nybörjarvänlig förklaring. “pro” = kompakt teknisk version.
 - Säg aldrig påhittade siffror/parametrar. Om manualen inte anger ett värde, håll det generellt (“enligt manualens gränsvärden”).
-- Om coverage < 0.6: presentera INTE operativa steg. Förklara att manualen behöver uppdateras.
+- “simple” = nybörjarvänlig, “pro” = kompakt teknisk.
+- Om coverage hamnar ~0.5: leverera steg men påminn om att verifiera mot manualens rubriker du listat.
 `.trim();
 
-    // --- USERPROMPT ---
     const user = `
 Kunskap (manual/arbetsplatsdokumentation):
 """
@@ -94,13 +93,12 @@ Användarens inmatning:
 Tidigare kontext:
 ${prev ? JSON.stringify(prev) : "null"}
 
-Instruktioner för din output:
-- Om frågan rör sortbyte men saknar typ, returnera en "need.clarify" som beskrivet.
-- Annars: ge full coachning med tydliga steg enligt manualen.
-- Fyll ALLA fält i JSON-schemat. 
+Output-instruktion:
+- Om frågan rör sortbyte men saknar typ, returnera en "need.clarify".
+- Annars: ge full coachning med lugna, numrerade steg enligt manualen.
+- Fyll ALLA fält i JSON-schemat.
 `.trim();
 
-    // --- OpenAI ---
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -110,7 +108,7 @@ Instruktioner för din output:
       body: JSON.stringify({
         model: "gpt-4o",
         temperature: 0.2,
-        max_tokens: 1400,
+        max_tokens: 1600,
         messages: [
           { role: "system", content: system },
           { role: "user", content: user }
@@ -124,13 +122,12 @@ Instruktioner för din output:
       return res.status(500).json({ error: "Chat API error", details: data });
     }
 
-    // --- Försök tolka strukturen ---
+    // --- Tolka JSON ---
     let content = data.choices?.[0]?.message?.content || "";
     let out;
     try {
       out = JSON.parse(content);
     } catch {
-      // Minimalt fallback-objekt
       out = {
         spoken: content || "Jag saknar tydlig information för att guida dig.",
         need: { clarify: false },
@@ -149,7 +146,7 @@ Instruktioner för din output:
       };
     }
 
-    // --- Extra säkerhet: tvinga klarifiering vid otydligt sortbyte ---
+    // Extra säkerhet: tvinga klarifiering vid otydligt sortbyte
     if (isSort && !hasTypeHint && !(out?.need?.clarify)) {
       out.need = {
         clarify: true,
@@ -159,23 +156,39 @@ Instruktioner för din output:
       out.spoken = "För att göra rätt behöver jag veta vilket sortbyte det gäller. Är det läsk till läsk, läsk till öl, öl till öl eller öl till läsk?";
     }
 
-    // --- Gatekeeping: om coverage låg → inga operativa steg ---
+    // --- Gate med tre nivåer ---
     const cov = Number(out?.cards?.coverage ?? out?.coverage ?? 0);
-    if (cov < 0.6) {
+    const heads = Array.isArray(out?.cards?.matched_headings) ? out.cards.matched_headings : [];
+
+    // HÅRT STOPP: väldigt låg täckning eller inga rubriker
+    if (cov < 0.4 || heads.length === 0) {
       out.cards = out.cards || {};
       out.cards.summary = "Den informationen finns inte tillräckligt tydligt i manualen.";
       out.cards.steps = [];
-      out.cards.explanation = "För att vara säker, följ generella säkra rutiner eller kontakta ansvarig. Vi bör uppdatera manualen med detta.";
+      out.cards.explanation = "Följ generella säkra rutiner eller kontakta ansvarig. Vi bör uppdatera manualen med detta.";
       out.cards.pitfalls = [];
       out.cards.simple = out.cards.summary;
       out.cards.pro = out.cards.summary;
       out.cards.follow_up = "Vill du att jag noterar att manualen behöver uppdateras för just detta?";
-      out.cards.coverage = cov;
-      out.cards.matched_headings = Array.isArray(out.cards.matched_headings) ? out.cards.matched_headings : [];
-      // Gör spoken tydlig men kort i detta läge
-      out.spoken = "Jag saknar täckning i manualen för att guida säkert. Vill du att vi uppdaterar manualen eller tar generella säkra steg?";
+      out.cards.coverage = cov || 0;
+      out.cards.matched_headings = heads;
+      out.spoken = "Jag saknar täckning i manualen för att guida säkert. Ska vi uppdatera manualen eller ta generella säkra steg?";
       out.need = out.need || { clarify: false };
       out.follow_up = out.cards.follow_up;
+    }
+    // Mjuk varning: delvis täckning → tillåt steg men bekräfta verifiering
+    else if (cov < 0.6) {
+      // Låt stegen vara kvar, men förstärk spoken + follow_up
+      const warn = "Jag guidar enligt närmaste relevanta avsnitt — dubbelkolla gärna mot rubrikerna jag visar.";
+      out.spoken = out.spoken ? `${out.spoken} ${warn}` : warn;
+      out.cards.follow_up = out.cards.follow_up || "Vill du att jag bryter ner nästa del, eller öppnar rubrikerna i manualen?";
+      out.follow_up = out.follow_up || "Säg till om du vill att jag läser upp nästa steg.";
+      // säkerställ att coverage ligger kvar som modellens värde
+      out.cards.coverage = cov;
+    } else {
+      // OK täckning, bara säkerställ att fälten finns
+      out.cards.coverage = cov;
+      out.cards.matched_headings = heads;
     }
 
     return res.status(200).json({ reply: out });
