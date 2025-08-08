@@ -1,11 +1,11 @@
-#Sortbyte läsk till läsk -Tappen
+### Avsnitt: Sortbyte Tapp
 Tryck sortbyte och cirkulation.
 Nänta tills sista burkarna lämnat tappen och sen gör du dränage.
 Töm alterantivt skicka tillbaka drickan från bufferttanken.
 Räkna av hueftarna.
 Avsluta ordern i MES.
 
-# Gul lampa – Tappmaskin
+### Avsnitt: Gul lampa – Tappmaskin
 Orsak: Liggande burk eller att det spottar ut för mycket burk.
 Åtgärd: Kontrollera så det inte är för mycket dåliga burkarm, alternativt är det gejdrar eller givare som kan spöka.
 
