@@ -1,5 +1,6 @@
 // /api/chat.js
-// Router: smalltalk, identity, conv-memory (med DB-fallback), profile-light, toolbelt (math/units), RAG (definition/operativt)
+// Kollegig AI-coach: identity, smalltalk, conversation-memory, rewrite-intents (simplify/repeat/summary/examples),
+// general-knowledge (jobbrelaterat), toolbelt (math/units), RAG (definition/operativt från manualen)
 
 import { q } from "./db.js";
 import fetch from "node-fetch";
@@ -29,7 +30,7 @@ function isSmalltalk(s = "") {
 }
 function isIdentityQuery(s = "") {
   const t = norm(s);
-  return /\b(vem ar du|vad ar du|vad kan du|beratta om dig|presentera dig)\b/.test(t);
+  return /\b(vem ar du|vad ar du|vad kan du|beratta om dig|presentera dig|vem pratar jag med)\b/.test(t);
 }
 function isProfileQuery(s = "") {
   const t = norm(s);
@@ -51,7 +52,26 @@ function isDefinitionQuery(s = "") {
   return words.length <= 2; // t.ex. "CIP", "fals"
 }
 
-/* ================= Conversation memory intents (täck många varianter) ================= */
+/* ================= General knowledge (tillåten zon) ================= */
+const GENERAL_KEYWORDS = [
+  "oee","5s","lean","kaizen","smed","tpm","gmp","haccp","root cause","rotorsak","5 why","ishikawa",
+  "poka yoke","andonsystem","kpi","effektivitet","kvalitet","hygien","sanitation","säkerhet","arbetsmiljo","arbetsmiljö",
+  "kontinuerligt förbättringsarbete","continuous improvement","standardarbete","sop","eskalering","standup",
+  "flaskhals","wip","lager","batch","spårbarhet","traceability","audit","revision","uppstart","nedstangning","rca",
+  "visual management","5 varför","5 varfor"
+];
+function isGeneralManufacturingQuery(s = "") {
+  const t = norm(s);
+  if (!t || t.length < 3) return false;
+  if (GENERAL_KEYWORDS.some(k => t.includes(norm(k)))) return true;
+  if (/\b(vad ar|vad är|hur funkar|hur fungerar|tips for|tips för|basta satt|bästa sätt)\b/.test(t) &&
+      !/\b(ocme|kisters|jones|depalletizer|fals|coolpack|linje\s*\d+|line\s*\d+)\b/.test(t)) {
+    return true;
+  }
+  return false;
+}
+
+/* ================= Conversation memory intents ================= */
 function parseConversationMemoryIntent(s = "") {
   const t = norm(s);
 
@@ -61,39 +81,72 @@ function parseConversationMemoryIntent(s = "") {
     /\b(forsta fragan|min forsta fraga|vad var min forsta fraga|fragan jag borjade med)\b/.test(t)
   ) return { type: "first" };
 
-  // Senaste frågan (din/“min”) – “vad var min fråga innan/nyss/förut/precis/tidigare/sist”, “min senaste/förra fråga”
+  // Senaste frågan (din)
   if (
     /\b(vad\s+var\s+min(?:\s+\w+){0,3}?\s+fraga(?:\s+\w+){0,2}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t) ||
-    /\b(mina?|den|senaste|forra)\s+fragan\b/.test(t) ||
-    /\b(min\s+senaste\s+fraga|min\s+forra\s+fraga)\b/.test(t)
+    /\b(min\s+senaste\s+fraga|min\s+forra\s+fraga|forra\s+fragan|senaste\s+fragan)\b/.test(t)
   ) return { type: "last" };
 
-  // “vad frågade jag (dig) innan/nyss/förut…”
-  if (/\b(vad\s+fragade\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t))
-    return { type: "last_user" };
-
-  // “vad sa jag …” / “vad skrev jag …”
+  // “vad frågade/sa/skrev jag …”
   if (
+    /\b(vad\s+fragade\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t) ||
     /\b(vad\s+sa\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t) ||
     /\b(vad\s+skrev\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t)
   ) return { type: "last_user" };
 
-  // “vad sa du nyss/precis/förut” / “vad svarade du …” / upprepa / repetera / jag fattade inte / hörde inte
+  // “vad sa/svarade du …”, “upprepa”, “repetera”, “jag fattade/hörde inte”
   if (
     /\b(vad\s+sa\s+du\s+(nyss|precis|forut|tidigare|innan|sist))\b/.test(t) ||
     /\b(vad\s+svarade\s+du\s+(nyss|precis|forut|tidigare|innan|sist))\b/.test(t) ||
-    /\b(upprepa|repetera|kan du repetera|sag det igen|säg det igen|kan du saga det igen|kan du säga det igen|ta det en gang till|ta det en gång till|jag fattade inte|jag forstod inte|jag hörde inte|jag hord[e] inte)\b/.test(t)
+    /\b(upprepa|repetera|kan du repetera|sag det igen|säg det igen|ta det en gang till|ta det en gång till|jag fattade inte|jag forstod inte|jag hörde inte|jag horde inte)\b/.test(t)
   ) return { type: "assistant_last" };
 
   // Sammanfattning
   if (/\b(sammanfatta\s+(samtalet|detta)|sammanfattning|summering|recap|vad har vi pratat om)\b/.test(t))
     return { type: "summary" };
 
-  // Generisk fallback: om frasen innehåller “fråga” + tidsord + (min/jag)
+  // Generisk fallback
   if (/\bfraga\b/.test(t) && /\b(min|jag)\b/.test(t) && /\b(innan|nyss|precis|forut|tidigare|sist|senaste|forra)\b/.test(t))
     return { type: "last" };
 
   return null;
+}
+
+/* ================= Rewrite intents (låter som en kollega) ================= */
+function parseRewriteIntent(s = "") {
+  const t = norm(s);
+
+  // tempo (vi skickar bara tillbaka meta = pace, frontenden tar det)
+  if (/\b(langsammare|saktare|saktare|ta det lugnare|prata langsammare|kora langsammare)\b/.test(t)) return { type: "pace_slow" };
+  if (/\b(snabbare|fortare|hastigare|kora snabbare|tempo upp)\b/.test(t)) return { type: "pace_fast" };
+
+  // uttryck för “säg om det där”
+  if (/\b(upprepa|repetera|sag det igen|säg det igen|ta det en gang till|ta det en gång till)\b/.test(t)) return { type: "repeat" };
+
+  // förenkla / korta / sammanfatta
+  if (/\b(enklare|forenkla|förklara enklare|lattare|barnniva|barnnivå|barnniva)\b/.test(t)) return { type: "simplify" };
+  if (/\b(korta|kortare|sammanfatta|summera|tl;dr)\b/.test(t)) return { type: "summarize" };
+
+  // utveckla / exempel / lista
+  if (/\b(mer detaljer|utveckla|forklara mer|djupare)\b/.test(t)) return { type: "expand" };
+  if (/\b(exempel|ge exempel|case|scenario)\b/.test(t)) return { type: "examples" };
+  if (/\b(lista|punktlista|punkter|steglista)\b/.test(t)) return { type: "bulletify" };
+
+  // förtydliga det sista svaret
+  if (/\b(jag fattade inte|jag forstod inte|oklart|kan du forklara igen)\b/.test(t)) return { type: "simplify" };
+
+  return null;
+}
+
+async function rewriteFromLast(userText, history, userId) {
+  // hämta källtext (senaste assistentsvaret)
+  let last = lastAssistantSpoken(history || []);
+  if (!last) {
+    // fallback till DB om history saknas
+    const dbHist = await getRecentHistoryFromDB(userId, 50);
+    last = lastAssistantSpoken(dbHist);
+  }
+  return String(last || "");
 }
 
 /* ================= Toolbelt: math & units ================= */
@@ -229,7 +282,7 @@ async function logInteraction({ userId, question, reply, lane, intent, coverage,
       [
         userId,
         question,
-        question, // content = question
+        question,
         JSON.stringify(reply || {}),
         lane === "smalltalk",
         lane === "operative",
@@ -293,6 +346,7 @@ function normalizeKeys(out) {
   if (!Array.isArray(out.cards.matched_headings)) out.cards.matched_headings = [];
   if (typeof out.cards.coverage !== "number" || isNaN(out.cards.coverage)) out.cards.coverage = 0;
   if (typeof out.follow_up !== "string") out.follow_up = out.cards.follow_up || "";
+  // meta tillåts vara valfritt
   return out;
 }
 
@@ -334,13 +388,13 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
-    /* -------- Lane: Identity (vem är du?) -------- */
+    /* -------- Lane: Identity -------- */
     if (isIdentityQuery(userText)) {
       const reply = normalizeKeys({
-        spoken: "Jag är din coach för Linje 65 – svarar på driftfrågor från manualen, kan småsnacka och hjälpa till med enkla beräkningar.",
+        spoken: "Jag är din kollega i örat för Linje 65 – mänsklig i samtal, källsäkrad i drift. Vad vill du kika på?",
         need: { clarify: false, question: "" },
-        cards: { summary: "AI-coach för Linje 65.", steps: [], explanation: "Jag använder manualen som källa för operativa råd. Om något saknas flaggar jag och kan föreslå utkast.", pitfalls: [], simple: "", pro: "", follow_up: "Vad vill du göra?", coverage: 0, matched_headings: [] },
-        follow_up: "Vad vill du göra?"
+        cards: { summary: "AI-coach för Linje 65.", steps: [], explanation: "Småprat och allmänna jobbfrågor svaras fritt. Operativa råd bygger alltid på manualen.", pitfalls: [], simple: "", pro: "", follow_up: "Vad behöver du?", coverage: 0, matched_headings: [] },
+        follow_up: "Vad behöver du?"
       });
       await logInteraction({ userId, question: userText, reply, lane: "identity", intent: "whoami", coverage: 0, matchedHeadings: [] });
       return res.status(200).json({ reply });
@@ -379,12 +433,10 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
-    /* -------- Lane: Conversation memory (med DB-fallback) -------- */
+    /* -------- Lane: Conversation memory -------- */
     const conv = parseConversationMemoryIntent(userText);
     if (conv) {
-      // 1) session-historik?
       let sourceHistory = Array.isArray(history) && history.length ? history : null;
-      // 2) annars från DB
       if (!sourceHistory || !sourceHistory.length) {
         const dbHist = await getRecentHistoryFromDB(userId, 50);
         if (dbHist.length) sourceHistory = dbHist;
@@ -400,8 +452,7 @@ export default async function handler(req, res) {
           if (last) spoken = (conv.type === "last_user") ? `Du sa: “${last}”.` : `Din senaste fråga var: “${last}”.`;
         } else if (conv.type === "assistant_last") {
           const lastA = lastAssistantSpoken(sourceHistory);
-          if (lastA) spoken = `Jag sa: “${lastA}”.`;
-          else spoken = "Jag har inget tidigare svar att upprepa ännu.";
+          spoken = lastA ? `Jag sa: “${lastA}”.` : "Jag har inget tidigare svar att upprepa ännu.";
         } else if (conv.type === "summary") {
           const entries = sortByTsIfAny(sourceHistory).map(h => h?.user).filter(Boolean).slice(-6);
           spoken = entries.length ? `Vi har pratat om: ${entries.join(", ")}.` : "Vi har inte pratat om något än.";
@@ -418,14 +469,70 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
-    /* -------- Lane: Smalltalk (mänsklig ton) -------- */
+    /* -------- Lane: Rewrite intents (förklara enklare / upprepa / sammanfatta / exempel / tempo) -------- */
+    const rw = parseRewriteIntent(userText);
+    if (rw) {
+      // Hämta källsvar (senaste assistent)
+      const base = await rewriteFromLast(userText, history, userId);
+      if (!base) {
+        const fallback = normalizeKeys({
+          spoken: "Jag har inget tidigare svar att jobba vidare på ännu.",
+          need: { clarify: false, question: "" },
+          cards: { summary: "Ingen historik hittad.", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
+          follow_up: ""
+        });
+        await logInteraction({ userId, question: userText, reply: fallback, lane: "rewrite", intent: rw.type, coverage: 0, matchedHeadings: [] });
+        return res.status(200).json({ reply: fallback });
+      }
+
+      if (rw.type === "pace_slow" || rw.type === "pace_fast") {
+        const reply = normalizeKeys({
+          spoken: rw.type === "pace_slow" ? "Okej, jag tar det lugnare." : "Absolut, jag håller lite högre tempo.",
+          need: { clarify: false, question: "" },
+          cards: { summary: "Pace uppdaterad.", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
+          follow_up: "",
+          meta: { pace: rw.type === "pace_slow" ? "slow" : "fast" }
+        });
+        await logInteraction({ userId, question: userText, reply, lane: "rewrite", intent: rw.type, coverage: 0, matchedHeadings: [] });
+        return res.status(200).json({ reply });
+      }
+
+      if (rw.type === "repeat") {
+        const reply = normalizeKeys({
+          spoken: base,
+          need: { clarify: false, question: "" },
+          cards: { summary: "Upprepning av senaste svar.", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
+          follow_up: ""
+        });
+        await logInteraction({ userId, question: userText, reply, lane: "rewrite", intent: "repeat", coverage: 0, matchedHeadings: [] });
+        return res.status(200).json({ reply });
+      }
+
+      // Anropa LLM för att omskriva base
+      const system = `Omskriv senaste svar till önskat format/ton. Returnera strikt JSON (spoken, need, cards{...}, follow_up). Var kort, pratvänlig, svensk kollega.`;
+      const user = JSON.stringify({
+        intent: rw.type,
+        base
+      });
+      let out = await callLLM(system, user, 0.4, 800);
+      out = normalizeKeys(out);
+      out.cards.coverage = 0; out.cards.matched_headings = [];
+      out.follow_up = out.follow_up || (rw.type === "simplify" ? "Vill du ha ett exempel också?" :
+                                        rw.type === "summarize" ? "Vill du att jag går igenom steg för steg?" :
+                                        rw.type === "examples" ? "Ska jag koppla detta till ett område på linjen?" :
+                                        "");
+      await logInteraction({ userId, question: userText, reply: out, lane: "rewrite", intent: rw.type, coverage: 0, matchedHeadings: [] });
+      return res.status(200).json({ reply: out });
+    }
+
+    /* -------- Lane: Smalltalk -------- */
     if (isSmalltalk(userText)) {
-      const system = `Du är en svensk JARVIS för Linje 65. Småprat: varm, kort och jordnära. Håll fokus på jobbet men låt det låta mänskligt. Returnera strikt JSON enligt schema.`;
+      const system = `Du är en svensk JARVIS för Linje 65. Småprat: varm, kort och jordnära. Låt det låta som en kollega. Returnera strikt JSON enligt schema.`;
       const user = `Småprat: """${userText}"""`;
       let out = await callLLM(system, user, 0.7, 600);
       out = normalizeKeys(out);
       out.cards.coverage = 0; out.cards.matched_headings = [];
-      if (!out.spoken) out.spoken = "Allt bra här – laddad för linjen. Vad vill du kika på?";
+      if (!out.spoken) out.spoken = "Allt bra här – på tårna. Vad vill du kika på?";
       await logInteraction({ userId, question: userText, reply: out, lane: "smalltalk", intent: "smalltalk", coverage: 0, matchedHeadings: [] });
       return res.status(200).json({ reply: out });
     }
@@ -459,6 +566,24 @@ export default async function handler(req, res) {
         await logInteraction({ userId, question: userText, reply, lane: "toolbelt", intent: "math", coverage: 0, matchedHeadings: [] });
         return res.status(200).json({ reply });
       } catch {}
+    }
+
+    /* -------- Lane: General knowledge (jobbrelaterat, ej parametrar) -------- */
+    if (isGeneralManufacturingQuery(userText)) {
+      const system = `
+Du är en svensk kollega. Svara kort (1–4 meningar) på allmänna *produktionsrelaterade* frågor (Lean/OEE/5S/TPM/HACCP/SMED/5 Why, säkerhet/kvalitet).
+- Ge principer och enkla exempel.
+- Ge INTE lokala parametrar. Om det behövs, hänvisa till manualen och be om område.
+Returnera strikt JSON enligt schema.`.trim();
+
+      const user = `Fråga: """${userText}"""`;
+      let out = await callLLM(system, user, 0.5, 700);
+      out = normalizeKeys(out);
+      out.cards.coverage = 0;
+      out.cards.matched_headings = [];
+      out.follow_up = out.follow_up || "Vill du att jag kopplar detta till ett specifikt område på linjen?";
+      await logInteraction({ userId, question: userText, reply: out, lane: "general", intent: "general_manufacturing", coverage: 0, matchedHeadings: [] });
+      return res.status(200).json({ reply: out });
     }
 
     /* -------- Lane: RAG (definition / operativt) -------- */
