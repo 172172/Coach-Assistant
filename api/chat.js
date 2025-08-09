@@ -118,7 +118,7 @@ function chunkKnowledge(text) {
 }
 
 // ---------- OpenAI-anrop ----------
-async function callOpenAI(system, user, { temperature=0.45, max_tokens=2000 } = {}) {
+async function callOpenAI(system, user, { temperature=0.6, max_tokens=2000 } = {}) {
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -172,9 +172,10 @@ Du är en AI-assistent skapad av Kevin — Douglas Adams möter JARVIS.
 Svenska alltid. Varm, kvick när det passar, men tydlig och ärlig.
 
 RÖST/TON för "spoken":
-- Korta, naturliga meningar. Små bekräftelser: "kanon", "japp", "lätt fixat".
-- Spegla användarens stil. Lätt, torr humor där det passar (inte vid säkerhet). Empati vid problem: "Det låter jobbigt, låt oss fixa det."
-- Vid steg: "Steg ett:", "Steg två:". Variera frasering för naturlighet (t.ex. "Börja med att...", "Sen kollar du...").
+- Naturligt tal: Använd korta, vardagliga meningar med variation – ibland "Japp, fixat!", ibland "Okej, låt oss ta det steg för steg, va?". Lägg in filler som "eh", "du vet", "typ" för mänsklighet, men inte för mycket (max 1-2 per svar).
+- Variera baserat på kontext: Om användaren låter stressad (t.ex. "problem!"), visa empati: "Åh, det suger – häng med här så löser vi det." Vid småprat: "Haha, bra fråga! Jag mår toppen, tack – och du?"
+- Pauser för TTS: Lägg in [paus] för korta andetag, t.ex. "Steg ett: Öppna ventilen [paus] och kolla trycket."
+- Undvik repetition: Variera fraser, t.ex. istället för alltid "Steg ett:", säg "Först av allt...", "Sen gör du så här...".
 - Småprat: Trevligt och personligt, t.ex. "Jag mår prima, tack! Själv då?" – håll det kort.
 
 ANALYS OCH INTELLIGENS:
@@ -218,7 +219,11 @@ RETURFORMAT (EXAKT JSON, ingen text utanför):
       ? `\nRubrik-kandidater (hjälp, ej tvingande):\n- ${hints.join("\n- ")}\n`
       : "";
 
-    // 3) Bygg userprompt (lagt till full history)
+    // Lägg till slumpmässigt humör för variation
+    const moods = ["avslappnad och hjälpsam", "lite skojfrisk", "empatisk och stödjande", "rak och effektiv"];
+    const randomMood = moods[Math.floor(Math.random() * moods.length)];
+
+    // 3) Bygg userprompt (lagt till full history och randomMood)
     const historyBlock = history.length ? `Full historik för kontext:\n${JSON.stringify(history)}\n` : "";
     const user = `
 Kunskap (manual – fulltext):
@@ -234,6 +239,7 @@ Användarens inmatning:
 "${message}"
 
 Instruktion:
+Lägg till humör för variation: Svara i en ${randomMood} ton.
 - Svara fritt på allmänna frågor.
 - Operativa råd måste bygga på manualen: lista matched_headings och sätt coverage realistiskt.
 - Om föregående tur bad om avsnitt/utrustning och användaren nu svarar kort (t.ex. "tapp"): betrakta det som tillräckligt och guida. Fråga INTE samma fråga igen.
@@ -243,7 +249,7 @@ Instruktion:
 `.trim();
 
     // 4) Första anrop
-    let out = await callOpenAI(system, user, { temperature: 0.45, max_tokens: 2000 });
+    let out = await callOpenAI(system, user, { temperature: 0.6, max_tokens: 2000 });
 
     // 5) Småprat ska aldrig klarifieras
     if (isSmalltalk(message)) {
