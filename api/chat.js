@@ -1,11 +1,12 @@
 // /api/chat.js
-// Fri, konversationell AI med personlighet. Operativt kräver manualstöd – annars fråga kort.
-// "spoken" skrivs som mänskligt tal: kort, rytm, små bekräftelser och lätt humor där det passar.
+// Fri, personlig AI. Operativt = bygg på manualen. Fixar "tapp"-svaret och undviker upprepad klarifiering.
+// Hintar rubriker ur manualen + gör en engångs-retry med tvingad kontext om modellen trots det frågar igen.
 
 const KNOWLEDGE_URL = "https://raw.githubusercontent.com/172172/Coach-Assistant/main/assistant-knowledge.txt";
 const CACHE_MS = 5 * 60 * 1000;
 
 let knowledgeCache = { text: null, fetchedAt: 0 };
+
 async function getKnowledge() {
   const now = Date.now();
   if (knowledgeCache.text && now - knowledgeCache.fetchedAt < CACHE_MS) return knowledgeCache.text;
@@ -16,7 +17,7 @@ async function getKnowledge() {
   return text;
 }
 
-// --- Heuristik ---
+// ---------- Hjälp: textnormalisering & heuristik ----------
 const norm = (s="") => s.toLowerCase()
   .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
   .replace(/ö/g,"o").replace(/ä/g,"a").replace(/å/g,"a")
@@ -36,9 +37,112 @@ function isSmalltalk(s="") {
   return /\b(hej+|halla|hallaa|tja+|tjaa|god morgon|godkvall|hur mar du|hur e det|laget|allt bra|mar bra|tack|tack sa mycket|varsagod|vad gor du)\b/.test(t);
 }
 function isQuestiony(s="") {
-  const t = norm(s);
+  if (!s) return false;
   if (/\?/.test(s)) return true;
-  return /\b(hur|vad|varfor|n[aä]r|var|vilken|vilka|kan du|skulle du|hur gor|hur funkar|var hittar)\b/.test(t);
+  const t = norm(s);
+  return /\b(hur|vad|varfor|nar|n[aä]r|var|vilken|vilka|kan du|skulle du|hur gor|hur funkar|var hittar)\b/.test(t);
+}
+
+// ---------- Rubrik-extrahering & hintning ----------
+function extractHeadings(knowledgeText) {
+  // Ta rubriker typ "### Avsnitt: ..." eller "## ..." eller "### ..."
+  const lines = knowledgeText.split(/\r?\n/);
+  const heads = [];
+  for (let i=0;i<lines.length;i++){
+    const m = lines[i].match(/^(#{2,4})\s*(.+?)\s*$/);
+    if (m) {
+      const title = m[2].trim();
+      if (title.length >= 3) heads.push(title);
+    }
+  }
+  return heads;
+}
+
+const SYN = {
+  tapp: ["tapp","tapplinje","tappning","fyllare","fyllning"],
+  gul: ["gul","gult","yellow"],
+  lampa: ["lampa","lampan","signal","indikator","status","varningslampa","pilotlampa","signallampa"],
+  sortbyte: ["sortbyte","sort-byte","receptbyte","omst","omstall","omställning","byta sort"],
+  cip: ["cip","rengor","sanit","skolj","flush","spolning"]
+};
+
+function tokenize(s="") {
+  return norm(s).split(/[^a-z0-9]+/).filter(w => w && w.length >= 3);
+}
+function expandTokens(tokens) {
+  const set = new Set(tokens);
+  tokens.forEach(t=>{
+    Object.entries(SYN).forEach(([key, arr])=>{
+      if (t.includes(key)) arr.forEach(x=>set.add(x));
+    });
+  });
+  return Array.from(set);
+}
+
+function scoreHeading(h, tokens) {
+  const hn = norm(h);
+  let score = 0;
+  tokens.forEach(t => { if (hn.includes(t)) score += t.length >= 4 ? 2 : 1; });
+  return score;
+}
+
+function suggestHeadings(knowledgeText, userMsg, prev) {
+  const headings = extractHeadings(knowledgeText);
+  const bag = [
+    userMsg || "",
+    prev?.question || "",
+    prev?.assistant?.need?.question || ""
+  ].join(" ");
+  const toks = expandTokens(tokenize(bag));
+  if (!toks.length) return [];
+  const scored = headings.map(h => ({ h, s: scoreHeading(h, toks) }))
+    .filter(o => o.s > 0)
+    .sort((a,b)=>b.s - a.s)
+    .slice(0, 8)
+    .map(o=>o.h);
+  return scored;
+}
+
+// ---------- OpenAI-anrop ----------
+async function callOpenAI(system, user, { temperature=0.45, max_tokens=2000 } = {}) {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      temperature,
+      max_tokens,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user }
+      ],
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    console.error("OpenAI chat error:", data);
+    throw new Error("Chat API error");
+  }
+  let content = data.choices?.[0]?.message?.content || "";
+  let out;
+  try { out = JSON.parse(content); }
+  catch {
+    out = {
+      spoken: "Hoppsan — säg det gärna en gång till, jag lyssnar.",
+      need: { clarify: true, question: "Kan du säga det på ett annat sätt?" },
+      cards: {
+        summary: "Behöver förtydligande.",
+        steps: [], explanation: "", pitfalls: [],
+        simple: "", pro: "", follow_up: "",
+        coverage: 0, matched_headings: []
+      },
+      follow_up: ""
+    };
+  }
+  return out;
 }
 
 export default async function handler(req, res) {
@@ -48,20 +152,18 @@ export default async function handler(req, res) {
     const { message = "", prev = null } = req.body || {};
     const knowledge = await getKnowledge();
 
-    // --- Systemprompt med personlighet för SPOKEN ---
+    // 1) Bygg personlighet + regler
     const system = `
-Du är en AI-assistent skapad av Kevin – tänk Douglas Adams möter JARVIS.
-Svara alltid på svenska. Var varm, snabb i tanken och hjälpsam.
+Du är en AI-assistent skapad av Kevin — Douglas Adams möter JARVIS.
+Svenska alltid. Varm, kvick när det passar, men tydlig och ärlig.
 
 RÖST/TON för "spoken":
-- Tala som en kollega: korta meningar, naturligt tempo, små bekräftelser: "kanon", "japp", "lätt fixat", "vi tar det".
-- Spegla användarens stil (vardagligt vs. mer formellt).
-- Lätt, torr humor där det passar (inte vid säkerhet). Ingen standup – en blinkning räcker.
-- Använd pauser med "—" eller "…" sparsamt för rytm.
-- Vid steg: "Steg ett:", "Steg två:". Håll meningslängd 6–12 ord.
+- Korta, naturliga meningar. Små bekräftelser: "kanon", "japp", "lätt fixat".
+- Spegla användarens stil. Lätt, torr humor där det passar (inte vid säkerhet).
+- Vid steg: "Steg ett:", "Steg två:". 6–12 ord per mening ungefär.
 
 SANNING/KÄLLA:
-- Allmänna frågor: svara fritt.
+- Allmänt: svara fritt.
 - Operativt (drift/linje/procedurer/kvalitet/säkerhet/parametrar/felsökning): bygg på "Kunskap" nedan.
   * NUMRERADE steg när relevant.
   * Lista rubriker i "matched_headings".
@@ -70,7 +172,11 @@ SANNING/KÄLLA:
   * Om manualen inte täcker: säg det rakt och föreslå uppdatering (ge inte operativa steg).
 
 SMÅPRAT:
-- Hälsningar/"hur mår du"/"tack": svara kort och trevligt. Sätt need.clarify=false.
+- Hälsningar/"hur mår du"/"tack": kort och trevligt. need.clarify=false.
+
+VIKTIGT:
+- Om föregående tur bad om avsnitt/utrustning och användaren svarar med 1–3 ord (t.ex. "tapp"): betrakta det som TILLRÄCKLIGT. Ställ inte samma fråga igen. Gå vidare och guida utifrån manualen.
+- Om rubrik-kandidater tillhandahålls: använd dem om relevanta och lista dem i matched_headings.
 
 RETURFORMAT (EXAKT JSON, ingen text utanför):
 {
@@ -91,12 +197,19 @@ RETURFORMAT (EXAKT JSON, ingen text utanför):
 }
 `.trim();
 
+    // 2) Hintade rubriker utifrån manuella headings + dina ord
+    const hints = suggestHeadings(knowledge, message, prev);
+    const hintsBlock = hints.length
+      ? `\nRubrik-kandidater (hjälp, ej tvingande):\n- ${hints.join("\n- ")}\n`
+      : "";
+
+    // 3) Bygg userprompt
     const user = `
 Kunskap (manual – fulltext):
 """
 ${knowledge}
 """
-
+${hintsBlock}
 Tidigare tur (för kontext):
 ${prev ? JSON.stringify(prev) : "null"}
 
@@ -106,53 +219,16 @@ Användarens inmatning:
 Instruktion:
 - Svara fritt på allmänna frågor.
 - Operativa råd måste bygga på manualen: lista matched_headings och sätt coverage realistiskt.
-- Saknas underlag: be om EN precisering eller säg att manualen saknas/behöver uppdateras (undvik operativa steg).
-- Småprat: svara kort, trevligt; need.clarify=false.
+- Om föregående tur bad om avsnitt/utrustning och användaren nu svarar kort (t.ex. "tapp"): betrakta det som tillräckligt och guida. Fråga INTE samma fråga igen.
+- Saknas underlag: be om EN precisering (ny, mer specifik) eller säg att manualen saknas/behöver uppdateras (undvik operativa steg).
 - "spoken" ska låta som mänskligt tal (se RÖST/TON).
-- Fyll ALLA fält i JSON-schemat. Ingen text utanför JSON.
+- Fyll ALLA fält. Ingen text utanför JSON.
 `.trim();
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        temperature: 0.45,        // lite högre för mer personlighet
-        max_tokens: 2000,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user }
-        ],
-      }),
-    });
+    // 4) Första anrop
+    let out = await callOpenAI(system, user, { temperature: 0.45, max_tokens: 2000 });
 
-    const data = await response.json();
-    if (!response.ok) {
-      console.error("OpenAI chat error:", data);
-      return res.status(500).json({ error: "Chat API error", details: data });
-    }
-
-    let content = data.choices?.[0]?.message?.content || "";
-    let out;
-    try { out = JSON.parse(content); }
-    catch {
-      out = {
-        spoken: "Hoppsan — säg det gärna en gång till, jag lyssnar.",
-        need: { clarify: true, question: "Kan du säga det på ett annat sätt?" },
-        cards: {
-          summary: "Behöver förtydligande.",
-          steps: [], explanation: "", pitfalls: [],
-          simple: "", pro: "", follow_up: "",
-          coverage: 0, matched_headings: []
-        },
-        follow_up: ""
-      };
-    }
-
-    // ---- Småprat: aldrig klarifiering
+    // 5) Småprat ska aldrig klarifieras
     if (isSmalltalk(message)) {
       out.need = { clarify: false };
       if (!out.spoken || /precisera|oklart|mer info/i.test(out.spoken)) {
@@ -164,46 +240,73 @@ Instruktion:
       return res.status(200).json({ reply: out });
     }
 
-    // ---- Vanligt snack (inte operativt, inte tydlig fråga) → ingen klarifiering
+    // 6) Tunn säkring för operativt utan manualstöd
     const isOperativeQ = looksOperationalQuestion(message) || looksOperationalQuestion(prev?.question || "");
     const hasOperativeTone = looksOperationalAnswer(out.cards, out.spoken);
-    if (!isOperativeQ && !hasOperativeTone && out?.need?.clarify && !isQuestiony(message)) {
-      out.need = { clarify: false };
-      out.spoken = out.spoken && !/precisera|oklart/.test(out.spoken)
-        ? out.spoken
-        : "Härligt — berätta vad du vill göra så hänger jag på.";
-      out.cards.summary = out.cards.summary || "Samtal";
-      return res.status(200).json({ reply: out });
-    }
-
-    // ---- Säkring för operativt utan manualstöd
     const heads = Array.isArray(out?.cards?.matched_headings) ? out.cards.matched_headings : [];
     const cov = Number(out?.cards?.coverage ?? 0);
     const steps = Array.isArray(out?.cards?.steps) ? out.cards.steps : [];
 
-    if ((isOperativeQ || hasOperativeTone) && heads.length === 0 && cov < 0.5) {
-      out.spoken = "Det där låter operativt. Säg exakt utrustning/avsnitt så pekar jag dig rätt i manualen — deal?";
-      out.need = { clarify: true, question: "Vilken utrustning/avsnitt gäller det? (t.ex. Tapp – sortbyte, CIP – tapp, Kvalitetsprov: produkt X)" };
+    // Om modellen upprepar samma klarifiering och användaren redan kort-svarat (ex. "tapp") → engångs-retry med tvingad kontext
+    const prevWantedClarify = !!(prev && prev.assistant && prev.assistant.need && prev.assistant.need.clarify);
+    const shortAnswerNow = !isSmalltalk(message) && !isQuestiony(message) && tokenize(message).length <= 3;
+
+    if (out?.need?.clarify && prevWantedClarify && shortAnswerNow) {
+      const forced = `
+Kunskap (manual – fulltext):
+"""
+${knowledge}
+"""
+${hintsBlock}
+KONTRAINTSTRUKTION (viktig):
+- Användaren har nu preciserat: utrustning/avsnitt = "${message}".
+- Fråga INTE samma sak igen. Guida nu utifrån manualen. Lista relevanta rubriker och ge steg.
+- Om manualen ändå inte täcker: säg det rakt och föreslå uppdatering. Inga gissningar.
+
+Returnera samma JSON-schema som tidigare. Ingen text utanför JSON.
+`.trim();
+      out = await callOpenAI(system, forced, { temperature: 0.4, max_tokens: 1800 });
+    }
+
+    // Upprepad småprats-klarifiering? Neka.
+    if (!isOperativeQ && !hasOperativeTone && out?.need?.clarify && !isQuestiony(message)) {
+      out.need = { clarify: false };
+      out.spoken = out.spoken && !/precisera|oklart/.test(out.spoken)
+        ? out.spoken
+        : "Toppen — berätta vad du vill göra så kör vi.";
+      out.cards.summary = out.cards.summary || "Samtal";
+      return res.status(200).json({ reply: out });
+    }
+
+    // Operativ skydd: helt utan manualstöd → fråga mer specifikt
+    const finalHeads = Array.isArray(out?.cards?.matched_headings) ? out.cards.matched_headings : [];
+    const finalCov = Number(out?.cards?.coverage ?? 0);
+    const finalSteps = Array.isArray(out?.cards?.steps) ? out.cards.steps : [];
+
+    if ((isOperativeQ || looksOperationalAnswer(out.cards, out.spoken)) && finalHeads.length === 0 && finalCov < 0.5) {
+      out.spoken = "Det där låter operativt. Säg vilken del i tappen eller vilket larm/indikator det gäller, så plockar jag rätt avsnitt ur manualen.";
+      out.need = { clarify: true, question: "Exakt vad i tappen? (t.ex. status 'gul lampa', larm-ID, eller moment i sortbyte)" };
       out.cards = {
-        summary: "Operativ fråga utan tydligt manualstöd – ber om precisering.",
+        summary: "Operativ fråga utan tydligt manualstöd – ber om specifik precisering.",
         steps: [], explanation: "", pitfalls: [],
-        simple: "Säg exakt vilket avsnitt/utrustning så guidar jag rätt.",
+        simple: "Säg vilken del i tappen det gäller.",
         pro: "Kräver rubrikvalidering innan operativa steg lämnas.",
-        follow_up: "Vill du att jag föreslår närmaste avsnitt ur manualen?",
-        coverage: cov || 0, matched_headings: []
+        follow_up: "Vill du att jag listar närmaste rubriker som matchar?",
+        coverage: finalCov || 0, matched_headings: []
       };
       out.follow_up = out.cards.follow_up;
       return res.status(200).json({ reply: out });
     }
 
-    // ---- Delvis stöd → leverera men be om verifiering
-    if ((isOperativeQ || hasOperativeTone) && (cov < 0.6 || heads.length < 1) && steps.length > 0) {
-      out.spoken = (out.spoken || "Okej.") + " Kika gärna mot rubrikerna i detaljerna och be mig fortsätta när du vill.";
+    // Delvis stöd → leverera men be om verifiering
+    if ((isOperativeQ || hasOperativeTone) && (finalCov < 0.6 || finalHeads.length < 1) && finalSteps.length > 0) {
+      out.spoken = (out.spoken || "Okej.") + " Kika gärna mot rubrikerna i detaljerna och säg 'nästa' när du vill fortsätta.";
       out.cards.follow_up = out.cards.follow_up || "Vill du att jag delar upp nästa del?";
       return res.status(200).json({ reply: out });
     }
 
     return res.status(200).json({ reply: out });
+
   } catch (err) {
     console.error("chat.js internal error:", err);
     return res.status(500).json({ error: "Serverfel i chat.js", details: err.message || String(err) });
