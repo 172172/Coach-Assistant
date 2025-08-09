@@ -1,6 +1,6 @@
 // /api/chat.js
-// Router m. lanes: smalltalk, conv-memory, profile-light, toolbelt (math/units), RAG (definition/operativt)
-// + Strict JSON, coverage-gate, param-sanitizer, optional gap-drafts/logging.
+// Router: smalltalk, conv-memory, profile-light, toolbelt (math/units), RAG (definition/operativt)
+// Robust konversationsminne m/ tidsstämplar, strict JSON, gates, sanitizer.
 
 import { q } from "./db.js";
 import fetch from "node-fetch";
@@ -54,10 +54,11 @@ function isDefinitionQuery(s = "") {
 /* ================= Conversation memory intents ================= */
 function parseConversationMemoryIntent(s = "") {
   const t = norm(s);
-  if (/\b(forsta fragan|min forsta fraga|vad var min forsta fraga|fragan jag borjade med)\b/.test(t)) {
-    return { type: "first" };
-  }
-  if (/\b(forra fragan|senaste fragan|vad var min forra fraga|vad fragade jag nyss|vad var min senaste fraga)\b/.test(t)) {
+  // "i början"-varianter
+  if (/\b(i borjan|i början)\b.*\b(fragan|fraga|jag fragade|jag stalde)\b/.test(t)) return { type: "first" };
+  if (/\b(forsta fragan|min forsta fraga|vad var min forsta fraga|fragan jag borjade med)\b/.test(t)) return { type: "first" };
+
+  if (/\b(forra fragan|senaste fragan|vad var min forra fraga|vad fragade jag nyss|vad var min senaste fraga|min senaste fraga)\b/.test(t)) {
     return { type: "last" };
   }
   if (/\b(vad sa du nyss|vad svarade du nyss)\b/.test(t)) {
@@ -69,19 +70,16 @@ function parseConversationMemoryIntent(s = "") {
   return null;
 }
 
-/* ================= Toolbelt: math & units (deterministiskt) ================= */
+/* ================= Toolbelt: math & units ================= */
 const MATH_SAFE = /^[\d\s()+\-*/.,%]+$/;
 
 function isMathExpr(s = "") {
   const t = s.replace(/,/g, ".").trim();
   if (!MATH_SAFE.test(t)) return false;
-  // måste innehålla minst en operator
   return /[+\-*/%]/.test(t);
 }
 function evalMath(expr) {
-  // enkel % till /100
   let e = expr.replace(/,/g, ".").replace(/(\d+(\.\d+)?)%/g, "($1/100)");
-  // paranteskontroll
   const open = (e.match(/\(/g) || []).length, close = (e.match(/\)/g) || []).length;
   if (open !== close) throw new Error("Unbalanced parentheses");
   if (e.length > 120) throw new Error("Expr too long");
@@ -93,23 +91,20 @@ function evalMath(expr) {
 }
 
 const UNIT_ALIASES = {
-  l: ["l", "liter", "liters", "literre", "litre"],
-  ml: ["ml", "milliliter", "millilitrar"],
-  dl: ["dl", "deciliter", "decilitrar"],
-  cl: ["cl", "centiliter", "centilitrar"],
-  mm: ["mm", "millimeter", "millimetrar"],
-  cm: ["cm", "centimeter", "centimetrar"],
-  m: ["m", "meter", "metrar"]
+  l: ["l","liter","liters","litre"],
+  ml: ["ml","milliliter","millilitrar"],
+  dl: ["dl","deciliter","decilitrar"],
+  cl: ["cl","centiliter","centilitrar"],
+  mm: ["mm","millimeter","millimetrar"],
+  cm: ["cm","centimeter","centimetrar"],
+  m: ["m","meter","metrar"]
 };
 function normUnit(u) {
   const x = norm(u).replace(/\./g, "");
-  for (const key of Object.keys(UNIT_ALIASES)) {
-    if (UNIT_ALIASES[key].includes(x)) return key;
-  }
+  for (const key of Object.keys(UNIT_ALIASES)) if (UNIT_ALIASES[key].includes(x)) return key;
   return null;
 }
 function parseUnitConv(s = "") {
-  // ex: "3 liter i ml", "3 l till ml", "200 ml -> l", "5 cm i mm"
   const t = s.toLowerCase().replace(/->/g, " i ").replace(/\s+til+l\s+/g, " i ");
   const m = t.match(/([\d.,]+)\s*([a-zA-Z]+)\s*(?:i|till)\s*([a-zA-Z]+)/);
   if (!m) return null;
@@ -120,19 +115,10 @@ function parseUnitConv(s = "") {
   return { val, from, to };
 }
 function convertUnits({ val, from, to }) {
-  // längd: mm<->cm<->m
   const lenBase = { mm: 0.001, cm: 0.01, m: 1 };
-  // volym: l, dl, cl, ml
   const volBase = { l: 1, dl: 0.1, cl: 0.01, ml: 0.001 };
-
-  if (from in lenBase && to in lenBase) {
-    const meters = val * lenBase[from];
-    return meters / lenBase[to];
-  }
-  if (from in volBase && to in volBase) {
-    const liters = val * volBase[from];
-    return liters / volBase[to];
-  }
+  if (from in lenBase && to in lenBase) return (val * lenBase[from]) / lenBase[to];
+  if (from in volBase && to in volBase) return (val * volBase[from]) / volBase[to];
   throw new Error("Unsupported units");
 }
 
@@ -166,7 +152,7 @@ function passesOperativeGate({ coverage, matchedHeadings, scores }) {
 }
 
 /* ================= LLM (strict JSON) ================= */
-async function callLLM(system, user, temp = 0.6, maxTokens = 1800) {
+async function callLLM(system, user, temp = 0.6, maxTokens = 1600) {
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
@@ -197,16 +183,18 @@ async function logInteraction({ userId, question, reply, lane, intent, coverage,
   try {
     if (process.env.LOG_CONVO !== "1") return;
     await q(
-      `insert into messages(user_id, asked_at, question, reply_json, smalltalk, is_operational, coverage, matched_headings)
-       values ($1, now(), $2, $3::jsonb, $4, $5, $6, $7)`,
+      `insert into messages(user_id, asked_at, question, reply_json, smalltalk, is_operational, coverage, matched_headings, lane, intent)
+       values ($1, now(), $2, $3::jsonb, $4, $5, $6, $7, $8, $9)`,
       [
         userId,
         question,
-        JSON.stringify({ lane: lane || null, intent: intent || null, reply }),
+        JSON.stringify(reply || {}),
         lane === "smalltalk",
         lane === "operative",
         Number(coverage) || 0,
-        matchedHeadings || []
+        matchedHeadings || [],
+        lane || null,
+        intent || null
       ]
     );
   } catch (e) { console.warn("logInteraction failed:", e?.message || e); }
@@ -261,6 +249,25 @@ function normalizeKeys(out) {
   return out;
 }
 
+/* ================= History helpers (robust first/last) ================= */
+function sortByTsIfAny(arr = []) {
+  const hasTs = arr.some(x => typeof x?.ts === "number");
+  if (!hasTs) return arr.slice(); // behåll given ordning
+  return arr.slice().sort((a,b) => (a.ts||0) - (b.ts||0));
+}
+function firstUserQuestion(history = []) {
+  const entries = sortByTsIfAny(history).filter(h => h && typeof h.user === "string" && h.user.trim());
+  return entries[0]?.user || "";
+}
+function lastUserQuestion(history = []) {
+  const entries = sortByTsIfAny(history).filter(h => h && typeof h.user === "string" && h.user.trim());
+  return entries.length ? entries[entries.length - 1].user : "";
+}
+function lastAssistantSpoken(history = []) {
+  const entries = sortByTsIfAny(history).filter(h => h && h.assistant && typeof h.assistant.spoken === "string" && h.assistant.spoken.trim());
+  return entries.length ? entries[entries.length - 1].assistant.spoken : "";
+}
+
 /* ================= Handler ================= */
 export default async function handler(req, res) {
   try {
@@ -280,7 +287,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
-    /* -------- Lane 1: Spara/Profil-light -------- */
+    /* -------- Lane: Profile-light (save/query) -------- */
     const saveCmd = parseSaveCommand(userText);
     if (saveCmd?.intent === "save") {
       const patch = {};
@@ -313,23 +320,19 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
-    /* -------- Lane 2: Conversation memory -------- */
+    /* -------- Lane: Conversation memory -------- */
     const conv = parseConversationMemoryIntent(userText);
     if (conv) {
-      const recent = Array.isArray(history) ? history : [];
       let spoken = "Jag har ingen historik i den här sessionen ännu.";
-      if (conv.type === "first" && recent.length) {
-        const first = recent[0]?.user || "";
-        if (first) spoken = `Din första fråga var: “${first}”.`;
-      } else if (conv.type === "last" && recent.length) {
-        const lastUser = recent[recent.length - 1]?.user || "";
-        if (lastUser) spoken = `Din senaste fråga var: “${lastUser}”.`;
-      } else if (conv.type === "assistant_last" && recent.length) {
-        const lastA = recent[recent.length - 1]?.assistant?.spoken || "";
-        if (lastA) spoken = `Jag sa: “${lastA}”.`;
-      } else if (conv.type === "summary" && recent.length) {
-        const topics = recent.map(x => x.user).filter(Boolean).slice(-6);
-        spoken = `Vi har pratat om: ${topics.join(", ")}.`;
+      const first = firstUserQuestion(history);
+      const last = lastUserQuestion(history);
+      const lastA = lastAssistantSpoken(history);
+      if (conv.type === "first" && first)        spoken = `Din första fråga var: “${first}”.`;
+      if (conv.type === "last" && last)          spoken = `Din senaste fråga var: “${last}”.`;
+      if (conv.type === "assistant_last" && lastA) spoken = `Jag sa: “${lastA}”.`;
+      if (conv.type === "summary") {
+        const entries = sortByTsIfAny(history).map(h => h?.user).filter(Boolean).slice(-6);
+        spoken = entries.length ? `Vi har pratat om: ${entries.join(", ")}.` : "Vi har inte pratat om något än.";
       }
       const reply = normalizeKeys({
         spoken,
@@ -341,7 +344,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
-    /* -------- Lane 3: Smalltalk -------- */
+    /* -------- Lane: Smalltalk -------- */
     if (isSmalltalk(userText)) {
       const system = `Du är en svensk JARVIS för Linje 65. Småprat: kort, trevligt, jobb-fokuserat. Returnera strikt JSON enligt schema.`;
       const user = `Småprat: """${userText}"""`;
@@ -353,7 +356,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply: out });
     }
 
-    /* -------- Lane 4: Toolbelt (math & units) -------- */
+    /* -------- Lane: Toolbelt (units & math) -------- */
     const unitReq = parseUnitConv(userText);
     if (unitReq) {
       try {
@@ -384,7 +387,7 @@ export default async function handler(req, res) {
       } catch {}
     }
 
-    /* -------- Lane 5: RAG (definition / operativt) -------- */
+    /* -------- Lane: RAG (definition / operativt) -------- */
     const { context, coverage, matchedHeadings, scores } = await retrieveContext(userText, 8);
     const definitionMode = isDefinitionQuery(userText);
 
@@ -419,7 +422,6 @@ Schema:
     const defSignalOK = definitionMode && (coverage >= 0.35 || matchedHeadings.length >= 1);
 
     if (!operativeOK && !defSignalOK) {
-      // Svagt underlag → precisering + ev. gap
       out.need = { clarify: true, question: "Vilket område syftar du på? Ex: 'OCME formatbyte' eller 'Kisters limaggregat'." };
       out.spoken = "Jag saknar underlag i manualen för att svara exakt. Specificera område så guidar jag.";
       out.cards.summary = "Underlaget räcker inte för ett säkert svar.";
@@ -434,7 +436,6 @@ Schema:
       }
     }
 
-    // Definition-läge: rensa steg/parametrar och stäng av clarify
     if (defSignalOK) {
       out.cards.steps = [];
       out.cards.pitfalls = [];
@@ -443,10 +444,8 @@ Schema:
       out.follow_up = out.follow_up || "Vill du att jag beskriver processen steg för steg?";
     }
 
-    // Sanera siffror som inte finns i manualen
     out = sanitizeParameters(out, context);
 
-    // Mindre tjat efter tidigare clarify + kort fråga
     const prevWanted = !!(prev && prev.assistant && prev.assistant.need && prev.assistant.need.clarify);
     const isVeryShort = userText.split(/\s+/).filter(Boolean).length <= 3;
     if (out?.need?.clarify && prevWanted && isVeryShort) {
