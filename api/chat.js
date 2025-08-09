@@ -1,5 +1,5 @@
 // /api/chat.js
-// RAG + Memory + Strict Schema + Coverage Gate + Definition Mode + Param Sanitizer + Gap Drafts
+// RAG + Memory + Strict Schema + Coverage Gate + Improved Definition Mode + Param Sanitizer + Gap Drafts
 
 import { q } from "./db.js";
 import fetch from "node-fetch";
@@ -44,13 +44,12 @@ function parseSaveCommand(s = "") {
   return { intent: "save", line_name };
 }
 
-// Definition-läge: mycket kort fråga / akronym / “vad är …”
+// Definition-läge: “vad är …”, “vad gör …”, korta termer/akronymer
 function isDefinitionQuery(s = "") {
-  const t = norm(s);
-  const words = t.trim().split(/\s+/).filter(Boolean);
-  if (/\b(vad ar|vad är|vad betyder)\b/.test(t)) return true;
-  if (words.length <= 2) return true; // t.ex. "CIP", "pastor", "fals"
-  return false;
+  const t = norm(s).trim();
+  if (/\b(vad ar|vad är|vad betyder|vad gor|vad gör)\b/.test(t)) return true;
+  const words = t.split(/\s+/).filter(Boolean);
+  return words.length <= 2; // t.ex. "CIP", "fals"
 }
 
 /* ================= Retrieval ================= */
@@ -76,7 +75,7 @@ async function retrieveContext(userText, k = 8) {
   return { context, coverage, matchedHeadings, scores };
 }
 
-// Gate: kräver bra täckning OCH flera olika rubriker OCH minst två starka träffar
+// Gate för normala operativa svar
 function passesCoverageGate({ coverage, matchedHeadings, scores }) {
   const strongHits = (scores || []).filter(s => s >= 0.60).length;
   const distinct = new Set((matchedHeadings || []).map(h => (h || "").toLowerCase().trim())).size;
@@ -92,6 +91,7 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1800) {
       model: "gpt-4o",
       temperature: temp,
       max_tokens: maxTokens,
+      response_format: { type: "json_object" }, // tvinga JSON
       messages: [{ role: "system", content: system }, { role: "user", content: user }]
     })
   });
@@ -143,14 +143,11 @@ Returnera JSON: { "title": string, "heading": string, "summary": string, "outlin
 }
 
 /* ================= Sanitizers ================= */
-// Plocka alla "tal" ur en text
 const NUMBER_RE = /\b\d+([.,]\d+)?\b/g;
 
-// Om siffror förekommer i svaret men inte i ManualContext → ersätt med platshållare
 function sanitizeParameters(out, context) {
   const ctxNums = new Set((context.match(NUMBER_RE) || []).map(x => x));
   const replaceNums = (s) => String(s || "").replace(NUMBER_RE, (m) => (ctxNums.has(m) ? m : "[PLATS FÖR VÄRDE]"));
-
   if (out.spoken) out.spoken = replaceNums(out.spoken);
   if (out.cards) {
     out.cards.summary && (out.cards.summary = replaceNums(out.cards.summary));
@@ -163,7 +160,7 @@ function sanitizeParameters(out, context) {
   return out;
 }
 
-// Mappa vanliga fel-nycklar från modellen
+// Normalize nycklar (t.ex. "svar" -> "spoken")
 function normalizeKeys(out) {
   if (out && !out.spoken && typeof out.svar === "string") out.spoken = out.svar;
   if (!out.need) out.need = { clarify: false, question: "" };
@@ -274,7 +271,7 @@ Fråga:
 Instruktioner:
 - Fyll matched_headings och coverage (${coverage.toFixed(2)} ±0.05 om motiverat).
 - Om coverage svag eller inga rubriker → be om precisering, inga exakta steg/parametrar.
-- Om frågan bara är en term (definition-läge), ge kort definition från ManualContext, inga steg/parametrar.
+- Om frågan är en definition/“vad gör/är …” → ge kort förklaring från ManualContext, inga steg/parametrar.
 Schema:
 {"spoken": string, "need": {"clarify": boolean, "question"?: string}, "cards": {"summary": string, "steps": string[], "explanation": string, "pitfalls": string[], "simple": string, "pro": string, "follow_up": string, "coverage": number, "matched_headings": string[]}, "follow_up": string}`.trim();
 
@@ -285,9 +282,10 @@ Schema:
     if (!out.cards.matched_headings.length) out.cards.matched_headings = matchedHeadings;
     if (typeof out.cards.coverage !== "number" || isNaN(out.cards.coverage)) out.cards.coverage = coverage;
 
-    // --- Hård gate ---
-    const ok = passesCoverageGate({ coverage: out.cards.coverage, matchedHeadings: out.cards.matched_headings, scores });
-    if (!ok) {
+    // --- Gate / Definition undantag ---
+    const okByGate = passesCoverageGate({ coverage: out.cards.coverage, matchedHeadings: out.cards.matched_headings, scores });
+    const hasDefSignal = definitionMode && (coverage >= 0.35 || matchedHeadings.length >= 1);
+    if (!okByGate && !hasDefSignal) {
       out.need = { clarify: true, question: "Vilket område syftar du på? Ex: 'OCME formatbyte' eller 'Kisters limaggregat'." };
       out.spoken = "Jag saknar underlag i manualen för att svara exakt. Specificera område så guidar jag.";
       out.cards.summary = "Underlaget räcker inte för ett säkert svar.";
@@ -297,18 +295,16 @@ Schema:
       out.cards.simple = "";
       out.cards.pro = "";
       out.cards.follow_up = "Vill du att jag skapar ett utkast till nytt avsnitt? Säg: 'Skapa utkast'.";
-      // skapa gap-utkast i bakgrunden
       await createGapDraft({ userId, question: userText, coverage, matchedHeadings, scores });
     }
 
-    // --- Definition-läge: kort förklaring, inga steg/parametrar ---
-    if (definitionMode) {
+    // --- Definition-läge: kort förklaring, inga steg/parametrar, ingen clarify ---
+    if (definitionMode && hasDefSignal) {
       out.cards.steps = [];
       out.cards.pitfalls = [];
       out.cards.pro = "";
-      // flagga aldrig clarify i ett rent “vad är/term”
       out.need = { clarify: false, question: "" };
-      out.follow_up = out.follow_up || "Vill du gå in på ett specifikt moment inom detta?";
+      out.follow_up = out.follow_up || "Vill du att jag beskriver processen steg för steg?";
     }
 
     // --- Sanera parametervärden som inte finns i manualen ---
