@@ -57,18 +57,12 @@
     const debugInput = document.getElementById('debugInput');
     const debugBtn = document.getElementById('debugBtn');
 
-    // ----- Persistent userId (per browser) -----
-    const UID_KEY = "coach_user_id";
-    let USER_ID = localStorage.getItem(UID_KEY);
-    if (!USER_ID) {
-      USER_ID = (crypto?.randomUUID?.() || Math.random().toString(36).slice(2) + Date.now().toString(36)).slice(0, 24);
-      localStorage.setItem(UID_KEY, USER_ID);
-    }
-
     // ---------- STATE ----------
     let state = 'IDLE', running = false;
     let chatHistory = [];
-    let lastOrigin = 'voice';
+
+    // Pace (ny): styr hur många steg som läses per chunk
+    let STEP_CHUNK_SIZE = 4; // normal = 4 (slow = 2, fast = 6)
 
     // Mic / analyser
     let micStream = null, mediaRecorder = null, chunks = [];
@@ -106,7 +100,10 @@
 
     // Hallu/eko-filter
     const HALLU = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
-    const SHORT_FILLERS = ["tack","tack så mycket","tack för mig","hej","hejdå","mm","mmm","mhm","öh","eh","okej","ok"];
+    const SHORT_FILLERS = [
+      "tack","tack så mycket","tack för mig",
+      "hej","hejdå","mm","mmm","mhm","öh","eh","okej","ok"
+    ];
     const STEP_COMMANDS = /(nästa|fortsätt|mer|continue|next)/i;
 
     // ---------- Utils ----------
@@ -116,6 +113,15 @@
         .replace(/[åÅ]/g,"a").replace(/[äÄ]/g,"a").replace(/[öÖ]/g,"o")
         .replace(/[^a-z0-9\s]/g," ")
         .replace(/\s+/g," ").trim();
+    }
+    function isShortFiller(t) {
+      const x = (t||"").toLowerCase().trim();
+      if (!x) return true;
+      if (x.length <= 2) return true;
+      if (SHORT_FILLERS.includes(x)) return true;
+      const words = x.split(/\s+/);
+      if (words.length <= 2 && !/[?]/.test(x)) return true;
+      return false;
     }
     function likelyEchoOfTTS(text){
       const within = Date.now() - lastTTSEnd < ECHO_SUPPRESS_MS;
@@ -127,7 +133,8 @@
       const ts = t.split(" ").filter(w=>w.length>=3);
       if (!ts.length) return true;
       const ls = new Set(lastSpokenTextNorm.split(" ").filter(w=>w.length>=3));
-      let overlap=0; ts.forEach(w=>{ if(ls.has(w)) overlap++; });
+      let overlap=0;
+      ts.forEach(w=>{ if(ls.has(w)) overlap++; });
       return (overlap / ts.length) >= 0.7;
     }
 
@@ -199,26 +206,44 @@
           ttsCtx = new (window.AudioContext||window.webkitAudioContext)(); await ttsCtx.resume().catch(()=>{});
           const srcNode = ttsCtx.createMediaElementSource(ttsAudio);
           ttsGainNode = ttsCtx.createGain(); ttsGainNode.gain.value = parseFloat(document.getElementById('volumeSlider').value) || 0.9;
-          document.getElementById('volumeSlider').addEventListener('input', (e) => { if (ttsGainNode) ttsGainNode.gain.value = parseFloat(e.target.value); });
+          document.getElementById('volumeSlider').addEventListener('input', (e) => {
+            if (ttsGainNode) ttsGainNode.gain.value = parseFloat(e.target.value);
+          });
           ttsAnalyser = ttsCtx.createAnalyser(); ttsAnalyser.fftSize = 1024;
           srcNode.connect(ttsGainNode).connect(ttsAnalyser).connect(ttsCtx.destination);
           await ttsAudio.play();
-          ttsAudio.onended = ()=>{ abortBtn.style.display='none'; lastTTSEnd = Date.now(); _speakResolve && _speakResolve(); _speakResolve=null; if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); };
-          ttsAudio.onerror = ()=>{ abortBtn.style.display='none'; lastTTSEnd = Date.now(); _speakResolve && _speakResolve(); _speakResolve=null; if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); };
+          ttsAudio.onended = ()=>{
+            abortBtn.style.display='none';
+            lastTTSEnd = Date.now();
+            _speakResolve && _speakResolve(); _speakResolve=null;
+            if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
+          };
+          ttsAudio.onerror = ()=>{
+            abortBtn.style.display='none';
+            lastTTSEnd = Date.now();
+            _speakResolve && _speakResolve(); _speakResolve=null;
+            if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
+          };
         }catch{
-          abortBtn.style.display='none'; lastTTSEnd = Date.now(); _speakResolve && _speakResolve(); _speakResolve=null; if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
+          abortBtn.style.display='none'; lastTTSEnd = Date.now();
+          _speakResolve && _speakResolve(); _speakResolve=null;
+          if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
         }
       });
     }
     abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
 
-    // ---------- Steps ----------
-    function resetSteps(steps){ stepQueue = Array.isArray(steps) ? steps.slice() : []; stepOffset = 0; }
-    async function speakStepsChunk(n=4){
+    // ---------- Steps reading ----------
+    function resetSteps(steps){
+      stepQueue = Array.isArray(steps) ? steps.slice() : [];
+      stepOffset = 0;
+    }
+    async function speakStepsChunk(n = STEP_CHUNK_SIZE){
       if (!stepQueue.length) return;
       const chunk = stepQueue.splice(0, n);
       const text = chunk.map((s,i)=>`${stepOffset+i+1}. ${s}`).join('. ')
-        + (stepQueue.length ? '. Säg "nästa" när du vill fortsätta.' : '. Det var alla steg. Vill du ha förklaringen också?');
+        + (stepQueue.length ? '. Säg "nästa" när du vill fortsätta.'
+                            : '. Det var alla steg. Vill du ha förklaringen också?');
       stepOffset += chunk.length;
       await speak(text);
     }
@@ -240,28 +265,31 @@
     async function askAssistant(text){
       state='THINKING'; setStatus(state,'Bearbetar…');
       try{
+        const userId = localStorage.getItem('userId') || (()=>{ const x = 'u_' + Math.random().toString(36).slice(2); localStorage.setItem('userId', x); return x; })();
         const res = await fetch('/api/chat',{
-          method:'POST',
-          headers:{'Content-Type':'application/json','x-user-id': USER_ID},
-          body: JSON.stringify({
-            userId: USER_ID,
-            message:text,
-            prev: { question: lastQ, assistant: lastA },
-            history: chatHistory
-          })
+          method:'POST', headers:{'Content-Type':'application/json','x-user-id':userId},
+          body: JSON.stringify({ message:text, prev: { question: lastQ, assistant: lastA }, history: chatHistory, userId })
         });
         const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Chat-fel');
 
         let r=data.reply; if(typeof r==='string'){ try{ r=JSON.parse(r); }catch{} }
         r = r && typeof r==='object' ? r : { spoken: 'Okej.' };
 
-        chatHistory.push({ user: text, assistant: r, ts: Date.now(), origin: lastOrigin });
+        chatHistory.push({ user: text, assistant: r, ts: Date.now() });
+
+        // Pace meta
+        if (r.meta && r.meta.pace) {
+          if (r.meta.pace === 'slow') STEP_CHUNK_SIZE = 2;
+          else if (r.meta.pace === 'fast') STEP_CHUNK_SIZE = 6;
+          else STEP_CHUNK_SIZE = 4;
+        }
 
         if (r.need?.clarify) {
           resetSteps([]);
           output.insertAdjacentHTML('beforeend', `<div class="pill">${r.need.question || r.spoken || 'Behöver lite mer info.'}</div>`);
           await speak(r.spoken || r.need.question || 'En sak till…');
-          lastQ = text; lastA = r; return;
+          lastQ = text; lastA = r;
+          return;
         }
 
         const bubble = document.createElement('div');
@@ -286,9 +314,9 @@
         resetSteps(steps);
         await speak(r.spoken || 'Okej.');
         if (steps.length) await speakStepsChunk();
-      }catch{
-        output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI.</div>`);
-        if(running) setTimeout(()=>startListening(), 200);
+      }catch(err){
+        output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI. (${err?.message||'okänt fel'})</div>`);
+        if(running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
       }
     }
 
@@ -303,7 +331,7 @@
     }
 
     // ---------- VAD ----------
-    async function calibrateThreshold(){
+    function calibrateThreshold(){
       return new Promise(async (resolve)=>{
         const t0 = performance.now();
         let acc=0, n=0;
@@ -318,6 +346,7 @@
       });
     }
 
+    // ---------- LISTEN ----------
     async function startListening(){
       if(!running) return;
       state='LISTENING'; setStatus(state,'Lyssnar… (bli tyst för att skicka)');
@@ -342,12 +371,13 @@
         if (!accept || blob.size < MIN_BLOB_BYTES) { if(running) startListening(); return; }
 
         try{
-          lastOrigin = 'voice';
           const text = await transcribe(blob);
           if (!text || HALLU.test(text) || likelyEchoOfTTS(text)) { if(running) startListening(); return; }
 
           const t = text.toLowerCase();
-          if (stepQueue.length && STEP_COMMANDS.test(t) && !likelyEchoOfTTS(text)) { await speakStepsChunk(); return; }
+          if (stepQueue.length && STEP_COMMANDS.test(t) && !likelyEchoOfTTS(text)) {
+            await speakStepsChunk(); return;
+          }
 
           output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
           await askAssistant(text);
@@ -413,20 +443,20 @@
       chatHistory = [];
       try{ if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; } }catch{}
       try{ if(ttsAudio){ ttsAudio.pause(); } }catch{}
+      STEP_CHUNK_SIZE = 4;
     }
 
-    window.addEventListener('keydown',(e)=>{ if (e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
-    window.addEventListener('keydown',(e)=>{ if (e.key==='Escape') stopLoop(); });
+    window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
+    window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') stopLoop(); });
 
     startBtn.addEventListener('click', startLoop);
     stopBtn.addEventListener('click', stopLoop);
     abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
 
-    // Debug text
+    // Debug: text till chat
     debugBtn.addEventListener('click', async () => {
       const text = debugInput.value.trim();
       if (text) {
-        lastOrigin = 'debug';
         output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du skrev (debug):</strong> ${text}</div>`);
         await askAssistant(text);
         debugInput.value = '';
