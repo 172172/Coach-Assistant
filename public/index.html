@@ -23,11 +23,14 @@
     .ghost { background:#2f3542 }
     #debugInput { margin-top:1rem; width:100%; padding:0.75rem; border-radius:12px; border:1px solid #232733; background:#12141a; color:#fff; }
     #debugBtn { margin-top:0.5rem; }
+    #userIdNote { font-size:.8rem; color:#9aa3ad; margin-top:.25rem; }
   </style>
 </head>
 <body>
   <h1>Coach Assistant</h1>
   <p class="status"><span class="dot idle"></span><span id="recStatus">Redo – tryck start. Prata för att avbryta svaret när som helst.</span></p>
+
+  <div id="userIdNote"></div>
 
   <div class="row">
     <button id="startBtn">▶️ Starta röstloop</button>
@@ -47,6 +50,20 @@
   <button id="debugBtn">Skicka text</button>
 
   <script>
+    // ---------- USER ID (persist i localStorage) ----------
+    function getOrCreateUserId() {
+      const key = 'coach_user_id';
+      let id = localStorage.getItem(key);
+      if (!id) {
+        id = 'user-' + Math.random().toString(36).slice(2, 10);
+        localStorage.setItem(key, id);
+      }
+      return id;
+    }
+    const USER_ID = getOrCreateUserId();
+    const userIdNote = document.getElementById('userIdNote');
+    userIdNote.textContent = `UserID: ${USER_ID} (lokalt)`;
+
     const startBtn = document.getElementById('startBtn');
     const stopBtn  = document.getElementById('stopBtn');
     const abortBtn = document.getElementById('abortTTSBtn');
@@ -71,11 +88,11 @@
     let lastTTSEnd = 0;
     const TTS_BASE_GAIN = 0.9;
 
-    // Nytt: eko-skydd med jämförelse mot senaste TTS-text
+    // Eko-skydd
     let lastSpokenText = "";
     let lastSpokenTextNorm = "";
-    const ECHO_SUPPRESS_MS = 2500;      // fönster efter TTS där vi är extra hårda
-    const LISTEN_DELAY_AFTER_TTS = 200; // liten paus innan lyssning startar
+    const ECHO_SUPPRESS_MS = 2500;
+    const LISTEN_DELAY_AFTER_TTS = 200;
 
     // Stegvis uppläsning
     let stepQueue = [];
@@ -91,16 +108,13 @@
     let REC_MIME = '', REC_EXT = 'webm';
 
     // Gates
-    const MIN_SPEECH_MS       = 160; // normalt
-    const MIN_SPEECH_MS_ECHO  = 320; // hårdare under eko-fönster
+    const MIN_SPEECH_MS       = 160;
+    const MIN_SPEECH_MS_ECHO  = 320;
     const MIN_BLOB_BYTES      = 1200;
 
     // Hallu/eko-filter
     const HALLU = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
-    const SHORT_FILLERS = [
-      "tack","tack så mycket","tack för mig",
-      "hej","hejdå","mm","mmm","mhm","öh","eh","okej","ok"
-    ];
+    const SHORT_FILLERS = ["tack","tack så mycket","tack för mig","hej","hejdå","mm","mmm","mhm","öh","eh","okej","ok"];
     const STEP_COMMANDS = /(nästa|fortsätt|mer|continue|next)/i;
 
     // ---------- Utils ----------
@@ -126,17 +140,13 @@
       const t = normalize(text);
       if (!t) return true;
       if (!lastSpokenTextNorm) return false;
-      // 1) exakt delmängd
       if (lastSpokenTextNorm.includes(t)) return true;
-      // 2) token-överlappning
       const ts = t.split(" ").filter(w=>w.length>=3);
       if (!ts.length) return true;
       const ls = new Set(lastSpokenTextNorm.split(" ").filter(w=>w.length>=3));
-      let overlap=0;
-      ts.forEach(w=>{ if(ls.has(w)) overlap++; });
+      let overlap=0; ts.forEach(w=>{ if(ls.has(w)) overlap++; });
       return (overlap / ts.length) >= 0.7;
     }
-
     function setStatus(mode, text) {
       const dot = mode === 'LISTENING' ? 'listen' : mode === 'THINKING' ? 'think' : mode === 'SPEAKING' ? 'speak' : 'idle';
       recStatus.previousElementSibling.className = `dot ${dot}`;
@@ -215,7 +225,6 @@
             abortBtn.style.display='none';
             lastTTSEnd = Date.now();
             _speakResolve && _speakResolve(); _speakResolve=null;
-            // liten paus så sista TTS-svansen inte spelas in
             if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
           };
           ttsAudio.onerror = ()=>{
@@ -267,7 +276,12 @@
       try{
         const res = await fetch('/api/chat',{
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ message:text, prev: { question: lastQ, assistant: lastA }, history: chatHistory })
+          body: JSON.stringify({
+            message:text,
+            prev: { question: lastQ, assistant: lastA },
+            history: chatHistory,
+            userId: USER_ID
+          })
         });
         const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Chat-fel');
 
@@ -364,11 +378,9 @@
 
         try{
           const text = await transcribe(blob);
-          // Släng eko/hallu och TTS-återklang
           if (!text || HALLU.test(text) || likelyEchoOfTTS(text)) { if(running) startListening(); return; }
 
           const t = text.toLowerCase();
-          // Röstkommandon för steg – men aldrig om de är eko av TTS
           if (stepQueue.length && STEP_COMMANDS.test(t) && !likelyEchoOfTTS(text)) {
             await speakStepsChunk(); return;
           }
