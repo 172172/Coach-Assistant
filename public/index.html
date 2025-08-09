@@ -55,6 +55,7 @@
     // TTS (stream)
     let ttsCtx = null, ttsGainNode = null, ttsAnalyser = null;
     let ttsAudio = null;
+    let lastTTSEnd = 0;
     const TTS_BASE_GAIN = 0.9;
 
     // Stegvis uppläsning
@@ -71,12 +72,28 @@
     let REC_MIME = '', REC_EXT = 'webm';
 
     // Gates
-    const MIN_SPEECH_MS  = 120;
-    const MIN_BLOB_BYTES = 800;
-    const FORCED_ACCEPT_BYTES = 4000;
+    const MIN_SPEECH_MS  = 160;     // kortaste prat
+    const MIN_BLOB_BYTES = 1200;    // minsta storlek
+    // (borttaget) FORCED_ACCEPT_BYTES – vi accepterar inte enbart på storlek
 
-    // Hallu-filter
+    // Hallu/eko-filter
     const HALLU = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
+    const SHORT_FILLERS = [
+      "tack","tack sÃ¥ mycket","tack så mycket","tack fÃ¶r mig","tack för mig",
+      "hej","hejdå","hejdÃ¥","mm","mmm","mhm","öh","eh","okej","ok"
+    ];
+    const STEP_COMMANDS = /(nästa|fortsätt|mer|continue|next)/i;
+
+    function isShortFiller(t) {
+      const x = (t||"").toLowerCase().trim();
+      if (!x) return true;
+      if (x.length <= 2) return true;
+      if (SHORT_FILLERS.includes(x)) return true;
+      // 1–2 ord och ingen fråga/verb → sannolikt filler
+      const words = x.split(/\s+/);
+      if (words.length <= 2 && !/[?]/.test(x)) return true;
+      return false;
+    }
 
     function setStatus(mode, text) {
       const dot = mode === 'LISTENING' ? 'listen' : mode === 'THINKING' ? 'think' : mode === 'SPEAKING' ? 'speak' : 'idle';
@@ -131,6 +148,7 @@
       if (ttsCtx) { try { ttsCtx.close(); } catch {} }
       ttsCtx = null; ttsGainNode = null;
       if (_speakResolve) { try { _speakResolve(); } catch {} _speakResolve = null; }
+      lastTTSEnd = Date.now(); // markera slut – för eko-gate
     }
     function speak(text){
       return new Promise(async (resolve)=>{
@@ -146,10 +164,11 @@
           ttsAnalyser = ttsCtx.createAnalyser(); ttsAnalyser.fftSize = 1024;
           srcNode.connect(ttsGainNode).connect(ttsAnalyser).connect(ttsCtx.destination);
           await ttsAudio.play();
-          ttsAudio.onended = ()=>{ abortBtn.style.display='none'; resolve(); _speakResolve=null; if(running) startListening(); };
-          ttsAudio.onerror = ()=>{ abortBtn.style.display='none'; resolve(); _speakResolve=null; if(running) startListening(); };
+          ttsAudio.onended = ()=>{ abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve(); _speakResolve=null; if(running) startListening(); };
+          ttsAudio.onerror = ()=>{ abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve(); _speakResolve=null; if(running) startListening(); };
         }catch{
           abortBtn.style.display='none';
+          lastTTSEnd = Date.now();
           resolve(); _speakResolve=null;
           if(running) startListening();
         }
@@ -223,16 +242,15 @@
           const open = details.style.display !== 'none';
           details.style.display = open ? 'none' : 'block';
           toggle.textContent = open ? 'Visa detaljer' : 'Dölj detaljer';
-          // OBS: detta påverkar inte TTS – ingen avbryt här.
         });
 
         lastQ = text; lastA = r;
 
-        // Stegvis uppläsning (voice-first)
+        // Stegvis uppläsning
         const steps = Array.isArray(r.cards?.steps) ? r.cards.steps : [];
         resetSteps(steps);
         await speak(r.spoken || 'Okej.');
-        if (steps.length) await speakStepsChunk(); // starta direkt med första chunk
+        if (steps.length) await speakStepsChunk(); // starta direkt
       }catch{
         output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI.</div>`);
         if(running) startListening();
@@ -281,26 +299,20 @@
         const type = REC_MIME || (chunks[0]?.type || 'audio/webm');
         const blob = new Blob(chunks, { type });
 
-        const accept = (talkMs >= MIN_SPEECH_MS) || (blob.size >= FORCED_ACCEPT_BYTES);
+        const accept = (talkMs >= MIN_SPEECH_MS); // borttaget "storlek>bytes" undantag
         if (!accept || blob.size < MIN_BLOB_BYTES) { if(running) startListening(); return; }
 
         try{
           const text = await transcribe(blob);
-          if (!text || HALLU.test(text)) { if(running) startListening(); return; }
+          // Eko-fönster: ignorera allt inom 1.2s efter TTS-slut (och korta fillers)
+          const echoWindow = Date.now() - lastTTSEnd < 1200;
+          if (!text || HALLU.test(text) || (echoWindow && isShortFiller(text))) { if(running) startListening(); return; }
 
-          // röstkommandon för stegvis uppläsning (pågående svar)
+          // röstkommandon för stegvis uppläsning
           const t = text.toLowerCase();
-          if (stepQueue.length && /(nästa|fortsätt|mer|continue|next)/.test(t)) { await speakStepsChunk(); return; }
-          if (stepQueue.length && /(upprepa|repetera|igen)/.test(t)) {
-            // läs om senaste chunk
-            const back = Math.min(stepOffset, 4);
-            stepQueue = (Array(stepQueue.length + back).fill(0)); // trick: återställ pekare
-            stepQueue.splice(0, 0); // no-op, vi låter speakStepsChunk läsa samma igen (enkel variant)
-            stepOffset -= back;
-            await speakStepsChunk();
-            return;
-          }
+          if (stepQueue.length && STEP_COMMANDS.test(t)) { await speakStepsChunk(); return; }
 
+          output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
           await askAssistant(text);
         }catch{
           output.insertAdjacentHTML('beforeend',"<div class='pill'>Kunde inte transkribera ljudet.</div>");
@@ -361,16 +373,17 @@
       try{ audioCtxVAD && audioCtxVAD.close(); }catch{}
       analyser=null; audioCtxVAD=null; micArr=null;
       stepQueue=[]; stepOffset=0; lastQ=null; lastA=null;
-      stopTTS();
-      if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
+      try{ if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; } }catch{}
+      try{ if(ttsAudio){ ttsAudio.pause(); } }catch{}
     }
 
-    // Viktigt: ta bort global click->stop. Endast space eller “Avbryt tal” stoppar aktivt.
+    // Endast space stoppar aktivt
     window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; startListening(); }});
     window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') stopLoop(); });
 
     startBtn.addEventListener('click', startLoop);
     stopBtn.addEventListener('click', stopLoop);
+    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; startListening(); }});
   </script>
 </body>
 </html>
