@@ -32,9 +32,9 @@ export default async function handler(req, res) {
       text: String(text || "Okej."),
       model_id: "eleven_multilingual_v2",
       voice_settings: {
-        stability: 0.35,        // mer uttryck
-        similarity_boost: 0.9,
-        style: 0.75,            // piggare
+        stability: 0.25,        // Ännu lägre för mer dynamik (mindre robotiskt)
+        similarity_boost: 0.8,
+        style: 0.6,            // Högre för mer uttrycksfullhet
         use_speaker_boost: true
       },
     };
