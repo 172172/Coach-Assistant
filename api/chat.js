@@ -34,7 +34,7 @@ function looksOperationalAnswer(cards={}, spoken="") {
 }
 function isSmalltalk(s="") {
   const t = norm(s);
-  return /\b(hej+|halla|hallaa|tja+|tjaa|god morgon|godkvall|hur mar du|hur e det|laget|allt bra|mar bra|tack|tack sa mycket|varsagod|vad gor du)\b/.test(t);
+  return /\b(hej+|halla|hallaa|tja+|tjaa|god morgon|godkvall|hur mar du|hur e det|laget|allt bra|mar bra|tack|tack sa mycket|varsagod|vad gor du|vad heter du|vem ar du)\b/.test(t); // Utökat med fler småpratsfraser
 }
 function isQuestiony(s="") {
   if (!s) return false;
@@ -63,7 +63,16 @@ const SYN = {
   gul: ["gul","gult","yellow"],
   lampa: ["lampa","lampan","signal","indikator","status","varningslampa","pilotlampa","signallampa"],
   sortbyte: ["sortbyte","sort-byte","receptbyte","omst","omstall","omställning","byta sort"],
-  cip: ["cip","rengor","sanit","skolj","flush","spolning"]
+  cip: ["cip","rengor","sanit","skolj","flush","spolning","cip-rengöring"], // Utökat
+  depalletizer: ["depalletizer","depal","avpallning"], // Ny från manual
+  pastor: ["pastör","pastorisering"], // Ny
+  kisters: ["kisters","packmaskin"], // Ny
+  ocme: ["ocme","ocme-maskin"], // Ny
+  jones: ["jones","etikettering"], // Ny
+  gejdrar: ["gejdrar","styrning"], // Ny
+  givare: ["givare","sensorer"], // Ny
+  fals: ["fals","falsning"], // Ny
+  coolpack: ["coolpack","packning"], // Ny
 };
 
 function tokenize(s="") {
@@ -101,6 +110,11 @@ function suggestHeadings(knowledgeText, userMsg, prev) {
     .slice(0, 8)
     .map(o=>o.h);
   return scored;
+}
+
+// ---------- Chunk knowledge för bättre hantering ----------
+function chunkKnowledge(text) {
+  return text.split(/^(#{2,4})/gm).filter(c => c.trim()).map(c => c.trim());
 }
 
 // ---------- OpenAI-anrop ----------
@@ -149,34 +163,35 @@ export default async function handler(req, res) {
   try {
     if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
 
-    const { message = "", prev = null } = req.body || {};
+    const { message = "", prev = null, history = [] } = req.body || {}; // Lagt till history
     const knowledge = await getKnowledge();
 
-    // 1) Bygg personlighet + regler
+    // 1) Bygg personlighet + regler (uppdaterad prompt)
     const system = `
 Du är en AI-assistent skapad av Kevin — Douglas Adams möter JARVIS.
 Svenska alltid. Varm, kvick när det passar, men tydlig och ärlig.
 
 RÖST/TON för "spoken":
 - Korta, naturliga meningar. Små bekräftelser: "kanon", "japp", "lätt fixat".
-- Spegla användarens stil. Lätt, torr humor där det passar (inte vid säkerhet).
-- Vid steg: "Steg ett:", "Steg två:". 6–12 ord per mening ungefär.
+- Spegla användarens stil. Lätt, torr humor där det passar (inte vid säkerhet). Empati vid problem: "Det låter jobbigt, låt oss fixa det."
+- Vid steg: "Steg ett:", "Steg två:". Variera frasering för naturlighet (t.ex. "Börja med att...", "Sen kollar du...").
+- Småprat: Trevligt och personligt, t.ex. "Jag mår prima, tack! Själv då?" – håll det kort.
 
-SANNING/KÄLLA:
-- Allmänt: svara fritt.
+ANALYS OCH INTELLIGENS:
+- Resonera steg-för-steg internt: 1) Analysera frågan (vad frågar de? Operativt eller småprat?). 2) Sök i manualen för matchande avsnitt. 3) Dra slutsatser (t.ex. möjliga orsaker baserat på symtom). 4) Ge bästa svaret, inklusive varför det är relevant.
 - Operativt (drift/linje/procedurer/kvalitet/säkerhet/parametrar/felsökning): bygg på "Kunskap" nedan.
   * NUMRERADE steg när relevant.
+  * Analysera: "Baserat på X i manualen, kan det bero på Y – prova Z."
   * Lista rubriker i "matched_headings".
   * Hitta inte på siffror/parametrar. Saknas värden: säg det och håll det generellt (“enligt manualens gränsvärden”).
-  * Om underlaget är för vagt: ställ EN öppen följdfråga.
-  * Om manualen inte täcker: säg det rakt och föreslå uppdatering (ge inte operativa steg).
-
-SMÅPRAT:
-- Hälsningar/"hur mår du"/"tack": kort och trevligt. need.clarify=false.
+  * Om underlaget är vagt: Ge ett preliminärt svar och ställ EN specifik följdfråga (t.ex. "Är det gul lampa på ventilen?").
+  * Om manualen inte täcker: Säg det rakt, ge generellt råd från kunskap, och föreslå "Uppdatera manualen för detta."
+- Småprat: Svara fritt, vänligt, utan klarifiering.
 
 VIKTIGT:
 - Om föregående tur bad om avsnitt/utrustning och användaren svarar med 1–3 ord (t.ex. "tapp"): betrakta det som TILLRÄCKLIGT. Ställ inte samma fråga igen. Gå vidare och guida utifrån manualen.
 - Om rubrik-kandidater tillhandahålls: använd dem om relevanta och lista dem i matched_headings.
+- Alltid fyll i ALLA fält. Undvik onödiga klarifieringar – prioritera svar.
 
 RETURFORMAT (EXAKT JSON, ingen text utanför):
 {
@@ -203,13 +218,15 @@ RETURFORMAT (EXAKT JSON, ingen text utanför):
       ? `\nRubrik-kandidater (hjälp, ej tvingande):\n- ${hints.join("\n- ")}\n`
       : "";
 
-    // 3) Bygg userprompt
+    // 3) Bygg userprompt (lagt till full history)
+    const historyBlock = history.length ? `Full historik för kontext:\n${JSON.stringify(history)}\n` : "";
     const user = `
 Kunskap (manual – fulltext):
 """
 ${knowledge}
 """
 ${hintsBlock}
+${historyBlock}
 Tidigare tur (för kontext):
 ${prev ? JSON.stringify(prev) : "null"}
 
