@@ -8,8 +8,8 @@
   <style>
     :root { --bg:#0b0b0f; --fg:#fff; --acc:#00aaff; --mut:#b9c0c7; }
     body { font-family: system-ui, sans-serif; padding: 2rem; background: var(--bg); color: var(--fg); }
-    .row { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
-    button { padding:.9rem 1.2rem; font-size:1rem; border:none; border-radius:12px; cursor:pointer; background:var(--acc); color:#fff; }
+    .row { display:flex; gap:.6rem; align-items:center; flex-wrap:wrap; }
+    button { padding:.75rem 1rem; font-size:1rem; border:none; border-radius:12px; cursor:pointer; background:var(--acc); color:#fff; }
     #output { margin-top: 1rem; font-size:1.05rem; }
     .status { font-size:.95rem; color:#cfd6dd }
     .pill { background:#12141a; border:1px solid #232733; padding:.75rem .9rem; border-radius:12px; margin-top:.6rem }
@@ -20,6 +20,7 @@
     .src { font-size:.85rem; color:#9aa3ad; margin-top:.3rem }
     .link { color:#8ecbff; cursor:pointer; text-decoration:underline; }
     .muted { color:#9aa3ad; font-size:.9rem; }
+    .ghost { background:#2f3542 }
   </style>
 </head>
 <body>
@@ -28,7 +29,8 @@
 
   <div class="row">
     <button id="startBtn">▶️ Starta röstloop</button>
-    <button id="stopBtn" style="background:#ef4444;display:none">⏹️ Stoppa</button>
+    <button id="stopBtn" class="ghost" style="display:none">⏹️ Stoppa</button>
+    <button id="abortTTSBtn" class="ghost" style="display:none">⏸️ Avbryt tal</button>
   </div>
 
   <div id="vizWrap"><canvas id="viz" width="800" height="140"></canvas></div>
@@ -37,6 +39,7 @@
   <script>
     const startBtn = document.getElementById('startBtn');
     const stopBtn  = document.getElementById('stopBtn');
+    const abortBtn = document.getElementById('abortTTSBtn');
     const output   = document.getElementById('output');
     const recStatus= document.getElementById('recStatus');
     const canvas   = document.getElementById('viz');
@@ -56,10 +59,10 @@
 
     // Stegvis uppläsning
     let stepQueue = [];
-    let stepOffset = 0; // för numrering
-    let lastQ = null, lastA = null; // för prev-kontext till backend
+    let stepOffset = 0;
+    let lastQ = null, lastA = null;
 
-    // Barge-in/VAD
+    // VAD
     const MAX_RECORD_MS   = 10000;
     const SILENCE_HOLD_MS = 800;
 
@@ -132,6 +135,7 @@
     function speak(text){
       return new Promise(async (resolve)=>{
         stopTTS(); state='SPEAKING'; setStatus(state,'Svarar… (säg "nästa" för fler steg)');
+        abortBtn.style.display = 'inline-block';
         _speakResolve = resolve;
         try{
           const url = `/api/tts-stream?text=${encodeURIComponent(text)}&latency=3`;
@@ -142,14 +146,16 @@
           ttsAnalyser = ttsCtx.createAnalyser(); ttsAnalyser.fftSize = 1024;
           srcNode.connect(ttsGainNode).connect(ttsAnalyser).connect(ttsCtx.destination);
           await ttsAudio.play();
-          ttsAudio.onended = ()=>{ resolve(); _speakResolve=null; if(running) startListening(); };
-          ttsAudio.onerror = ()=>{ resolve(); _speakResolve=null; if(running) startListening(); };
+          ttsAudio.onended = ()=>{ abortBtn.style.display='none'; resolve(); _speakResolve=null; if(running) startListening(); };
+          ttsAudio.onerror = ()=>{ abortBtn.style.display='none'; resolve(); _speakResolve=null; if(running) startListening(); };
         }catch{
+          abortBtn.style.display='none';
           resolve(); _speakResolve=null;
           if(running) startListening();
         }
       });
     }
+    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; startListening(); }});
 
     // ---------- Steps reading ----------
     function resetSteps(steps){
@@ -217,11 +223,12 @@
           const open = details.style.display !== 'none';
           details.style.display = open ? 'none' : 'block';
           toggle.textContent = open ? 'Visa detaljer' : 'Dölj detaljer';
+          // OBS: detta påverkar inte TTS – ingen avbryt här.
         });
 
         lastQ = text; lastA = r;
 
-        // Stegvis uppläsning
+        // Stegvis uppläsning (voice-first)
         const steps = Array.isArray(r.cards?.steps) ? r.cards.steps : [];
         resetSteps(steps);
         await speak(r.spoken || 'Okej.');
@@ -281,10 +288,18 @@
           const text = await transcribe(blob);
           if (!text || HALLU.test(text)) { if(running) startListening(); return; }
 
-          // lokala röstkommandon för stegvis uppläsning
+          // röstkommandon för stegvis uppläsning (pågående svar)
           const t = text.toLowerCase();
           if (stepQueue.length && /(nästa|fortsätt|mer|continue|next)/.test(t)) { await speakStepsChunk(); return; }
-          if (stepQueue.length && /(ge|visa|läs|börja).*steg/.test(t)) { await speakStepsChunk(); return; }
+          if (stepQueue.length && /(upprepa|repetera|igen)/.test(t)) {
+            // läs om senaste chunk
+            const back = Math.min(stepOffset, 4);
+            stepQueue = (Array(stepQueue.length + back).fill(0)); // trick: återställ pekare
+            stepQueue.splice(0, 0); // no-op, vi låter speakStepsChunk läsa samma igen (enkel variant)
+            stepOffset -= back;
+            await speakStepsChunk();
+            return;
+          }
 
           await askAssistant(text);
         }catch{
@@ -339,6 +354,7 @@
     function stopLoop(){
       running=false; state='IDLE'; setStatus(state,'Stoppad');
       startBtn.style.display='inline-block'; stopBtn.style.display='none';
+      abortBtn.style.display='none';
       if(rafId){ cancelAnimationFrame(rafId); rafId=null; }
       try{ mediaRecorder && mediaRecorder.state!=='inactive' && mediaRecorder.stop(); }catch{}
       try{ analyser && analyser.disconnect(); }catch{}
@@ -349,9 +365,8 @@
       if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
     }
 
-    // Manuell avbryt
-    document.addEventListener('click', ()=>{ if (running && state==='SPEAKING'){ stopTTS(); startListening(); }});
-    window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); startListening(); }});
+    // Viktigt: ta bort global click->stop. Endast space eller “Avbryt tal” stoppar aktivt.
+    window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; startListening(); }});
     window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') stopLoop(); });
 
     startBtn.addEventListener('click', startLoop);
