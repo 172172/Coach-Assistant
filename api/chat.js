@@ -50,22 +50,36 @@ function isDefinitionQuery(s = "") {
   return words.length <= 2; // t.ex. "CIP", "fals"
 }
 
-/* ================= Conversation memory intents ================= */
+/* ================= Conversation memory intents (uppdaterad) ================= */
 function parseConversationMemoryIntent(s = "") {
   const t = norm(s);
-  // "i början" / "innan/förut/tidigare"
-  if (/\b(i borjan|i början)\b.*\b(fragan|fraga|jag fragade|jag stalde)\b/.test(t)) return { type: "first" };
-  if (/\b(forsta fragan|min forsta fraga|vad var min forsta fraga|fragan jag borjade med)\b/.test(t)) return { type: "first" };
 
-  if (/\b(forra fragan|senaste fragan|vad var min forra fraga|min senaste fraga|vad fragade jag nyss|vad fragade jag innan|vad fragade jag forut|vad fragade jag tidigare)\b/.test(t)) {
+  // Första frågan
+  if (
+    /\b(i borjan|i början)\b.*\b(fragan|fraga|jag fragade|jag stalde)\b/.test(t) ||
+    /\b(forsta fragan|min forsta fraga|vad var min forsta fraga|fragan jag borjade med)\b/.test(t)
+  ) {
+    return { type: "first" };
+  }
+
+  // Senaste frågan – många varianter, inkl. "dig" och tidsord
+  if (
+    /\b(forra fragan|senaste fragan|vad var min forra fraga|min senaste fraga|vad var min senaste fraga)\b/.test(t) ||
+    /\b(vad\s+fragade\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare))\b/.test(t)
+  ) {
     return { type: "last" };
   }
-  if (/\b(vad sa du nyss|vad svarade du nyss)\b/.test(t)) {
+
+  // Senaste assistentsvar
+  if (/\b(vad sa du (nyss|precis)|vad svarade du (nyss|precis))\b/.test(t)) {
     return { type: "assistant_last" };
   }
+
+  // Sammanfattning
   if (/\b(sammanfatta samtalet|sammanfattning|summering av samtalet|vad har vi pratat om)\b/.test(t)) {
     return { type: "summary" };
   }
+
   return null;
 }
 
@@ -174,6 +188,24 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1600) {
   }
 }
 
+/* ================= Gap-drafts (valfritt) ================= */
+async function createGapDraft({ userId, question, coverage, matchedHeadings, scores }) {
+  try {
+    if (process.env.GAP_DRAFTS !== "1") return null;
+    const system = `Skapa ett UTKAST för ett nytt manualavsnitt när täckning saknas. Använd "[PLATS FÖR VÄRDE]" för alla tal. Returnera JSON med title, heading, summary, outline[], md.`;
+    const user = `Fråga: "${question}"\nRubriker: ${JSON.stringify(matchedHeadings||[])}\nCoverage: ${coverage.toFixed(3)}`;
+    const draft = await callLLM(system, user, 0.2, 700);
+    const r = await q(
+      `insert into kb_gaps(status,user_id,question,intent,coverage,matched_headings,scores,gap_reason,
+                           draft_title,draft_heading,draft_md,draft_outline,priority,created_by_ai)
+       values ('open',$1,$2,'operational',$3,$4,$5,'låg täckning i manualen',$6,$7,$8,$9::jsonb,0,true)
+       returning id`,
+      [userId, question, coverage, matchedHeadings||[], scores||[], draft?.title||null, draft?.heading||null, draft?.md||null, JSON.stringify(draft?.outline||[])]
+    );
+    return r?.rows?.[0]?.id || null;
+  } catch (e) { console.warn("createGapDraft failed:", e?.message || e); return null; }
+}
+
 /* ================= Logging / DB helpers ================= */
 async function logInteraction({ userId, question, reply, lane, intent, coverage, matchedHeadings }) {
   try {
@@ -184,7 +216,7 @@ async function logInteraction({ userId, question, reply, lane, intent, coverage,
       [
         userId,
         question,
-        question, // content = question (din tabell krävde NOT NULL content)
+        question, // content = question (din tabell kräver NOT NULL content)
         JSON.stringify(reply || {}),
         lane === "smalltalk",
         lane === "operative",
@@ -208,7 +240,6 @@ async function getRecentHistoryFromDB(userId, limit = 50) {
       [userId, limit]
     );
     const rows = r.rows || [];
-    // Mappa till samma form som frontend history
     return rows.map(row => ({
       user: row.question || "",
       assistant: (row.reply_json && typeof row.reply_json === "object") ? row.reply_json : {},
@@ -323,13 +354,12 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
-    /* -------- Lane: Conversation memory (with DB fallback) -------- */
+    /* -------- Lane: Conversation memory (med DB-fallback) -------- */
     const conv = parseConversationMemoryIntent(userText);
     if (conv) {
-      // 1) använd session-historik om finns
+      // 1) session-historik?
       let sourceHistory = Array.isArray(history) && history.length ? history : null;
-
-      // 2) annars hämta från DB på userId
+      // 2) annars från DB
       if (!sourceHistory || !sourceHistory.length) {
         const dbHist = await getRecentHistoryFromDB(userId, 50);
         if (dbHist.length) sourceHistory = dbHist;
