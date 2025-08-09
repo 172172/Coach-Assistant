@@ -21,6 +21,8 @@
     .link { color:#8ecbff; cursor:pointer; text-decoration:underline; }
     .muted { color:#9aa3ad; font-size:.9rem; }
     .ghost { background:#2f3542 }
+    #debugInput { margin-top:1rem; width:100%; padding:0.75rem; border-radius:12px; border:1px solid #232733; background:#12141a; color:#fff; }
+    #debugBtn { margin-top:0.5rem; }
   </style>
 </head>
 <body>
@@ -36,6 +38,10 @@
   <div id="vizWrap"><canvas id="viz" width="800" height="140"></canvas></div>
   <div id="output"></div>
 
+  <!-- Ny: Debug-input för textfrågor -->
+  <input id="debugInput" type="text" placeholder="Skriv en testfråga här (för debugging)" />
+  <button id="debugBtn">Skicka text</button>
+
   <script>
     const startBtn = document.getElementById('startBtn');
     const stopBtn  = document.getElementById('stopBtn');
@@ -44,9 +50,12 @@
     const recStatus= document.getElementById('recStatus');
     const canvas   = document.getElementById('viz');
     const ctx      = canvas.getContext('2d');
+    const debugInput = document.getElementById('debugInput');
+    const debugBtn = document.getElementById('debugBtn');
 
     // ---------- STATE ----------
     let state = 'IDLE', running = false;
+    let chatHistory = []; // Ny: Full chat-historia
 
     // Mic / analyser
     let micStream = null, mediaRecorder = null, chunks = [];
@@ -206,12 +215,15 @@
       try{
         const res = await fetch('/api/chat',{
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ message:text, prev: { question: lastQ, assistant: lastA } })
+          body: JSON.stringify({ message:text, prev: { question: lastQ, assistant: lastA }, history: chatHistory }) // Ny: Skicka full history
         });
         const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Chat-fel');
 
         let r=data.reply; if(typeof r==='string'){ try{ r=JSON.parse(r); }catch{} }
         r = r && typeof r==='object' ? r : { spoken: 'Okej.' };
+
+        // Pusha till historia
+        chatHistory.push({ user: text, assistant: r });
 
         // Klarifiering?
         if (r.need?.clarify) {
@@ -368,6 +380,7 @@
       try{ audioCtxVAD && audioCtxVAD.close(); }catch{}
       analyser=null; audioCtxVAD=null; micArr=null;
       stepQueue=[]; stepOffset=0; lastQ=null; lastA=null;
+      chatHistory = []; // Rensa historia vid stopp (kan ändras om du vill spara)
       try{ if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; } }catch{}
       try{ if(ttsAudio){ ttsAudio.pause(); } }catch{}
     }
@@ -379,6 +392,16 @@
     startBtn.addEventListener('click', startLoop);
     stopBtn.addEventListener('click', stopLoop);
     abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; startListening(); }});
+
+    // Ny: Debug-knapp för textinput
+    debugBtn.addEventListener('click', async () => {
+      const text = debugInput.value.trim();
+      if (text) {
+        output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du skrev (debug):</strong> ${text}</div>`);
+        await askAssistant(text);
+        debugInput.value = '';
+      }
+    });
   </script>
 </body>
 </html>
