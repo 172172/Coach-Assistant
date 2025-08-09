@@ -14,7 +14,7 @@ async function embed(text) {
     body: JSON.stringify({ model: "text-embedding-3-small", input: text })
   });
   const j = await r.json();
-  if (!r.ok) throw new Error("Embeddings API error");
+  if (!r.ok) throw new Error(`Embeddings API error: ${j?.error?.message || r.statusText}`);
   return j.data[0].embedding;
 }
 const toPgVector = (arr) => "[" + arr.map(x => (x ?? 0).toFixed(6)).join(",") + "]";
@@ -112,41 +112,54 @@ function parseConversationMemoryIntent(s = "") {
   return null;
 }
 
-/* ================= Rewrite intents (låter som en kollega) ================= */
+/* ================= Rewrite intents (kollegig) ================= */
 function parseRewriteIntent(s = "") {
   const t = norm(s);
 
-  // tempo (vi skickar bara tillbaka meta = pace, frontenden tar det)
-  if (/\b(langsammare|saktare|saktare|ta det lugnare|prata langsammare|kora langsammare)\b/.test(t)) return { type: "pace_slow" };
+  // tempo
+  if (/\b(langsammare|saktare|ta det lugnare|prata langsammare|kora langsammare)\b/.test(t)) return { type: "pace_slow" };
   if (/\b(snabbare|fortare|hastigare|kora snabbare|tempo upp)\b/.test(t)) return { type: "pace_fast" };
 
-  // uttryck för “säg om det där”
+  // upprepa
   if (/\b(upprepa|repetera|sag det igen|säg det igen|ta det en gang till|ta det en gång till)\b/.test(t)) return { type: "repeat" };
 
-  // förenkla / korta / sammanfatta
-  if (/\b(enklare|forenkla|förklara enklare|lattare|barnniva|barnnivå|barnniva)\b/.test(t)) return { type: "simplify" };
+  // förenkla / korta / sammanfatta / exempel / lista
+  if (/\b(enklare|forenkla|forklara enklare|forklara lite enklare|forklara lattare|forklara lite lattare|lattare|barnniva|barnnivå|barnniva)\b/.test(t)) return { type: "simplify" };
   if (/\b(korta|kortare|sammanfatta|summera|tl;dr)\b/.test(t)) return { type: "summarize" };
-
-  // utveckla / exempel / lista
   if (/\b(mer detaljer|utveckla|forklara mer|djupare)\b/.test(t)) return { type: "expand" };
   if (/\b(exempel|ge exempel|case|scenario)\b/.test(t)) return { type: "examples" };
   if (/\b(lista|punktlista|punkter|steglista)\b/.test(t)) return { type: "bulletify" };
 
-  // förtydliga det sista svaret
+  // otydligt → förenkla
   if (/\b(jag fattade inte|jag forstod inte|oklart|kan du forklara igen)\b/.test(t)) return { type: "simplify" };
 
   return null;
 }
 
-async function rewriteFromLast(userText, history, userId) {
-  // hämta källtext (senaste assistentsvaret)
-  let last = lastAssistantSpoken(history || []);
-  if (!last) {
-    // fallback till DB om history saknas
-    const dbHist = await getRecentHistoryFromDB(userId, 50);
-    last = lastAssistantSpoken(dbHist);
-  }
-  return String(last || "");
+function cutAt(s, max = 1200) {
+  if (!s) return s;
+  if (s.length <= max) return s;
+  return s.slice(0, max) + "…";
+}
+function localSimplify(base) {
+  if (!base) return "";
+  let s = String(base);
+  // ta bort parenteser (ofta sidospår)
+  s = s.replace(/\([^)]*\)/g, "");
+  // normalisera whitespace
+  s = s.replace(/\s+/g, " ").trim();
+  // dela i meningar
+  let parts = s.split(/(?<=[.!?])\s+/).filter(Boolean);
+  // korta varje mening vid första långa bisats (komma/”som”)
+  parts = parts.map(p => {
+    let x = p;
+    const m = x.match(/^(.{0,140}?)(,|\ssom\s| vilket | där | med )/i);
+    if (m && m[1] && m[1].length >= 40) x = m[1] + ".";
+    return x.trim();
+  });
+  // ta max 2 meningar
+  const out = parts.slice(0, 2).join(" ");
+  return out || base;
 }
 
 /* ================= Toolbelt: math & units ================= */
@@ -218,7 +231,7 @@ async function retrieveContext(userText, k = 8) {
   const headingBonus = Math.min(0.1, (new Set(rows.map(r => r.heading)).size - 1) * 0.025);
   const coverage = Math.max(0, Math.min(1, base + headingBonus));
   const context = rows.map(x => `### ${x.heading}\n${x.chunk}`).join("\n\n---\n\n");
-  const matchedHeadings = [...new Set(rows.map(x => x.heading))].slice(0, 6);
+  const matchedHeadings = [...new Set(rows.map(x => x.heading)).keys()].slice(0, 6);
   return { context, coverage, matchedHeadings, scores };
 }
 function passesOperativeGate({ coverage, matchedHeadings, scores }) {
@@ -240,8 +253,11 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1600) {
       messages: [{ role: "system", content: system }, { role: "user", content: user }]
     })
   });
-  const j = await r.json();
-  if (!r.ok) { console.error("OpenAI chat error:", j); throw new Error("Chat API error"); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const msg = j?.error?.message || r.statusText || "unknown";
+    throw new Error(`Chat API error: ${msg}`);
+  }
   const content = j.choices?.[0]?.message?.content || "";
   try { return JSON.parse(content); }
   catch {
@@ -251,6 +267,15 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1600) {
       cards: { summary: "Samtal", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
       follow_up: ""
     };
+  }
+}
+// enkel retry-wrapper
+async function callLLMRetry(opts, retries = 1, delayMs = 250) {
+  try { return await callLLM(opts.system, opts.user, opts.temp ?? 0.6, opts.maxTokens ?? 1600); }
+  catch (e) {
+    if (retries <= 0) throw e;
+    await new Promise(r => setTimeout(r, delayMs));
+    return callLLMRetry(opts, retries - 1, delayMs * 2);
   }
 }
 
@@ -346,7 +371,6 @@ function normalizeKeys(out) {
   if (!Array.isArray(out.cards.matched_headings)) out.cards.matched_headings = [];
   if (typeof out.cards.coverage !== "number" || isNaN(out.cards.coverage)) out.cards.coverage = 0;
   if (typeof out.follow_up !== "string") out.follow_up = out.cards.follow_up || "";
-  // meta tillåts vara valfritt
   return out;
 }
 
@@ -469,11 +493,16 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
-    /* -------- Lane: Rewrite intents (förklara enklare / upprepa / sammanfatta / exempel / tempo) -------- */
+    /* -------- Lane: Rewrite intents -------- */
     const rw = parseRewriteIntent(userText);
     if (rw) {
-      // Hämta källsvar (senaste assistent)
-      const base = await rewriteFromLast(userText, history, userId);
+      // Hämta källsvar (senaste assistenten)
+      let base = lastAssistantSpoken(history || []);
+      if (!base) {
+        const dbHist = await getRecentHistoryFromDB(userId, 50);
+        base = lastAssistantSpoken(dbHist);
+      }
+
       if (!base) {
         const fallback = normalizeKeys({
           spoken: "Jag har inget tidigare svar att jobba vidare på ännu.",
@@ -508,21 +537,33 @@ export default async function handler(req, res) {
         return res.status(200).json({ reply });
       }
 
-      // Anropa LLM för att omskriva base
-      const system = `Omskriv senaste svar till önskat format/ton. Returnera strikt JSON (spoken, need, cards{...}, follow_up). Var kort, pratvänlig, svensk kollega.`;
-      const user = JSON.stringify({
-        intent: rw.type,
-        base
-      });
-      let out = await callLLM(system, user, 0.4, 800);
-      out = normalizeKeys(out);
-      out.cards.coverage = 0; out.cards.matched_headings = [];
-      out.follow_up = out.follow_up || (rw.type === "simplify" ? "Vill du ha ett exempel också?" :
-                                        rw.type === "summarize" ? "Vill du att jag går igenom steg för steg?" :
-                                        rw.type === "examples" ? "Ska jag koppla detta till ett område på linjen?" :
-                                        "");
-      await logInteraction({ userId, question: userText, reply: out, lane: "rewrite", intent: rw.type, coverage: 0, matchedHeadings: [] });
-      return res.status(200).json({ reply: out });
+      // Omskrivning (simplify/summarize/expand/examples/bulletify) – robust med retry & fallback
+      const trimmedBase = cutAt(base, 1400);
+      try {
+        const system = `Omskriv senaste svar till önskat format/ton. Svara kort, på svenska, som en kollega. Returnera strikt JSON (spoken, need, cards{...}, follow_up).`;
+        const user = JSON.stringify({ intent: rw.type, base: trimmedBase });
+        let out = await callLLMRetry({ system, user, temp: 0.4, maxTokens: 800 }, 1, 250);
+        out = normalizeKeys(out);
+        out.cards.coverage = 0; out.cards.matched_headings = [];
+        out.follow_up = out.follow_up || (rw.type === "simplify" ? "Vill du ha ett exempel också?" :
+                                          rw.type === "summarize" ? "Vill du att jag går igenom steg för steg?" :
+                                          rw.type === "examples" ? "Ska jag koppla detta till ett område på linjen?" :
+                                          "");
+        await logInteraction({ userId, question: userText, reply: out, lane: "rewrite", intent: rw.type, coverage: 0, matchedHeadings: [] });
+        return res.status(200).json({ reply: out });
+      } catch (e) {
+        console.warn("rewrite LLM failed:", e?.message || e);
+        // Lokal fallback – enkel förenkling
+        const spoken = localSimplify(trimmedBase);
+        const reply = normalizeKeys({
+          spoken: spoken || trimmedBase,
+          need: { clarify: false, question: "" },
+          cards: { summary: "Enklare förklaring (fallback).", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "Vill du ha ett exempel också?", coverage: 0, matched_headings: [] },
+          follow_up: "Vill du ha ett exempel också?"
+        });
+        await logInteraction({ userId, question: userText, reply, lane: "rewrite", intent: rw.type + "_fallback", coverage: 0, matchedHeadings: [] });
+        return res.status(200).json({ reply });
+      }
     }
 
     /* -------- Lane: Smalltalk -------- */
