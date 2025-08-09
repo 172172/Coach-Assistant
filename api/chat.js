@@ -1,6 +1,5 @@
 // /api/chat.js
-// Router: smalltalk, conv-memory, profile-light, toolbelt (math/units), RAG (definition/operativt)
-// Robust konversationsminne m/ tidsstämplar, strict JSON, gates, sanitizer.
+// Router: smalltalk, conv-memory (med DB-fallback), profile-light, toolbelt (math/units), RAG (definition/operativt)
 
 import { q } from "./db.js";
 import fetch from "node-fetch";
@@ -54,11 +53,11 @@ function isDefinitionQuery(s = "") {
 /* ================= Conversation memory intents ================= */
 function parseConversationMemoryIntent(s = "") {
   const t = norm(s);
-  // "i början"-varianter
+  // "i början" / "innan/förut/tidigare"
   if (/\b(i borjan|i början)\b.*\b(fragan|fraga|jag fragade|jag stalde)\b/.test(t)) return { type: "first" };
   if (/\b(forsta fragan|min forsta fraga|vad var min forsta fraga|fragan jag borjade med)\b/.test(t)) return { type: "first" };
 
-  if (/\b(forra fragan|senaste fragan|vad var min forra fraga|vad fragade jag nyss|vad var min senaste fraga|min senaste fraga)\b/.test(t)) {
+  if (/\b(forra fragan|senaste fragan|vad var min forra fraga|min senaste fraga|vad fragade jag nyss|vad fragade jag innan|vad fragade jag forut|vad fragade jag tidigare)\b/.test(t)) {
     return { type: "last" };
   }
   if (/\b(vad sa du nyss|vad svarade du nyss)\b/.test(t)) {
@@ -72,7 +71,6 @@ function parseConversationMemoryIntent(s = "") {
 
 /* ================= Toolbelt: math & units ================= */
 const MATH_SAFE = /^[\d\s()+\-*/.,%]+$/;
-
 function isMathExpr(s = "") {
   const t = s.replace(/,/g, ".").trim();
   if (!MATH_SAFE.test(t)) return false;
@@ -89,7 +87,6 @@ function evalMath(expr) {
   if (typeof val !== "number" || !isFinite(val)) throw new Error("Bad result");
   return val;
 }
-
 const UNIT_ALIASES = {
   l: ["l","liter","liters","litre"],
   ml: ["ml","milliliter","millilitrar"],
@@ -144,7 +141,6 @@ async function retrieveContext(userText, k = 8) {
   const matchedHeadings = [...new Set(rows.map(x => x.heading))].slice(0, 6);
   return { context, coverage, matchedHeadings, scores };
 }
-
 function passesOperativeGate({ coverage, matchedHeadings, scores }) {
   const strongHits = (scores || []).filter(s => s >= 0.60).length;
   const distinct = new Set((matchedHeadings || []).map(h => (h || "").toLowerCase().trim())).size;
@@ -178,16 +174,17 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1600) {
   }
 }
 
-/* ================= Optional logging / gaps ================= */
+/* ================= Logging / DB helpers ================= */
 async function logInteraction({ userId, question, reply, lane, intent, coverage, matchedHeadings }) {
   try {
     if (process.env.LOG_CONVO !== "1") return;
     await q(
-      `insert into messages(user_id, asked_at, question, reply_json, smalltalk, is_operational, coverage, matched_headings, lane, intent)
-       values ($1, now(), $2, $3::jsonb, $4, $5, $6, $7, $8, $9)`,
+      `insert into messages(user_id, asked_at, question, content, reply_json, smalltalk, is_operational, coverage, matched_headings, lane, intent)
+       values ($1, now(), $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
       [
         userId,
         question,
+        question, // content = question (din tabell krävde NOT NULL content)
         JSON.stringify(reply || {}),
         lane === "smalltalk",
         lane === "operative",
@@ -200,26 +197,32 @@ async function logInteraction({ userId, question, reply, lane, intent, coverage,
   } catch (e) { console.warn("logInteraction failed:", e?.message || e); }
 }
 
-async function createGapDraft({ userId, question, coverage, matchedHeadings, scores }) {
+async function getRecentHistoryFromDB(userId, limit = 50) {
   try {
-    if (process.env.GAP_DRAFTS !== "1") return null;
-    const system = `Skapa ett UTKAST för ett nytt manualavsnitt när täckning saknas. Använd "[PLATS FÖR VÄRDE]" för alla tal. Returnera JSON med title, heading, summary, outline[], md.`;
-    const user = `Fråga: "${question}"\nRubriker: ${JSON.stringify(matchedHeadings||[])}\nCoverage: ${coverage.toFixed(3)}`;
-    const draft = await callLLM(system, user, 0.2, 700);
     const r = await q(
-      `insert into kb_gaps(status,user_id,question,intent,coverage,matched_headings,scores,gap_reason,
-                           draft_title,draft_heading,draft_md,draft_outline,priority,created_by_ai)
-       values ('open',$1,$2,'operational',$3,$4,$5,'låg täckning i manualen',$6,$7,$8,$9::jsonb,0,true)
-       returning id`,
-      [userId, question, coverage, matchedHeadings||[], scores||[], draft?.title||null, draft?.heading||null, draft?.md||null, JSON.stringify(draft?.outline||[])]
+      `select asked_at, question, reply_json
+       from messages
+       where user_id = $1
+       order by asked_at asc
+       limit $2`,
+      [userId, limit]
     );
-    return r?.rows?.[0]?.id || null;
-  } catch (e) { console.warn("createGapDraft failed:", e?.message || e); return null; }
+    const rows = r.rows || [];
+    // Mappa till samma form som frontend history
+    return rows.map(row => ({
+      user: row.question || "",
+      assistant: (row.reply_json && typeof row.reply_json === "object") ? row.reply_json : {},
+      ts: row.asked_at ? new Date(row.asked_at).getTime() : undefined,
+      origin: "db"
+    }));
+  } catch (e) {
+    console.warn("getRecentHistoryFromDB failed:", e?.message || e);
+    return [];
+  }
 }
 
 /* ================= Sanitizers / schema helpers ================= */
 const NUMBER_RE = /\b\d+([.,]\d+)?\b/g;
-
 function sanitizeParameters(out, context) {
   const ctxNums = new Set((context.match(NUMBER_RE) || []).map(x => x));
   const replaceNums = (s) => String(s || "").replace(NUMBER_RE, (m) => (ctxNums.has(m) ? m : "[PLATS FÖR VÄRDE]"));
@@ -249,10 +252,10 @@ function normalizeKeys(out) {
   return out;
 }
 
-/* ================= History helpers (robust first/last) ================= */
+/* ================= History helpers ================= */
 function sortByTsIfAny(arr = []) {
   const hasTs = arr.some(x => typeof x?.ts === "number");
-  if (!hasTs) return arr.slice(); // behåll given ordning
+  if (!hasTs) return arr.slice();
   return arr.slice().sort((a,b) => (a.ts||0) - (b.ts||0));
 }
 function firstUserQuestion(history = []) {
@@ -320,20 +323,35 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
-    /* -------- Lane: Conversation memory -------- */
+    /* -------- Lane: Conversation memory (with DB fallback) -------- */
     const conv = parseConversationMemoryIntent(userText);
     if (conv) {
-      let spoken = "Jag har ingen historik i den här sessionen ännu.";
-      const first = firstUserQuestion(history);
-      const last = lastUserQuestion(history);
-      const lastA = lastAssistantSpoken(history);
-      if (conv.type === "first" && first)        spoken = `Din första fråga var: “${first}”.`;
-      if (conv.type === "last" && last)          spoken = `Din senaste fråga var: “${last}”.`;
-      if (conv.type === "assistant_last" && lastA) spoken = `Jag sa: “${lastA}”.`;
-      if (conv.type === "summary") {
-        const entries = sortByTsIfAny(history).map(h => h?.user).filter(Boolean).slice(-6);
-        spoken = entries.length ? `Vi har pratat om: ${entries.join(", ")}.` : "Vi har inte pratat om något än.";
+      // 1) använd session-historik om finns
+      let sourceHistory = Array.isArray(history) && history.length ? history : null;
+
+      // 2) annars hämta från DB på userId
+      if (!sourceHistory || !sourceHistory.length) {
+        const dbHist = await getRecentHistoryFromDB(userId, 50);
+        if (dbHist.length) sourceHistory = dbHist;
       }
+
+      let spoken = "Jag har ingen historik för den här sessionen ännu.";
+      if (sourceHistory && sourceHistory.length) {
+        if (conv.type === "first") {
+          const first = firstUserQuestion(sourceHistory);
+          if (first) spoken = `Din första fråga var: “${first}”.`;
+        } else if (conv.type === "last") {
+          const last = lastUserQuestion(sourceHistory);
+          if (last) spoken = `Din senaste fråga var: “${last}”.`;
+        } else if (conv.type === "assistant_last") {
+          const lastA = lastAssistantSpoken(sourceHistory);
+          if (lastA) spoken = `Jag sa: “${lastA}”.`;
+        } else if (conv.type === "summary") {
+          const entries = sortByTsIfAny(sourceHistory).map(h => h?.user).filter(Boolean).slice(-6);
+          spoken = entries.length ? `Vi har pratat om: ${entries.join(", ")}.` : "Vi har inte pratat om något än.";
+        }
+      }
+
       const reply = normalizeKeys({
         spoken,
         need: { clarify: false, question: "" },
@@ -432,7 +450,7 @@ Schema:
       out.cards.pro = "";
       out.cards.follow_up = "Vill du att jag skapar ett utkast till nytt avsnitt? Säg: 'Skapa utkast'.";
       if (process.env.GAP_DRAFTS === "1") {
-        await createGapDraft({ userId, question: userText, coverage, matchedHeadings, scores });
+        try { await createGapDraft({ userId, question: userText, coverage, matchedHeadings, scores }); } catch {}
       }
     }
 
