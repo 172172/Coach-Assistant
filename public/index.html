@@ -57,10 +57,18 @@
     const debugInput = document.getElementById('debugInput');
     const debugBtn = document.getElementById('debugBtn');
 
+    // ----- Persistent userId (per browser) -----
+    const UID_KEY = "coach_user_id";
+    let USER_ID = localStorage.getItem(UID_KEY);
+    if (!USER_ID) {
+      USER_ID = (crypto?.randomUUID?.() || Math.random().toString(36).slice(2) + Date.now().toString(36)).slice(0, 24);
+      localStorage.setItem(UID_KEY, USER_ID);
+    }
+
     // ---------- STATE ----------
     let state = 'IDLE', running = false;
     let chatHistory = [];
-    let lastOrigin = 'voice'; // NEW: spåra ursprung för history-raden
+    let lastOrigin = 'voice';
 
     // Mic / analyser
     let micStream = null, mediaRecorder = null, chunks = [];
@@ -72,7 +80,7 @@
     let lastTTSEnd = 0;
     const TTS_BASE_GAIN = 0.9;
 
-    // Nytt: eko-skydd
+    // Eko-skydd
     let lastSpokenText = "";
     let lastSpokenTextNorm = "";
     const ECHO_SUPPRESS_MS = 2500;
@@ -108,15 +116,6 @@
         .replace(/[åÅ]/g,"a").replace(/[äÄ]/g,"a").replace(/[öÖ]/g,"o")
         .replace(/[^a-z0-9\s]/g," ")
         .replace(/\s+/g," ").trim();
-    }
-    function isShortFiller(t) {
-      const x = (t||"").toLowerCase().trim();
-      if (!x) return true;
-      if (x.length <= 2) return true;
-      if (SHORT_FILLERS.includes(x)) return true;
-      const words = x.split(/\s+/);
-      if (words.length <= 2 && !/[?]/.test(x)) return true;
-      return false;
     }
     function likelyEchoOfTTS(text){
       const within = Date.now() - lastTTSEnd < ECHO_SUPPRESS_MS;
@@ -200,34 +199,20 @@
           ttsCtx = new (window.AudioContext||window.webkitAudioContext)(); await ttsCtx.resume().catch(()=>{});
           const srcNode = ttsCtx.createMediaElementSource(ttsAudio);
           ttsGainNode = ttsCtx.createGain(); ttsGainNode.gain.value = parseFloat(document.getElementById('volumeSlider').value) || 0.9;
-          document.getElementById('volumeSlider').addEventListener('input', (e) => {
-            if (ttsGainNode) ttsGainNode.gain.value = parseFloat(e.target.value);
-          });
+          document.getElementById('volumeSlider').addEventListener('input', (e) => { if (ttsGainNode) ttsGainNode.gain.value = parseFloat(e.target.value); });
           ttsAnalyser = ttsCtx.createAnalyser(); ttsAnalyser.fftSize = 1024;
           srcNode.connect(ttsGainNode).connect(ttsAnalyser).connect(ttsCtx.destination);
           await ttsAudio.play();
-          ttsAudio.onended = ()=>{
-            abortBtn.style.display='none';
-            lastTTSEnd = Date.now();
-            _speakResolve && _speakResolve(); _speakResolve=null;
-            if (running) setTimeout(()=>startListening(), 200);
-          };
-          ttsAudio.onerror = ()=>{
-            abortBtn.style.display='none';
-            lastTTSEnd = Date.now();
-            _speakResolve && _speakResolve(); _speakResolve=null;
-            if (running) setTimeout(()=>startListening(), 200);
-          };
+          ttsAudio.onended = ()=>{ abortBtn.style.display='none'; lastTTSEnd = Date.now(); _speakResolve && _speakResolve(); _speakResolve=null; if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); };
+          ttsAudio.onerror = ()=>{ abortBtn.style.display='none'; lastTTSEnd = Date.now(); _speakResolve && _speakResolve(); _speakResolve=null; if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); };
         }catch{
-          abortBtn.style.display='none'; lastTTSEnd = Date.now();
-          _speakResolve && _speakResolve(); _speakResolve=null;
-          if (running) setTimeout(()=>startListening(), 200);
+          abortBtn.style.display='none'; lastTTSEnd = Date.now(); _speakResolve && _speakResolve(); _speakResolve=null; if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
         }
       });
     }
-    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), 200); }});
+    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
 
-    // ---------- Steps reading ----------
+    // ---------- Steps ----------
     function resetSteps(steps){ stepQueue = Array.isArray(steps) ? steps.slice() : []; stepOffset = 0; }
     async function speakStepsChunk(n=4){
       if (!stepQueue.length) return;
@@ -256,8 +241,10 @@
       state='THINKING'; setStatus(state,'Bearbetar…');
       try{
         const res = await fetch('/api/chat',{
-          method:'POST', headers:{'Content-Type':'application/json'},
+          method:'POST',
+          headers:{'Content-Type':'application/json','x-user-id': USER_ID},
           body: JSON.stringify({
+            userId: USER_ID,
             message:text,
             prev: { question: lastQ, assistant: lastA },
             history: chatHistory
@@ -268,15 +255,13 @@
         let r=data.reply; if(typeof r==='string'){ try{ r=JSON.parse(r); }catch{} }
         r = r && typeof r==='object' ? r : { spoken: 'Okej.' };
 
-        // NEW: stämpla denna interaktion i history (med ts + origin)
         chatHistory.push({ user: text, assistant: r, ts: Date.now(), origin: lastOrigin });
 
         if (r.need?.clarify) {
           resetSteps([]);
           output.insertAdjacentHTML('beforeend', `<div class="pill">${r.need.question || r.spoken || 'Behöver lite mer info.'}</div>`);
           await speak(r.spoken || r.need.question || 'En sak till…');
-          lastQ = text; lastA = r;
-          return;
+          lastQ = text; lastA = r; return;
         }
 
         const bubble = document.createElement('div');
@@ -350,21 +335,19 @@
         const type = REC_MIME || (chunks[0]?.type || 'audio/webm');
         const blob = new Blob(chunks, { type });
 
-        const withinEcho = (Date.now() - lastTTSEnd) < 2500;
-        const minSpeech = withinEcho ? 320 : 160;
+        const withinEcho = (Date.now() - lastTTSEnd) < ECHO_SUPPRESS_MS;
+        const minSpeech = withinEcho ? MIN_SPEECH_MS_ECHO : MIN_SPEECH_MS;
 
         const accept = (talkMs >= minSpeech);
-        if (!accept || blob.size < 1200) { if(running) startListening(); return; }
+        if (!accept || blob.size < MIN_BLOB_BYTES) { if(running) startListening(); return; }
 
         try{
-          lastOrigin = 'voice'; // NEW: markera ursprung
+          lastOrigin = 'voice';
           const text = await transcribe(blob);
           if (!text || HALLU.test(text) || likelyEchoOfTTS(text)) { if(running) startListening(); return; }
 
           const t = text.toLowerCase();
-          if (stepQueue.length && STEP_COMMANDS.test(t) && !likelyEchoOfTTS(text)) {
-            await speakStepsChunk(); return;
-          }
+          if (stepQueue.length && STEP_COMMANDS.test(t) && !likelyEchoOfTTS(text)) { await speakStepsChunk(); return; }
 
           output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
           await askAssistant(text);
@@ -382,7 +365,7 @@
         if (lvl >= speechThreshold) { talkMs += 100; silentMs = 0; }
         else { silentMs += 100; }
         const elapsed = performance.now()-startedAt;
-        if (silentMs >= 800 || elapsed > 10000){
+        if (silentMs >= SILENCE_HOLD_MS || elapsed > MAX_RECORD_MS){
           clearInterval(vadTimer);
           try{ mediaRecorder.state!=='inactive' && mediaRecorder.stop(); }catch{}
         }
@@ -432,18 +415,18 @@
       try{ if(ttsAudio){ ttsAudio.pause(); } }catch{}
     }
 
-    window.addEventListener('keydown',(e)=>{ if (e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), 200); }});
+    window.addEventListener('keydown',(e)=>{ if (e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
     window.addEventListener('keydown',(e)=>{ if (e.key==='Escape') stopLoop(); });
 
     startBtn.addEventListener('click', startLoop);
     stopBtn.addEventListener('click', stopLoop);
-    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), 200); }});
+    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
 
-    // Debug: text till chat
+    // Debug text
     debugBtn.addEventListener('click', async () => {
       const text = debugInput.value.trim();
       if (text) {
-        lastOrigin = 'debug'; // NEW: markera ursprung
+        lastOrigin = 'debug';
         output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du skrev (debug):</strong> ${text}</div>`);
         await askAssistant(text);
         debugInput.value = '';
