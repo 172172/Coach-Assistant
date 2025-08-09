@@ -61,8 +61,8 @@
     let state = 'IDLE', running = false;
     let chatHistory = [];
 
-    // Pace (ny): styr hur många steg som läses per chunk
-    let STEP_CHUNK_SIZE = 4; // normal = 4 (slow = 2, fast = 6)
+    // Pace (om du tidigare använde den – vi låter standard vara 4)
+    let STEP_CHUNK_SIZE = 4;
 
     // Mic / analyser
     let micStream = null, mediaRecorder = null, chunks = [];
@@ -77,7 +77,7 @@
     // Eko-skydd
     let lastSpokenText = "";
     let lastSpokenTextNorm = "";
-    const ECHO_SUPPRESS_MS = 2500;
+    const ECHO_SUPPRESS_MS = 2500;      // extra hård filterperiod efter TTS
     const LISTEN_DELAY_AFTER_TTS = 200;
 
     // Stegvis uppläsning
@@ -98,12 +98,22 @@
     const MIN_SPEECH_MS_ECHO  = 320;
     const MIN_BLOB_BYTES      = 1200;
 
+    // Nytt: “duty cycle” – kräver tillräcklig andel tal i klippet
+    const MIN_DUTY            = 0.18;   // 18% av tiden ska vara över tröskeln
+    const MIN_DUTY_ECHO       = 0.28;   // hårdare direkt efter TTS
+
     // Hallu/eko-filter
     const HALLU = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
-    const SHORT_FILLERS = [
-      "tack","tack så mycket","tack för mig",
-      "hej","hejdå","mm","mmm","mhm","öh","eh","okej","ok"
+
+    // Fillers vi vill SLÄNGA (vanliga falsk-väckningar på svenska)
+    const DISCARD_FILLERS = [
+      "tack","tack sa mycket","tack så mycket","tack for mig","tack för mig",
+      "ok","okej","mm","mmm","mhm","öh","eh","ah","aha","aa","jaa","yes","jo"
     ];
+
+    // Hälsningar vi VILL TILLÅTA även om de är korta
+    const GREETING_OK = /^(hej( hej)?|tja|tjena|hall[aå]|god morgon|god kväll)$/i;
+
     const STEP_COMMANDS = /(nästa|fortsätt|mer|continue|next)/i;
 
     // ---------- Utils ----------
@@ -114,28 +124,27 @@
         .replace(/[^a-z0-9\s]/g," ")
         .replace(/\s+/g," ").trim();
     }
-    function isShortFiller(t) {
-      const x = (t||"").toLowerCase().trim();
-      if (!x) return true;
-      if (x.length <= 2) return true;
-      if (SHORT_FILLERS.includes(x)) return true;
-      const words = x.split(/\s+/);
-      if (words.length <= 2 && !/[?]/.test(x)) return true;
+
+    // Bedöm om en transkription ska slängas (falsk väckning / brus / kortfiller)
+    function shouldDropUtterance(text, talkMs, elapsedMs){
+      const withinEcho = (Date.now() - lastTTSEnd) < ECHO_SUPPRESS_MS;
+      const duty = talkMs / Math.max(1, elapsedMs);
+      const dutyMin = withinEcho ? MIN_DUTY_ECHO : MIN_DUTY;
+
+      const raw = (text||"").trim();
+      const norm = normalize(raw);
+
+      if (!norm) return true;                          // tomt
+      if (raw.length < 2) return true;                 // extremt kort
+      if (DISCARD_FILLERS.includes(norm)) return true; // kända brus-filler
+      if (duty < dutyMin) return true;                 // för lite faktisk tal-energi
+
+      // Om väldigt kort och inte fråga: släng, utom hälsningar och stegkommandon
+      const words = norm.split(" ").filter(Boolean);
+      if (words.length <= 2 && !/[?]/.test(raw) && !GREETINGS_OK.test(raw) && !STEP_COMMANDS.test(raw)) {
+        return true;
+      }
       return false;
-    }
-    function likelyEchoOfTTS(text){
-      const within = Date.now() - lastTTSEnd < ECHO_SUPPRESS_MS;
-      if (!within) return false;
-      const t = normalize(text);
-      if (!t) return true;
-      if (!lastSpokenTextNorm) return false;
-      if (lastSpokenTextNorm.includes(t)) return true;
-      const ts = t.split(" ").filter(w=>w.length>=3);
-      if (!ts.length) return true;
-      const ls = new Set(lastSpokenTextNorm.split(" ").filter(w=>w.length>=3));
-      let overlap=0;
-      ts.forEach(w=>{ if(ls.has(w)) overlap++; });
-      return (overlap / ts.length) >= 0.7;
     }
 
     function setStatus(mode, text) {
@@ -205,7 +214,7 @@
           ttsAudio = new Audio(); ttsAudio.src = url; ttsAudio.preload = "auto"; ttsAudio.crossOrigin = "anonymous";
           ttsCtx = new (window.AudioContext||window.webkitAudioContext)(); await ttsCtx.resume().catch(()=>{});
           const srcNode = ttsCtx.createMediaElementSource(ttsAudio);
-          ttsGainNode = ttsCtx.createGain(); ttsGainNode.gain.value = parseFloat(document.getElementById('volumeSlider').value) || 0.9;
+          ttsGainNode = ttsCtx.createGain(); ttsGainNode.gain.value = parseFloat(document.getElementById('volumeSlider').value) || TTS_BASE_GAIN;
           document.getElementById('volumeSlider').addEventListener('input', (e) => {
             if (ttsGainNode) ttsGainNode.gain.value = parseFloat(e.target.value);
           });
@@ -276,13 +285,6 @@
         r = r && typeof r==='object' ? r : { spoken: 'Okej.' };
 
         chatHistory.push({ user: text, assistant: r, ts: Date.now() });
-
-        // Pace meta
-        if (r.meta && r.meta.pace) {
-          if (r.meta.pace === 'slow') STEP_CHUNK_SIZE = 2;
-          else if (r.meta.pace === 'fast') STEP_CHUNK_SIZE = 6;
-          else STEP_CHUNK_SIZE = 4;
-        }
 
         if (r.need?.clarify) {
           resetSteps([]);
@@ -367,12 +369,19 @@
         const withinEcho = (Date.now() - lastTTSEnd) < ECHO_SUPPRESS_MS;
         const minSpeech = withinEcho ? MIN_SPEECH_MS_ECHO : MIN_SPEECH_MS;
 
-        const accept = (talkMs >= minSpeech);
+        const elapsed = performance.now()-startedAt;
+        const acceptByMs = (talkMs >= minSpeech);
+        const acceptByDuty = (talkMs / Math.max(1, elapsed)) >= (withinEcho ? MIN_DUTY_ECHO : MIN_DUTY);
+        const accept = acceptByMs && acceptByDuty;
+
         if (!accept || blob.size < MIN_BLOB_BYTES) { if(running) startListening(); return; }
 
         try{
           const text = await transcribe(blob);
           if (!text || HALLU.test(text) || likelyEchoOfTTS(text)) { if(running) startListening(); return; }
+
+          // NYTT: kastar bort falsk-väckningar och korta fillers
+          if (shouldDropUtterance(text, talkMs, elapsed)) { if(running) startListening(); return; }
 
           const t = text.toLowerCase();
           if (stepQueue.length && STEP_COMMANDS.test(t) && !likelyEchoOfTTS(text)) {
@@ -453,7 +462,7 @@
     stopBtn.addEventListener('click', stopLoop);
     abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
 
-    // Debug: text till chat
+    // Debug: text till chat (oförändrat – inget filter här)
     debugBtn.addEventListener('click', async () => {
       const text = debugInput.value.trim();
       if (text) {
@@ -462,6 +471,22 @@
         debugInput.value = '';
       }
     });
+
+    // --- likelyEchoOfTTS (behåller din tidigare)
+    function likelyEchoOfTTS(text){
+      const within = Date.now() - lastTTSEnd < ECHO_SUPPRESS_MS;
+      if (!within) return false;
+      const t = normalize(text);
+      if (!t) return true;
+      if (!lastSpokenTextNorm) return false;
+      if (lastSpokenTextNorm.includes(t)) return true;
+      const ts = t.split(" ").filter(w=>w.length>=3);
+      if (!ts.length) return true;
+      const ls = new Set(lastSpokenTextNorm.split(" ").filter(w=>w.length>=3));
+      let overlap=0;
+      ts.forEach(w=>{ if(ls.has(w)) overlap++; });
+      return (overlap / ts.length) >= 0.7;
+    }
   </script>
 </body>
 </html>
