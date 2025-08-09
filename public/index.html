@@ -23,14 +23,11 @@
     .ghost { background:#2f3542 }
     #debugInput { margin-top:1rem; width:100%; padding:0.75rem; border-radius:12px; border:1px solid #232733; background:#12141a; color:#fff; }
     #debugBtn { margin-top:0.5rem; }
-    #userIdNote { font-size:.8rem; color:#9aa3ad; margin-top:.25rem; }
   </style>
 </head>
 <body>
   <h1>Coach Assistant</h1>
   <p class="status"><span class="dot idle"></span><span id="recStatus">Redo – tryck start. Prata för att avbryta svaret när som helst.</span></p>
-
-  <div id="userIdNote"></div>
 
   <div class="row">
     <button id="startBtn">▶️ Starta röstloop</button>
@@ -50,20 +47,6 @@
   <button id="debugBtn">Skicka text</button>
 
   <script>
-    // ---------- USER ID (persist i localStorage) ----------
-    function getOrCreateUserId() {
-      const key = 'coach_user_id';
-      let id = localStorage.getItem(key);
-      if (!id) {
-        id = 'user-' + Math.random().toString(36).slice(2, 10);
-        localStorage.setItem(key, id);
-      }
-      return id;
-    }
-    const USER_ID = getOrCreateUserId();
-    const userIdNote = document.getElementById('userIdNote');
-    userIdNote.textContent = `UserID: ${USER_ID} (lokalt)`;
-
     const startBtn = document.getElementById('startBtn');
     const stopBtn  = document.getElementById('stopBtn');
     const abortBtn = document.getElementById('abortTTSBtn');
@@ -77,6 +60,7 @@
     // ---------- STATE ----------
     let state = 'IDLE', running = false;
     let chatHistory = [];
+    let lastOrigin = 'voice'; // NEW: spåra ursprung för history-raden
 
     // Mic / analyser
     let micStream = null, mediaRecorder = null, chunks = [];
@@ -88,7 +72,7 @@
     let lastTTSEnd = 0;
     const TTS_BASE_GAIN = 0.9;
 
-    // Eko-skydd
+    // Nytt: eko-skydd
     let lastSpokenText = "";
     let lastSpokenTextNorm = "";
     const ECHO_SUPPRESS_MS = 2500;
@@ -147,6 +131,7 @@
       let overlap=0; ts.forEach(w=>{ if(ls.has(w)) overlap++; });
       return (overlap / ts.length) >= 0.7;
     }
+
     function setStatus(mode, text) {
       const dot = mode === 'LISTENING' ? 'listen' : mode === 'THINKING' ? 'think' : mode === 'SPEAKING' ? 'speak' : 'idle';
       recStatus.previousElementSibling.className = `dot ${dot}`;
@@ -214,7 +199,7 @@
           ttsAudio = new Audio(); ttsAudio.src = url; ttsAudio.preload = "auto"; ttsAudio.crossOrigin = "anonymous";
           ttsCtx = new (window.AudioContext||window.webkitAudioContext)(); await ttsCtx.resume().catch(()=>{});
           const srcNode = ttsCtx.createMediaElementSource(ttsAudio);
-          ttsGainNode = ttsCtx.createGain(); ttsGainNode.gain.value = parseFloat(document.getElementById('volumeSlider').value) || TTS_BASE_GAIN;
+          ttsGainNode = ttsCtx.createGain(); ttsGainNode.gain.value = parseFloat(document.getElementById('volumeSlider').value) || 0.9;
           document.getElementById('volumeSlider').addEventListener('input', (e) => {
             if (ttsGainNode) ttsGainNode.gain.value = parseFloat(e.target.value);
           });
@@ -225,34 +210,30 @@
             abortBtn.style.display='none';
             lastTTSEnd = Date.now();
             _speakResolve && _speakResolve(); _speakResolve=null;
-            if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
+            if (running) setTimeout(()=>startListening(), 200);
           };
           ttsAudio.onerror = ()=>{
             abortBtn.style.display='none';
             lastTTSEnd = Date.now();
             _speakResolve && _speakResolve(); _speakResolve=null;
-            if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
+            if (running) setTimeout(()=>startListening(), 200);
           };
         }catch{
           abortBtn.style.display='none'; lastTTSEnd = Date.now();
           _speakResolve && _speakResolve(); _speakResolve=null;
-          if (running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
+          if (running) setTimeout(()=>startListening(), 200);
         }
       });
     }
-    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
+    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), 200); }});
 
     // ---------- Steps reading ----------
-    function resetSteps(steps){
-      stepQueue = Array.isArray(steps) ? steps.slice() : [];
-      stepOffset = 0;
-    }
+    function resetSteps(steps){ stepQueue = Array.isArray(steps) ? steps.slice() : []; stepOffset = 0; }
     async function speakStepsChunk(n=4){
       if (!stepQueue.length) return;
       const chunk = stepQueue.splice(0, n);
       const text = chunk.map((s,i)=>`${stepOffset+i+1}. ${s}`).join('. ')
-        + (stepQueue.length ? '. Säg "nästa" när du vill fortsätta.'
-                            : '. Det var alla steg. Vill du ha förklaringen också?');
+        + (stepQueue.length ? '. Säg "nästa" när du vill fortsätta.' : '. Det var alla steg. Vill du ha förklaringen också?');
       stepOffset += chunk.length;
       await speak(text);
     }
@@ -279,8 +260,7 @@
           body: JSON.stringify({
             message:text,
             prev: { question: lastQ, assistant: lastA },
-            history: chatHistory,
-            userId: USER_ID
+            history: chatHistory
           })
         });
         const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Chat-fel');
@@ -288,7 +268,8 @@
         let r=data.reply; if(typeof r==='string'){ try{ r=JSON.parse(r); }catch{} }
         r = r && typeof r==='object' ? r : { spoken: 'Okej.' };
 
-        chatHistory.push({ user: text, assistant: r });
+        // NEW: stämpla denna interaktion i history (med ts + origin)
+        chatHistory.push({ user: text, assistant: r, ts: Date.now(), origin: lastOrigin });
 
         if (r.need?.clarify) {
           resetSteps([]);
@@ -322,7 +303,7 @@
         if (steps.length) await speakStepsChunk();
       }catch{
         output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI.</div>`);
-        if(running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
+        if(running) setTimeout(()=>startListening(), 200);
       }
     }
 
@@ -337,7 +318,7 @@
     }
 
     // ---------- VAD ----------
-    function calibrateThreshold(){
+    async function calibrateThreshold(){
       return new Promise(async (resolve)=>{
         const t0 = performance.now();
         let acc=0, n=0;
@@ -352,7 +333,6 @@
       });
     }
 
-    // ---------- LISTEN ----------
     async function startListening(){
       if(!running) return;
       state='LISTENING'; setStatus(state,'Lyssnar… (bli tyst för att skicka)');
@@ -370,13 +350,14 @@
         const type = REC_MIME || (chunks[0]?.type || 'audio/webm');
         const blob = new Blob(chunks, { type });
 
-        const withinEcho = (Date.now() - lastTTSEnd) < ECHO_SUPPRESS_MS;
-        const minSpeech = withinEcho ? MIN_SPEECH_MS_ECHO : MIN_SPEECH_MS;
+        const withinEcho = (Date.now() - lastTTSEnd) < 2500;
+        const minSpeech = withinEcho ? 320 : 160;
 
         const accept = (talkMs >= minSpeech);
-        if (!accept || blob.size < MIN_BLOB_BYTES) { if(running) startListening(); return; }
+        if (!accept || blob.size < 1200) { if(running) startListening(); return; }
 
         try{
+          lastOrigin = 'voice'; // NEW: markera ursprung
           const text = await transcribe(blob);
           if (!text || HALLU.test(text) || likelyEchoOfTTS(text)) { if(running) startListening(); return; }
 
@@ -401,7 +382,7 @@
         if (lvl >= speechThreshold) { talkMs += 100; silentMs = 0; }
         else { silentMs += 100; }
         const elapsed = performance.now()-startedAt;
-        if (silentMs >= SILENCE_HOLD_MS || elapsed > MAX_RECORD_MS){
+        if (silentMs >= 800 || elapsed > 10000){
           clearInterval(vadTimer);
           try{ mediaRecorder.state!=='inactive' && mediaRecorder.stop(); }catch{}
         }
@@ -451,17 +432,18 @@
       try{ if(ttsAudio){ ttsAudio.pause(); } }catch{}
     }
 
-    window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
-    window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') stopLoop(); });
+    window.addEventListener('keydown',(e)=>{ if (e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), 200); }});
+    window.addEventListener('keydown',(e)=>{ if (e.key==='Escape') stopLoop(); });
 
     startBtn.addEventListener('click', startLoop);
     stopBtn.addEventListener('click', stopLoop);
-    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
+    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), 200); }});
 
     // Debug: text till chat
     debugBtn.addEventListener('click', async () => {
       const text = debugInput.value.trim();
       if (text) {
+        lastOrigin = 'debug'; // NEW: markera ursprung
         output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du skrev (debug):</strong> ${text}</div>`);
         await askAssistant(text);
         debugInput.value = '';
