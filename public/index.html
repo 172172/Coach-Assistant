@@ -35,6 +35,11 @@
     <button id="abortTTSBtn" class="ghost" style="display:none">⏸️ Avbryt tal</button>
   </div>
 
+  <div style="margin-top:1rem">
+    <label for="volumeSlider" class="muted">Volym:</label>
+    <input type="range" id="volumeSlider" min="0" max="1" step="0.1" value="0.9" style="width:200px;">
+  </div>
+
   <div id="vizWrap"><canvas id="viz" width="800" height="140"></canvas></div>
   <div id="output"></div>
 
@@ -167,7 +172,10 @@
           ttsAudio = new Audio(); ttsAudio.src = url; ttsAudio.preload = "auto"; ttsAudio.crossOrigin = "anonymous";
           ttsCtx = new (window.AudioContext||window.webkitAudioContext)(); await ttsCtx.resume().catch(()=>{});
           const srcNode = ttsCtx.createMediaElementSource(ttsAudio);
-          ttsGainNode = ttsCtx.createGain(); ttsGainNode.gain.value = TTS_BASE_GAIN;
+          ttsGainNode = ttsCtx.createGain(); ttsGainNode.gain.value = parseFloat(document.getElementById('volumeSlider').value) || TTS_BASE_GAIN;
+          document.getElementById('volumeSlider').addEventListener('input', (e) => {
+            if (ttsGainNode) ttsGainNode.gain.value = parseFloat(e.target.value);
+          });
           ttsAnalyser = ttsCtx.createAnalyser(); ttsAnalyser.fftSize = 1024;
           srcNode.connect(ttsGainNode).connect(ttsAnalyser).connect(ttsCtx.destination);
           await ttsAudio.play();
