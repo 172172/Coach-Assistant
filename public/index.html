@@ -72,15 +72,14 @@
     let REC_MIME = '', REC_EXT = 'webm';
 
     // Gates
-    const MIN_SPEECH_MS  = 160;     // kortaste prat
-    const MIN_BLOB_BYTES = 1200;    // minsta storlek
-    // (borttaget) FORCED_ACCEPT_BYTES – vi accepterar inte enbart på storlek
+    const MIN_SPEECH_MS  = 160;
+    const MIN_BLOB_BYTES = 1200;
 
     // Hallu/eko-filter
     const HALLU = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
     const SHORT_FILLERS = [
-      "tack","tack sÃ¥ mycket","tack så mycket","tack fÃ¶r mig","tack för mig",
-      "hej","hejdå","hejdÃ¥","mm","mmm","mhm","öh","eh","okej","ok"
+      "tack","tack så mycket","tack för mig",
+      "hej","hejdå","mm","mmm","mhm","öh","eh","okej","ok"
     ];
     const STEP_COMMANDS = /(nästa|fortsätt|mer|continue|next)/i;
 
@@ -89,7 +88,6 @@
       if (!x) return true;
       if (x.length <= 2) return true;
       if (SHORT_FILLERS.includes(x)) return true;
-      // 1–2 ord och ingen fråga/verb → sannolikt filler
       const words = x.split(/\s+/);
       if (words.length <= 2 && !/[?]/.test(x)) return true;
       return false;
@@ -148,7 +146,7 @@
       if (ttsCtx) { try { ttsCtx.close(); } catch {} }
       ttsCtx = null; ttsGainNode = null;
       if (_speakResolve) { try { _speakResolve(); } catch {} _speakResolve = null; }
-      lastTTSEnd = Date.now(); // markera slut – för eko-gate
+      lastTTSEnd = Date.now();
     }
     function speak(text){
       return new Promise(async (resolve)=>{
@@ -167,9 +165,7 @@
           ttsAudio.onended = ()=>{ abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve(); _speakResolve=null; if(running) startListening(); };
           ttsAudio.onerror = ()=>{ abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve(); _speakResolve=null; if(running) startListening(); };
         }catch{
-          abortBtn.style.display='none';
-          lastTTSEnd = Date.now();
-          resolve(); _speakResolve=null;
+          abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve(); _speakResolve=null;
           if(running) startListening();
         }
       });
@@ -207,7 +203,6 @@
 
     async function askAssistant(text){
       state='THINKING'; setStatus(state,'Bearbetar…');
-      output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
       try{
         const res = await fetch('/api/chat',{
           method:'POST', headers:{'Content-Type':'application/json'},
@@ -250,7 +245,7 @@
         const steps = Array.isArray(r.cards?.steps) ? r.cards.steps : [];
         resetSteps(steps);
         await speak(r.spoken || 'Okej.');
-        if (steps.length) await speakStepsChunk(); // starta direkt
+        if (steps.length) await speakStepsChunk();
       }catch{
         output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI.</div>`);
         if(running) startListening();
@@ -299,12 +294,11 @@
         const type = REC_MIME || (chunks[0]?.type || 'audio/webm');
         const blob = new Blob(chunks, { type });
 
-        const accept = (talkMs >= MIN_SPEECH_MS); // borttaget "storlek>bytes" undantag
+        const accept = (talkMs >= MIN_SPEECH_MS);
         if (!accept || blob.size < MIN_BLOB_BYTES) { if(running) startListening(); return; }
 
         try{
           const text = await transcribe(blob);
-          // Eko-fönster: ignorera allt inom 1.2s efter TTS-slut (och korta fillers)
           const echoWindow = Date.now() - lastTTSEnd < 1200;
           if (!text || HALLU.test(text) || (echoWindow && isShortFiller(text))) { if(running) startListening(); return; }
 
@@ -312,6 +306,7 @@
           const t = text.toLowerCase();
           if (stepQueue.length && STEP_COMMANDS.test(t)) { await speakStepsChunk(); return; }
 
+          // logga exakt här (EN gång)
           output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
           await askAssistant(text);
         }catch{
