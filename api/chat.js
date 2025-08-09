@@ -1,6 +1,6 @@
 // /api/chat.js
-// Öppna samtal om "allt" (GENERAL), men för linje/produktion (LINE) är manualen enda sanningen.
-// Inga procedurer/kvalitet/säkerhet/felsökning/parametrar utan rubriker i manualen.
+// Fri, konversationell AI. MEN: om något ser ut att vara operativt (linje/procedur/kvalitet/säkerhet/parametrar),
+// ska svaret bygga på manualen. Servern gör bara en tunn sista-säkring.
 
 const KNOWLEDGE_URL = "https://raw.githubusercontent.com/172172/Coach-Assistant/main/assistant-knowledge.txt";
 const CACHE_MS = 5 * 60 * 1000;
@@ -17,23 +17,20 @@ async function getKnowledge() {
   return text;
 }
 
-// -------- Heuristik (server-side dubbelsäkring) --------
+// --- Heuristik (tunn, ej låsande) ---
 const norm = (s="") => s.toLowerCase()
   .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
   .replace(/ö/g,"o").replace(/ä/g,"a").replace(/å/g,"a")
   .replace(/\s+/g," ").trim();
 
-function isLineTopic(s="") {
+function looksOperationalQuestion(s="") {
   const t = norm(s);
-  // Träffar på produktion, tapp, CIP, kvalitet, säkerhet, maskin, parametrar, felsökning etc.
-  return /linj|tapp|fyll|sortbyte|byte i tappen|cip|skolj|flush|rengor|sanit|recept|batch|oee|smed|hmi|plc|starta|stoppa|felsok|alarm|tryck|temperatur|flode|ventil|pump|kvalitet|prov|qc|haccp|ccp|sakerhet|underhall|smorj|toque|moment|kalibr|setup|omst|omställ|stopporsak|setpoint|saetpunkt|spak|vent|pack|etikett|kapsyl|burk|linje/.test(t);
+  return /linj|tapp|fyll|sortbyte|cip|skolj|flush|rengor|sanit|recept|batch|oee|hmi|plc|felsok|alarm|tryck|temperatur|flode|ventil|pump|kvalitet|prov|qc|haccp|ccp|sakerhet|underhall|smorj|kalibr|setup|omst|omstall|stopporsak|setpoint|saetpunkt|etikett|kapsyl|burk|pack|pepsi|cola|lager|ipa|sirap|syrup/.test(t);
 }
-
-function prevLooksLine(prev) {
-  if (!prev) return false;
-  const q = norm(prev.question||"");
-  const a = JSON.stringify(prev.assistant||{}).toLowerCase();
-  return isLineTopic(q) || /"domain"\s*:\s*"line"/.test(a) || /matched_headings/i.test(a);
+function looksOperationalAnswer(cards={}, spoken="") {
+  const steps = Array.isArray(cards.steps) ? cards.steps : [];
+  const joined = `${spoken} ${steps.join(" ")}`.toLowerCase();
+  return steps.length > 0 || /\bsteg\b|ventil|stang|oppna|tryck|temperatur|flode|spola|sip|cip|flush|sakerhet|skydd|larm|hmi|plc/.test(joined);
 }
 
 export default async function handler(req, res) {
@@ -43,54 +40,50 @@ export default async function handler(req, res) {
     const { message = "", prev = null } = req.body || {};
     const knowledge = await getKnowledge();
 
-    // -------- Systemprompt --------
+    // --- Systemprompt (fri stil, men manual-krav för operativt) ---
     const system = `
 Du är en AI-assistent skapad av Kevin – tänk Douglas Adams möter JARVIS.
-Prata ALLTID på svenska. Var vänlig, kvick och mänsklig, men håll dig till fakta.
+Svara ALLTID på svenska. Var hjälpsam, kvick där det passar, men alltid tydlig och ärlig.
 
-DU HAR TVÅ LÄGEN:
-1) "GENERAL" – fritt snack om världen, teknik, sport, filosofi, skämt etc. Du får använda allmän kunskap. Personlighet: lättsam, kvick, kort men innehållsrik.
-2) "LINE" – allt som kan påverka produktion/linje (procedurer, kvalitet, säkerhet, underhåll, felsökning, parametrar, tapp/CIP). Här är manualen ("Kunskap") den ENDA källan.
-   - Ge endast råd som stöds av manualen.
-   - Om manualen är otydlig eller saknas: be om förtydligande ELLER säg att det inte täcks och föreslå att uppdatera manualen. Hitta inte på.
-   - Inga externa siffror/parametrar/”best practise” utanför manualen.
+STIL
+- Vänlig, informell, konversationell. Humor OK när det passar (inte vid säkerhet).
+- Anpassa djup och ton efter frågan. Kort men innehållsrikt.
 
-KLASSA FÖRST:
-- Sätt "meta.domain": "line" om frågan rör drift, procedurer, kvalitet, säkerhet, felsökning, maskin/parametrar, CIP/tapp etc. Annars "general".
-- Hitta rubriker i manualen du faktiskt lutar dig mot och fyll "matched_headings".
-- Sätt "coverage" realistiskt utifrån hur väl manualen täcker svaret.
+SANNING OCH KÄLLA
+- Om frågan är allmän: svara fritt med allmän kunskap.
+- Om frågan rör drift/linje/procedurer/kvalitet/säkerhet/parametrar/felsökning: bygg svaret på "Kunskap" (manualen) nedan.
+  - Ge tydliga, NUMRERADE steg när det efterfrågas/behövs.
+  - Hitta och lista de rubriker i manualen du faktiskt använder i "matched_headings".
+  - Hitta inte på siffror/parametrar. Om manualen saknar värden, säg det och håll det generellt (“enligt manualens gränsvärden”).
+  - Om underlaget är för vagt: ställ EN öppen följdfråga.
+  - Om manualen inte täcker det: säg det rakt ut och föreslå uppdatering (ge inte operativa steg).
 
-STIL:
-- GENERAL: Douglas+JARVIS vibe, kort, charmigt, kvickt.
-- LINE: trygg, lugn, pedagogisk coach. Tydliga, numrerade steg när det behövs. Inga skämt som stör säkerhet.
-
-SVARSFORMAT (EXAKT JSON, ingen text utanför):
+RETURFORMAT (EXAKT JSON, ingen text utanför):
 {
-  "meta": { "domain": "line" | "general" },
-  "spoken": string,
-  "need": { "clarify": boolean, "question"?: string },
+  "spoken": string,                            // det du skulle säga högt, naturligt
+  "need": { "clarify": boolean, "question"?: string }, // be om precisering vid oklarhet
   "cards": {
     "summary": string,
-    "steps": string[],
+    "steps": string[],                         // numrerade steg i text (om relevant)
     "explanation": string,
     "pitfalls": string[],
     "simple": string,
     "pro": string,
     "follow_up": string,
-    "coverage": number,
-    "matched_headings": string[]
+    "coverage": number,                        // 0..1 - DIN realistiska skattning av hur väl manualen täcker
+    "matched_headings": string[]               // exakta rubriker ur manualen du använde
   },
   "follow_up": string
 }
 
-COVERAGE-GUIDE:
-- ≥0.75: flera relevanta rubriker, steg direkt därifrån.
-- 0.6–0.75: delvis stöd; komplettera med säkra generella formuleringar (utan nya siffror).
-- 0.4–0.6: viss relevans; leverera steg men be användaren verifiera mot rubrikerna.
-- <0.3: troligen otillräckligt – fråga om förtydligande eller säg att manualen saknas.
+COVERAGE (kalibrering — var inte överförsiktig):
+- ~0.75+: flera direkt relevanta rubriker; steg kommer därifrån.
+- ~0.6–0.75: delvis stöd; komplettera med säkra generella formuleringar.
+- ~0.4–0.6: viss relevans; leverera steg och be att verifiera mot rubrikerna.
+- <0.3: sannolikt otillräckligt → be om precisering eller säg att manualen saknas/behöver uppdateras.
 `.trim();
 
-    // -------- Userprompt --------
+    // --- Userprompt (ger manual + kontext) ---
     const user = `
 Kunskap (manual – fulltext):
 """
@@ -104,14 +97,13 @@ Användarens inmatning:
 "${message}"
 
 Instruktion:
-- Klassificera "meta.domain".
-- Om domain="line" och manualen ger stöd: ge lugna, numrerade steg och lista matched_headings.
-- Om domain="line" och manual saknas/delvis: ställ en öppen följdfråga (need.clarify=true) ELLER säg att manualen saknas och föreslå uppdatering. Hitta inte på.
-- Om domain="general": svara fritt enligt persona.
-- Fyll ALLA fält i JSON-schemat.
+- Svara fritt på allmänna frågor.
+- Om du ger operativa råd: luta dig på manualen, lista matched_headings och sätt coverage realistiskt.
+- Om du saknar underlag: be om EN precisering eller säg att manualen saknas/behöver uppdateras (och undvik operativa steg).
+- Fyll ALLA fält i JSON-schemat. Ingen text utanför JSON.
 `.trim();
 
-    // -------- OpenAI --------
+    // --- OpenAI-anrop ---
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -121,7 +113,7 @@ Instruktion:
       body: JSON.stringify({
         model: "gpt-4o",
         temperature: 0.3,
-        max_tokens: 1800,
+        max_tokens: 2000,
         messages: [
           { role: "system", content: system },
           { role: "user", content: user }
@@ -135,17 +127,17 @@ Instruktion:
       return res.status(500).json({ error: "Chat API error", details: data });
     }
 
-    // -------- Parse & fallback --------
+    // --- Tolka svaret ---
     let content = data.choices?.[0]?.message?.content || "";
     let out;
-    try { out = JSON.parse(content); }
-    catch {
+    try {
+      out = JSON.parse(content);
+    } catch {
       out = {
-        meta: { domain: isLineTopic(message) || prevLooksLine(prev) ? "line" : "general" },
-        spoken: "Oj, där tappade jag tråden. Kan du säga om det här gäller linjen eller är en allmän fråga?",
-        need: { clarify: true, question: "Gäller det linjen (procedur/kvalitet/säkerhet) eller är det allmänt?" },
+        spoken: "Oj, det där blev otydligt – kan du säga det på ett annat sätt?",
+        need: { clarify: true, question: "Kan du precisera vad du behöver?" },
         cards: {
-          summary: "Behöver veta om det är LINE eller GENERAL.",
+          summary: "Behöver förtydligande.",
           steps: [], explanation: "", pitfalls: [],
           simple: "", pro: "", follow_up: "",
           coverage: 0, matched_headings: []
@@ -154,63 +146,42 @@ Instruktion:
       };
     }
 
-    // -------- Server-säkring: blockera linje-svar utan stöd --------
-    const modelDomain = out?.meta?.domain === "line" ? "line" : out?.meta?.domain === "general" ? "general" : null;
-    const isLine = (modelDomain === "line") || isLineTopic(message) || prevLooksLine(prev);
+    // --- Tunn server-säkring (ingen “låsning”, bara skydd mot fel) ---
+    const isOperativeQ = looksOperationalQuestion(message) || looksOperationalQuestion(prev?.question || "");
+    const hasOperativeTone = looksOperationalAnswer(out.cards, out.spoken);
+    const heads = Array.isArray(out?.cards?.matched_headings) ? out.cards.matched_headings : [];
+    const cov = Number(out?.cards?.coverage ?? 0);
+    const steps = Array.isArray(out?.cards?.steps) ? out.cards.steps : [];
 
-    const cards = out.cards || {};
-    const heads = Array.isArray(cards.matched_headings) ? cards.matched_headings : [];
-    const cov = Number(cards.coverage ?? 0);
-    const steps = Array.isArray(cards.steps) ? cards.steps : [];
-
-    // Om modellen vill förtydliga – låt gå igenom direkt (ingen gate)
+    // Om modellen *vill* förtydliga → släpp igenom direkt.
     if (out?.need?.clarify) {
       return res.status(200).json({ reply: out });
     }
 
-    if (isLine) {
-      // LINE-läge: svar får bara ges om manualstöd finns (rubriker + rimlig coverage)
-      const hasSupport = heads.length > 0 || cov >= 0.5 || steps.length >= 4;
-      const thinSupport = heads.length === 0 && cov < 0.3;
-
-      if (!hasSupport || thinSupport) {
-        // Blockera operativa råd – be om mer info eller föreslå manual-uppdatering
-        out.meta = { domain: "line" };
-        out.spoken = out.spoken && heads.length>0
-          ? `${out.spoken} Dubbelkolla mot manualens rubriker innan du gör något.` 
-          : "Det här rör linjen, men jag hittar inte tydligt stöd i manualen för att guida säkert. Vill du att jag ställer en följdfråga så vi ringar in rätt avsnitt, eller att vi uppdaterar manualen?";
-        out.need = out.need || {};
-        if (!out.need.clarify && heads.length === 0) {
-          out.need.clarify = true;
-          out.need.question = out.need.question || "Kan du säga exakt vilken utrustning/avsnitt det gäller, så slår jag upp rätt del i manualen?";
-        }
-        out.cards = {
-          summary: "Operativt svar blockerat: saknar tillräckligt manualstöd.",
-          steps: [], explanation: "", pitfalls: [],
-          simple: "Manualstöd saknas för säkra steg.",
-          pro: "Otillräcklig manualreferens för operativa instruktioner.",
-          follow_up: "Ska jag notera att manualen behöver uppdateras, eller vill du ge mer kontext?",
-          coverage: cov || 0, matched_headings: heads
-        };
-        out.follow_up = out.cards.follow_up;
-        return res.status(200).json({ reply: out });
-      }
-
-      // Delvis stöd: leverera men uppmana att verifiera
-      if (cov < 0.6 || heads.length < 1) {
-        out.meta = { domain: "line" };
-        out.spoken = (out.spoken || "Okej.") + " Verifiera gärna mot rubrikerna jag visar i detaljer.";
-        out.cards.follow_up = out.cards.follow_up || "Vill du att jag bryter ner nästa del?";
-        return res.status(200).json({ reply: out });
-      }
-
-      // Bra stöd → kör
-      out.meta = { domain: "line" };
+    // Fång: operativa råd utan stöd i manualen (inga rubriker OCH låg coverage) → be om precisering istället för att gissa.
+    if ((isOperativeQ || hasOperativeTone) && heads.length === 0 && cov < 0.5) {
+      out.spoken = "Det låter som en linje-/procedurfråga. För att guida säkert behöver jag veta exakt utrustning/avsnitt, så jag kan peka på rätt del i manualen. Vad gäller det?";
+      out.need = { clarify: true, question: "Vilken utrustning/avsnitt gäller det? (t.ex. Tapp – sortbyte, CIP – tapp, Kvalitetsprov: produkt X)" };
+      out.cards = {
+        summary: "Operativ fråga utan tydligt manualstöd – ber om precisering.",
+        steps: [], explanation: "", pitfalls: [],
+        simple: "Säg exakt vilket avsnitt/utrustning så guidar jag rätt.",
+        pro: "Kräver rubrikvalidering innan operativa steg lämnas.",
+        follow_up: "Vill du att jag förslår närmaste avsnitt utifrån manualens rubriker?",
+        coverage: cov || 0, matched_headings: []
+      };
+      out.follow_up = out.cards.follow_up;
       return res.status(200).json({ reply: out });
     }
 
-    // GENERAL-läge → fri persona
-    out.meta = { domain: "general" };
+    // Delvis stöd (lågt cov men ändå steg): leverera, men be om verifiering – vi blockerar inte.
+    if ((isOperativeQ || hasOperativeTone) && (cov < 0.6 || heads.length < 1) && steps.length > 0) {
+      out.spoken = (out.spoken || "Okej.") + " Verifiera gärna mot manualens rubriker i detaljerna.";
+      out.cards.follow_up = out.cards.follow_up || "Vill du att jag bryter ner nästa del?";
+      return res.status(200).json({ reply: out });
+    }
+
+    // Allt annat: släpp igenom exakt som modellen skrev.
     return res.status(200).json({ reply: out });
 
   } catch (err) {
