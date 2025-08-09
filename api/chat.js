@@ -1,6 +1,6 @@
 // /api/chat.js
-// Fri, konversationell AI. MEN: om något ser ut att vara operativt (linje/procedur/kvalitet/säkerhet/parametrar),
-// ska svaret bygga på manualen. Servern gör bara en tunn sista-säkring.
+// Fri, konversationell AI med manual-stöd för operativa svar.
+// Fix: småprat ger aldrig "klarifiera", och operativa råd kräver manualstöd – annars fråga öppet.
 
 const KNOWLEDGE_URL = "https://raw.githubusercontent.com/172172/Coach-Assistant/main/assistant-knowledge.txt";
 const CACHE_MS = 5 * 60 * 1000;
@@ -27,10 +27,14 @@ function looksOperationalQuestion(s="") {
   const t = norm(s);
   return /linj|tapp|fyll|sortbyte|cip|skolj|flush|rengor|sanit|recept|batch|oee|hmi|plc|felsok|alarm|tryck|temperatur|flode|ventil|pump|kvalitet|prov|qc|haccp|ccp|sakerhet|underhall|smorj|kalibr|setup|omst|omstall|stopporsak|setpoint|saetpunkt|etikett|kapsyl|burk|pack|pepsi|cola|lager|ipa|sirap|syrup/.test(t);
 }
+function isSmalltalk(s="") {
+  const t = norm(s);
+  return /\b(hej+|hall[aå]|tja+|tj[aä]|god morgon|godkv[aä]ll|hur mar du|hur e det|laget|allt bra|m[aå]r bra|tack|tack s[aå] mycket|vars[aå]god|vad g[öo]r du)\b/.test(t);
+}
 function looksOperationalAnswer(cards={}, spoken="") {
   const steps = Array.isArray(cards.steps) ? cards.steps : [];
   const joined = `${spoken} ${steps.join(" ")}`.toLowerCase();
-  return steps.length > 0 || /\bsteg\b|ventil|stang|oppna|tryck|temperatur|flode|spola|sip|cip|flush|sakerhet|skydd|larm|hmi|plc/.test(joined);
+  return steps.length > 0 || /\bsteg\b|ventil|stang|öppna|oppna|tryck|temperatur|flode|spola|cip|flush|s[aä]kerhet|larm|hmi|plc/.test(joined);
 }
 
 export default async function handler(req, res) {
@@ -40,50 +44,53 @@ export default async function handler(req, res) {
     const { message = "", prev = null } = req.body || {};
     const knowledge = await getKnowledge();
 
-    // --- Systemprompt (fri stil, men manual-krav för operativt) ---
+    // --- Systemprompt: fri stil + manualkrav för operativt + småprat = inga klarifieringar ---
     const system = `
-Du är en AI-assistent skapad av Kevin – tänk Douglas Adams möter JARVIS.
-Svara ALLTID på svenska. Var hjälpsam, kvick där det passar, men alltid tydlig och ärlig.
+Du är en AI-assistent skapad av Kevin – Douglas Adams möter JARVIS.
+Svara alltid på svenska. Var vänlig, kvick där det passar, men tydlig och ärlig.
 
 STIL
-- Vänlig, informell, konversationell. Humor OK när det passar (inte vid säkerhet).
-- Anpassa djup och ton efter frågan. Kort men innehållsrikt.
+- Vänlig, informell, konversationell. Subtil humor OK (inte när det gäller säkerhet).
+- Anpassa djup/ton efter frågan. Håll det kort men innehållsrikt.
 
-SANNING OCH KÄLLA
-- Om frågan är allmän: svara fritt med allmän kunskap.
-- Om frågan rör drift/linje/procedurer/kvalitet/säkerhet/parametrar/felsökning: bygg svaret på "Kunskap" (manualen) nedan.
-  - Ge tydliga, NUMRERADE steg när det efterfrågas/behövs.
-  - Hitta och lista de rubriker i manualen du faktiskt använder i "matched_headings".
-  - Hitta inte på siffror/parametrar. Om manualen saknar värden, säg det och håll det generellt (“enligt manualens gränsvärden”).
-  - Om underlaget är för vagt: ställ EN öppen följdfråga.
-  - Om manualen inte täcker det: säg det rakt ut och föreslå uppdatering (ge inte operativa steg).
+SANNING OCH KÄLLOR
+- Allmänna frågor: svara fritt.
+- Operativt (drift/linje/procedurer/kvalitet/säkerhet/parametrar/felsökning): bygg svaret på "Kunskap" (manualen) nedan.
+  * Ge tydliga, NUMRERADE steg när det behövs.
+  * Lista rubrikerna du faktiskt använder i "matched_headings".
+  * Hitta inte på siffror/parametrar. Om manualen saknar värden: säg det och håll det generellt (“enligt manualens gränsvärden”).
+  * Om underlaget är för vagt: ställ EN öppen följdfråga.
+  * Om manualen inte täcker det: säg det rakt ut och föreslå uppdatering (ge inte operativa steg).
+
+SMÅPRAT
+- För hälsningar, “hur mår du”, “tack”, etc.: svara kort och trevligt. Sätt need.clarify=false.
 
 RETURFORMAT (EXAKT JSON, ingen text utanför):
 {
-  "spoken": string,                            // det du skulle säga högt, naturligt
-  "need": { "clarify": boolean, "question"?: string }, // be om precisering vid oklarhet
+  "spoken": string,
+  "need": { "clarify": boolean, "question"?: string },
   "cards": {
     "summary": string,
-    "steps": string[],                         // numrerade steg i text (om relevant)
+    "steps": string[],
     "explanation": string,
     "pitfalls": string[],
     "simple": string,
     "pro": string,
     "follow_up": string,
-    "coverage": number,                        // 0..1 - DIN realistiska skattning av hur väl manualen täcker
-    "matched_headings": string[]               // exakta rubriker ur manualen du använde
+    "coverage": number,
+    "matched_headings": string[]
   },
   "follow_up": string
 }
 
-COVERAGE (kalibrering — var inte överförsiktig):
-- ~0.75+: flera direkt relevanta rubriker; steg kommer därifrån.
+COVERAGE (kalibrering):
+- ~0.75+: flera rubriker direkt relevanta; steg kommer därifrån.
 - ~0.6–0.75: delvis stöd; komplettera med säkra generella formuleringar.
 - ~0.4–0.6: viss relevans; leverera steg och be att verifiera mot rubrikerna.
 - <0.3: sannolikt otillräckligt → be om precisering eller säg att manualen saknas/behöver uppdateras.
 `.trim();
 
-    // --- Userprompt (ger manual + kontext) ---
+    // --- Userprompt ---
     const user = `
 Kunskap (manual – fulltext):
 """
@@ -99,7 +106,8 @@ Användarens inmatning:
 Instruktion:
 - Svara fritt på allmänna frågor.
 - Om du ger operativa råd: luta dig på manualen, lista matched_headings och sätt coverage realistiskt.
-- Om du saknar underlag: be om EN precisering eller säg att manualen saknas/behöver uppdateras (och undvik operativa steg).
+- Om du saknar underlag: be om EN precisering eller säg att manualen saknas/behöver uppdateras (undvik operativa steg).
+- För småprat/hälsningar/tack: ge kort, trevligt svar – need.clarify=false.
 - Fyll ALLA fält i JSON-schemat. Ingen text utanför JSON.
 `.trim();
 
@@ -146,19 +154,25 @@ Instruktion:
       };
     }
 
-    // --- Tunn server-säkring (ingen “låsning”, bara skydd mot fel) ---
+    // --- Småprat-fix: modell får aldrig be om klarifiering på hälsningar ---
+    if (isSmalltalk(message)) {
+      out.need = { clarify: false };
+      if (!out.spoken || /precisera|oklart|mer info/i.test(out.spoken)) {
+        out.spoken = "Jag mår fint – AI-varianten av pigg på kaffe! Hur kan jag hjälpa dig idag?";
+      }
+      out.cards = out.cards || {};
+      out.cards.summary = out.cards.summary || "Småprat";
+      out.cards.coverage = Number(out.cards.coverage ?? 0);
+      return res.status(200).json({ reply: out });
+    }
+
+    // --- Tunn server-säkring för operativt utan manualstöd ---
     const isOperativeQ = looksOperationalQuestion(message) || looksOperationalQuestion(prev?.question || "");
     const hasOperativeTone = looksOperationalAnswer(out.cards, out.spoken);
     const heads = Array.isArray(out?.cards?.matched_headings) ? out.cards.matched_headings : [];
     const cov = Number(out?.cards?.coverage ?? 0);
     const steps = Array.isArray(out?.cards?.steps) ? out.cards.steps : [];
 
-    // Om modellen *vill* förtydliga → släpp igenom direkt.
-    if (out?.need?.clarify) {
-      return res.status(200).json({ reply: out });
-    }
-
-    // Fång: operativa råd utan stöd i manualen (inga rubriker OCH låg coverage) → be om precisering istället för att gissa.
     if ((isOperativeQ || hasOperativeTone) && heads.length === 0 && cov < 0.5) {
       out.spoken = "Det låter som en linje-/procedurfråga. För att guida säkert behöver jag veta exakt utrustning/avsnitt, så jag kan peka på rätt del i manualen. Vad gäller det?";
       out.need = { clarify: true, question: "Vilken utrustning/avsnitt gäller det? (t.ex. Tapp – sortbyte, CIP – tapp, Kvalitetsprov: produkt X)" };
@@ -167,21 +181,21 @@ Instruktion:
         steps: [], explanation: "", pitfalls: [],
         simple: "Säg exakt vilket avsnitt/utrustning så guidar jag rätt.",
         pro: "Kräver rubrikvalidering innan operativa steg lämnas.",
-        follow_up: "Vill du att jag förslår närmaste avsnitt utifrån manualens rubriker?",
+        follow_up: "Vill du att jag föreslår närmaste avsnitt ur manualen?",
         coverage: cov || 0, matched_headings: []
       };
       out.follow_up = out.cards.follow_up;
       return res.status(200).json({ reply: out });
     }
 
-    // Delvis stöd (lågt cov men ändå steg): leverera, men be om verifiering – vi blockerar inte.
+    // Delvis stöd → leverera, men påminn om verifiering
     if ((isOperativeQ || hasOperativeTone) && (cov < 0.6 || heads.length < 1) && steps.length > 0) {
       out.spoken = (out.spoken || "Okej.") + " Verifiera gärna mot manualens rubriker i detaljerna.";
-      out.cards.follow_up = out.cards.follow_up || "Vill du att jag bryter ner nästa del?";
+      out.cards.follow_up = out.cards.follow_up || "Vill du att jag delar upp nästa del?";
       return res.status(200).json({ reply: out });
     }
 
-    // Allt annat: släpp igenom exakt som modellen skrev.
+    // Annars – skicka igenom som det är
     return res.status(200).json({ reply: out });
 
   } catch (err) {
