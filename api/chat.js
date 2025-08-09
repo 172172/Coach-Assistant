@@ -1,384 +1,206 @@
-<!DOCTYPE html>
-<html lang="sv">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Coach Assistant</title>
-  <link rel="icon" href="data:,">
-  <style>
-    :root { --bg:#0b0b0f; --fg:#fff; --acc:#00aaff; --mut:#b9c0c7; }
-    body { font-family: system-ui, sans-serif; padding: 2rem; background: var(--bg); color: var(--fg); }
-    .row { display:flex; gap:.6rem; align-items:center; flex-wrap:wrap; }
-    button { padding:.75rem 1rem; font-size:1rem; border:none; border-radius:12px; cursor:pointer; background:var(--acc); color:#fff; }
-    #output { margin-top: 1rem; font-size:1.05rem; }
-    .status { font-size:.95rem; color:#cfd6dd }
-    .pill { background:#12141a; border:1px solid #232733; padding:.75rem .9rem; border-radius:12px; margin-top:.6rem }
-    .dot { width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:.5rem; vertical-align:middle }
-    .listen { background:#22c55e } .think{ background:#facc15 } .speak{ background:#60a5fa } .idle{ background:#6b7280 }
-    #vizWrap { margin-top:1rem; background:#0f1220; border:1px solid #20263a; border-radius:16px; padding:.5rem; }
-    canvas { width:100%; height:140px; display:block; border-radius:12px; background:linear-gradient(180deg,#0f1220,#0b0c14); }
-    .src { font-size:.85rem; color:#9aa3ad; margin-top:.3rem }
-    .link { color:#8ecbff; cursor:pointer; text-decoration:underline; }
-    .muted { color:#9aa3ad; font-size:.9rem; }
-    .ghost { background:#2f3542 }
-  </style>
-</head>
-<body>
-  <h1>Coach Assistant</h1>
-  <p class="status"><span class="dot idle"></span><span id="recStatus">Redo – tryck start. Prata för att avbryta svaret när som helst.</span></p>
+// /api/chat.js
+// Fri konversation. Operativt kräver manualstöd. Småprat/vanligt snack ska inte trigga "kan du precisera".
 
-  <div class="row">
-    <button id="startBtn">▶️ Starta röstloop</button>
-    <button id="stopBtn" class="ghost" style="display:none">⏹️ Stoppa</button>
-    <button id="abortTTSBtn" class="ghost" style="display:none">⏸️ Avbryt tal</button>
-  </div>
+const KNOWLEDGE_URL = "https://raw.githubusercontent.com/172172/Coach-Assistant/main/assistant-knowledge.txt";
+const CACHE_MS = 5 * 60 * 1000;
 
-  <div id="vizWrap"><canvas id="viz" width="800" height="140"></canvas></div>
-  <div id="output"></div>
+let knowledgeCache = { text: null, fetchedAt: 0 };
+async function getKnowledge() {
+  const now = Date.now();
+  if (knowledgeCache.text && now - knowledgeCache.fetchedAt < CACHE_MS) return knowledgeCache.text;
+  const res = await fetch(KNOWLEDGE_URL, { cache: "no-store" });
+  if (!res.ok) throw new Error(`Misslyckades hämta kunskap: ${res.status}`);
+  const text = await res.text();
+  knowledgeCache = { text, fetchedAt: now };
+  return text;
+}
 
-  <script>
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn  = document.getElementById('stopBtn');
-    const abortBtn = document.getElementById('abortTTSBtn');
-    const output   = document.getElementById('output');
-    const recStatus= document.getElementById('recStatus');
-    const canvas   = document.getElementById('viz');
-    const ctx      = canvas.getContext('2d');
+// --- Heuristik ---
+const norm = (s="") => s.toLowerCase()
+  .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+  .replace(/ö/g,"o").replace(/ä/g,"a").replace(/å/g,"a")
+  .replace(/\s+/g," ").trim();
 
-    // ---------- STATE ----------
-    let state = 'IDLE', running = false;
+function looksOperationalQuestion(s="") {
+  const t = norm(s);
+  return /linj|tapp|fyll|sortbyte|cip|skolj|flush|rengor|sanit|recept|batch|oee|hmi|plc|felsok|alarm|tryck|temperatur|flode|ventil|pump|kvalitet|prov|qc|haccp|ccp|sakerhet|underhall|smorj|kalibr|setup|omst|omstall|stopporsak|setpoint|saetpunkt|etikett|kapsyl|burk|pack|pepsi|cola|lager|ipa|sirap|syrup/.test(t);
+}
+function looksOperationalAnswer(cards={}, spoken="") {
+  const steps = Array.isArray(cards.steps) ? cards.steps : [];
+  const joined = `${spoken} ${steps.join(" ")}`.toLowerCase();
+  return steps.length > 0 || /\bsteg\b|ventil|stang|oppna|tryck|temperatur|flode|spola|cip|flush|sakerhet|larm|hmi|plc/.test(joined);
+}
+function isSmalltalk(s="") {
+  const t = norm(s);
+  return /\b(hej+|halla|hallaa|tja+|tjaa|god morgon|godkvall|hur mar du|hur e det|laget|allt bra|mar bra|tack|tack sa mycket|varsagod|vad gor du)\b/.test(t);
+}
+function isQuestiony(s="") {
+  const t = norm(s);
+  if (/\?/.test(s)) return true;
+  return /\b(hur|vad|varfor|n[aä]r|var|vilken|vilka|kan du|skulle du|hur gor|hur funkar|var hittar)\b/.test(t);
+}
 
-    // Mic / analyser
-    let micStream = null, mediaRecorder = null, chunks = [];
-    let audioCtxVAD = null, analyser = null, micArr = null;
+export default async function handler(req, res) {
+  try {
+    if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
 
-    // TTS (stream)
-    let ttsCtx = null, ttsGainNode = null, ttsAnalyser = null;
-    let ttsAudio = null;
-    let lastTTSEnd = 0;
-    const TTS_BASE_GAIN = 0.9;
+    const { message = "", prev = null } = req.body || {};
+    const knowledge = await getKnowledge();
 
-    // Stegvis uppläsning
-    let stepQueue = [];
-    let stepOffset = 0;
-    let lastQ = null, lastA = null;
+    const system = `
+Du är en AI-assistent skapad av Kevin – Douglas Adams möter JARVIS.
+Svara alltid på svenska. Vänlig, kvick när det passar, tydlig och ärlig.
 
-    // VAD
-    const MAX_RECORD_MS   = 10000;
-    const SILENCE_HOLD_MS = 800;
+STIL
+- Konversationell, naturlig. Humor OK där det passar (inte vid säkerhet).
+- Anpassa djup/ton efter frågan. Kort men innehållsrikt.
 
-    // MIME
-    const MIME_CANDIDATES = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg',''];
-    let REC_MIME = '', REC_EXT = 'webm';
+SANNING/KÄLLA
+- Allmänna frågor: svara fritt.
+- Operativt (drift/linje/procedurer/kvalitet/säkerhet/parametrar/felsökning): bygg svaret på "Kunskap" (manualen) nedan.
+  * Ge tydliga, NUMRERADE steg när relevant.
+  * Lista rubrikerna du faktiskt använder i "matched_headings".
+  * Hitta inte på siffror/parametrar. Om manualen saknar värden: säg det och håll det generellt (“enligt manualens gränsvärden”).
+  * Om underlaget är för vagt: ställ EN öppen följdfråga.
+  * Om manualen inte täcker: säg det och föreslå uppdatering (ge inte operativa steg).
 
-    // Gates
-    const MIN_SPEECH_MS  = 160;
-    const MIN_BLOB_BYTES = 1200;
+SMÅPRAT
+- För hälsningar/”hur mår du”/”tack”: svara kort och trevligt. Sätt need.clarify=false.
 
-    // Hallu/eko-filter
-    const HALLU = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
-    const SHORT_FILLERS = [
-      "tack","tack så mycket","tack för mig",
-      "hej","hejdå","mm","mmm","mhm","öh","eh","okej","ok"
-    ];
-    const STEP_COMMANDS = /(nästa|fortsätt|mer|continue|next)/i;
+RETURFORMAT (EXAKT JSON, ingen text utanför):
+{
+  "spoken": string,
+  "need": { "clarify": boolean, "question"?: string },
+  "cards": {
+    "summary": string,
+    "steps": string[],
+    "explanation": string,
+    "pitfalls": string[],
+    "simple": string,
+    "pro": string,
+    "follow_up": string,
+    "coverage": number,
+    "matched_headings": string[]
+  },
+  "follow_up": string
+}
+`.trim();
 
-    function isShortFiller(t) {
-      const x = (t||"").toLowerCase().trim();
-      if (!x) return true;
-      if (x.length <= 2) return true;
-      if (SHORT_FILLERS.includes(x)) return true;
-      const words = x.split(/\s+/);
-      if (words.length <= 2 && !/[?]/.test(x)) return true;
-      return false;
+    const user = `
+Kunskap (manual – fulltext):
+"""
+${knowledge}
+"""
+
+Tidigare tur (för kontext):
+${prev ? JSON.stringify(prev) : "null"}
+
+Användarens inmatning:
+"${message}"
+
+Instruktion:
+- Svara fritt på allmänna frågor.
+- Operativa råd måste bygga på manualen: lista matched_headings och sätt coverage realistiskt.
+- Om underlaget saknas: be om EN precisering eller säg att manualen saknas/behöver uppdateras (undvik operativa steg).
+- Småprat: svara kort, trevligt; need.clarify=false.
+- Fyll ALLA fält i JSON-schemat. Ingen text utanför JSON.
+`.trim();
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        temperature: 0.3,
+        max_tokens: 2000,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user }
+        ],
+      }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("OpenAI chat error:", data);
+      return res.status(500).json({ error: "Chat API error", details: data });
     }
 
-    function setStatus(mode, text) {
-      const dot = mode === 'LISTENING' ? 'listen' : mode === 'THINKING' ? 'think' : mode === 'SPEAKING' ? 'speak' : 'idle';
-      recStatus.previousElementSibling.className = `dot ${dot}`;
-      recStatus.textContent = text;
-    }
-
-    // ---------- Viz ----------
-    function rmsLevel(uint8PCM) {
-      let sum=0; for (let i=0;i<uint8PCM.length;i++){ const v=uint8PCM[i]-128; sum+=v*v; }
-      const rms=Math.sqrt(sum/uint8PCM.length);
-      return Math.min(255, Math.max(0, Math.round(rms*6)));
-    }
-    function drawViz(micLevel, ttsLevel){
-      const w=canvas.width, h=canvas.height;
-      ctx.clearRect(0,0,w,h);
-      const g=ctx.createLinearGradient(0,0,0,h);
-      g.addColorStop(0,'#0e1222'); g.addColorStop(1,'#0a0d18'); ctx.fillStyle=g; ctx.fillRect(0,0,w,h);
-      const base = state==='SPEAKING'? ttsLevel : micLevel;
-      const amp  = Math.min(1, base/50);
-      const cx=w*0.5, cy=h*0.56, radius=26+amp*18;
-      ctx.beginPath();
-      for(let i=0;i<64;i++){
-        const ang=(i/64)*Math.PI*2;
-        const r=radius + Math.sin(ang*3)*4*amp + Math.cos(ang*2.2)*3*amp;
-        const x=cx+Math.cos(ang)*r, y=cy+Math.sin(ang)*r;
-        if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-      }
-      ctx.closePath();
-      const blobGrad=ctx.createRadialGradient(cx,cy,radius*0.3,cx,cy,radius*1.1);
-      blobGrad.addColorStop(0, state==='SPEAKING'?'#63b3ff':'#3fe08a'); blobGrad.addColorStop(1,'#0b1022');
-      ctx.fillStyle=blobGrad; ctx.fill();
-    }
-    let rafId=null;
-    function loop(){
-      let micLevel = 0, ttsLevel = 0;
-      if (analyser && micArr){ analyser.getByteTimeDomainData(micArr); micLevel = rmsLevel(micArr); }
-      if (ttsAnalyser){
-        const arr = new Uint8Array(ttsAnalyser.fftSize);
-        ttsAnalyser.getByteTimeDomainData(arr);
-        ttsLevel = rmsLevel(arr);
-      }
-      drawViz(micLevel, ttsLevel);
-      rafId = requestAnimationFrame(loop);
-    }
-
-    // ---------- TTS ----------
-    let _speakResolve = null;
-    function stopTTS(){
-      try { if (ttsAudio) { ttsAudio.pause(); ttsAudio.src = ""; ttsAudio.load(); } } catch {}
-      ttsAudio = null; ttsAnalyser = null;
-      if (ttsCtx) { try { ttsCtx.close(); } catch {} }
-      ttsCtx = null; ttsGainNode = null;
-      if (_speakResolve) { try { _speakResolve(); } catch {} _speakResolve = null; }
-      lastTTSEnd = Date.now();
-    }
-    function speak(text){
-      return new Promise(async (resolve)=>{
-        stopTTS(); state='SPEAKING'; setStatus(state,'Svarar… (säg "nästa" för fler steg)');
-        abortBtn.style.display = 'inline-block';
-        _speakResolve = resolve;
-        try{
-          const url = `/api/tts-stream?text=${encodeURIComponent(text)}&latency=3`;
-          ttsAudio = new Audio(); ttsAudio.src = url; ttsAudio.preload = "auto"; ttsAudio.crossOrigin = "anonymous";
-          ttsCtx = new (window.AudioContext||window.webkitAudioContext)(); await ttsCtx.resume().catch(()=>{});
-          const srcNode = ttsCtx.createMediaElementSource(ttsAudio);
-          ttsGainNode = ttsCtx.createGain(); ttsGainNode.gain.value = TTS_BASE_GAIN;
-          ttsAnalyser = ttsCtx.createAnalyser(); ttsAnalyser.fftSize = 1024;
-          srcNode.connect(ttsGainNode).connect(ttsAnalyser).connect(ttsCtx.destination);
-          await ttsAudio.play();
-          ttsAudio.onended = ()=>{ abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve(); _speakResolve=null; if(running) startListening(); };
-          ttsAudio.onerror = ()=>{ abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve(); _speakResolve=null; if(running) startListening(); };
-        }catch{
-          abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve(); _speakResolve=null;
-          if(running) startListening();
-        }
-      });
-    }
-    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; startListening(); }});
-
-    // ---------- Steps reading ----------
-    function resetSteps(steps){
-      stepQueue = Array.isArray(steps) ? steps.slice() : [];
-      stepOffset = 0;
-    }
-    async function speakStepsChunk(n=4){
-      if (!stepQueue.length) return;
-      const chunk = stepQueue.splice(0, n);
-      const text = chunk.map((s,i)=>`${stepOffset+i+1}. ${s}`).join('. ')
-        + (stepQueue.length ? '. Säg "nästa" när du vill fortsätta.'
-                            : '. Det var alla steg. Vill du ha förklaringen också?');
-      stepOffset += chunk.length;
-      await speak(text);
-    }
-
-    // ---------- Chat/UI ----------
-    function renderDetails(cards, followUp){
-      const srcNote = (Array.isArray(cards?.matched_headings) && cards.matched_headings.length)
-        ? `<div class="src">Hämtat från: ${cards.matched_headings.join(', ')}</div>` : '';
-      return `
-        <div class="muted"><strong>Sammanfattning:</strong> ${cards?.summary||'—'}</div>
-        ${cards?.steps?.length ? `<div class="muted"><strong>Steg:</strong><br>- ${cards.steps.join('<br>- ')}</div>` : ''}
-        ${cards?.pitfalls?.length ? `<div class="muted"><strong>Fallgropar:</strong><br>- ${cards.pitfalls.join('<br>- ')}</div>` : ''}
-        ${cards?.explanation ? `<details style="margin-top:.4rem"><summary class="link">Förklaring</summary><div class="muted" style="margin-top:.4rem">${cards.explanation}</div></details>` : ''}
-        ${srcNote}
-        ${followUp ? `<div style="margin-top:.4rem;opacity:.9"><em>${followUp}</em></div>` : ''}
-      `;
-    }
-
-    async function askAssistant(text){
-      state='THINKING'; setStatus(state,'Bearbetar…');
-      try{
-        const res = await fetch('/api/chat',{
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ message:text, prev: { question: lastQ, assistant: lastA } })
-        });
-        const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Chat-fel');
-
-        let r=data.reply; if(typeof r==='string'){ try{ r=JSON.parse(r); }catch{} }
-        r = r && typeof r==='object' ? r : { spoken: 'Okej.' };
-
-        // Klarifiering?
-        if (r.need?.clarify) {
-          resetSteps([]);
-          output.insertAdjacentHTML('beforeend', `<div class="pill">${r.need.question || r.spoken || 'Behöver lite mer info.'}</div>`);
-          await speak(r.spoken || r.need.question || 'En sak till…');
-          lastQ = text; lastA = r;
-          return;
-        }
-
-        // Vanligt svar
-        const bubble = document.createElement('div');
-        bubble.className = 'pill';
-        const uid = Date.now().toString();
-        bubble.innerHTML = `<div>${r.spoken || 'Klart.'}</div>
-                            <div style="margin-top:.5rem"><span class="link" id="toggle_${uid}">Visa detaljer</span></div>
-                            <div id="details_${uid}" style="display:none;margin-top:.5rem">${renderDetails(r.cards||{}, r.follow_up||'')}</div>`;
-        output.appendChild(bubble);
-
-        const toggle = bubble.querySelector(`#toggle_${uid}`);
-        const details = bubble.querySelector(`#details_${uid}`);
-        toggle.addEventListener('click', ()=>{
-          const open = details.style.display !== 'none';
-          details.style.display = open ? 'none' : 'block';
-          toggle.textContent = open ? 'Visa detaljer' : 'Dölj detaljer';
-        });
-
-        lastQ = text; lastA = r;
-
-        // Stegvis uppläsning
-        const steps = Array.isArray(r.cards?.steps) ? r.cards.steps : [];
-        resetSteps(steps);
-        await speak(r.spoken || 'Okej.');
-        if (steps.length) await speakStepsChunk();
-      }catch{
-        output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI.</div>`);
-        if(running) startListening();
-      }
-    }
-
-    // ---------- Whisper ----------
-    async function transcribe(blob){
-      const fd = new FormData();
-      fd.append('audio', blob, `audio.${REC_EXT}`);
-      fd.append('mime', REC_MIME || 'audio/webm');
-      const res=await fetch('/api/whisper',{ method:'POST', body: fd });
-      const data=await res.json(); if(!res.ok) throw new Error(data?.error || 'Transkriberingsfel');
-      return (data.text||'').trim();
-    }
-
-    // ---------- VAD ----------
-    async function calibrateThreshold(){
-      const t0 = performance.now();
-      let acc=0, n=0;
-      while (performance.now()-t0 < 500){
-        analyser.getByteTimeDomainData(micArr);
-        const lvl = rmsLevel(micArr);
-        acc += lvl; n++;
-        await new Promise(r=>setTimeout(r, 20));
-      }
-      const baseline = Math.round(acc/Math.max(1,n));
-      return Math.max(4, Math.min(20, baseline + 1));
-    }
-
-    // ---------- LISTEN ----------
-    async function startListening(){
-      if(!running) return;
-      state='LISTENING'; setStatus(state,'Lyssnar… (bli tyst för att skicka)');
-
-      chunks=[]; const startedAt=performance.now();
-      let silentMs=0, talkMs=0;
-      const speechThreshold = await calibrateThreshold();
-
-      try{
-        mediaRecorder = new MediaRecorder(micStream, REC_MIME ? { mimeType: REC_MIME, audioBitsPerSecond: 128000 } : undefined);
-      }catch{ mediaRecorder = new MediaRecorder(micStream); }
-
-      mediaRecorder.ondataavailable = (e)=>{ if(e.data.size>0) chunks.push(e.data); };
-      mediaRecorder.onstop = async ()=>{
-        const type = REC_MIME || (chunks[0]?.type || 'audio/webm');
-        const blob = new Blob(chunks, { type });
-
-        const accept = (talkMs >= MIN_SPEECH_MS);
-        if (!accept || blob.size < MIN_BLOB_BYTES) { if(running) startListening(); return; }
-
-        try{
-          const text = await transcribe(blob);
-          const echoWindow = Date.now() - lastTTSEnd < 1200;
-          if (!text || HALLU.test(text) || (echoWindow && isShortFiller(text))) { if(running) startListening(); return; }
-
-          // röstkommandon för stegvis uppläsning
-          const t = text.toLowerCase();
-          if (stepQueue.length && STEP_COMMANDS.test(t)) { await speakStepsChunk(); return; }
-
-          // logga exakt här (EN gång)
-          output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
-          await askAssistant(text);
-        }catch{
-          output.insertAdjacentHTML('beforeend',"<div class='pill'>Kunde inte transkribera ljudet.</div>");
-          if(running) startListening();
-        }
+    let content = data.choices?.[0]?.message?.content || "";
+    let out;
+    try { out = JSON.parse(content); }
+    catch {
+      out = {
+        spoken: "Oj, det blev otydligt – kan du säga det på ett annat sätt?",
+        need: { clarify: true, question: "Kan du precisera vad du behöver?" },
+        cards: {
+          summary: "Behöver förtydligande.",
+          steps: [], explanation: "", pitfalls: [],
+          simple: "", pro: "", follow_up: "",
+          coverage: 0, matched_headings: []
+        },
+        follow_up: ""
       };
-      mediaRecorder.start();
-
-      const vadTimer=setInterval(()=>{
-        if (!running || !mediaRecorder || mediaRecorder.state==='inactive'){ clearInterval(vadTimer); return; }
-        analyser.getByteTimeDomainData(micArr);
-        const lvl = rmsLevel(micArr);
-        if (lvl >= speechThreshold) { talkMs += 100; silentMs = 0; }
-        else { silentMs += 100; }
-        const elapsed = performance.now()-startedAt;
-        if (silentMs >= SILENCE_HOLD_MS || elapsed > MAX_RECORD_MS){
-          clearInterval(vadTimer);
-          try{ mediaRecorder.state!=='inactive' && mediaRecorder.stop(); }catch{}
-        }
-      },100);
     }
 
-    // ---------- START/STOP ----------
-    async function getMicStream(){
-      const constraints = { audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:false } };
-      REC_MIME = MIME_CANDIDATES.find(m => !m || MediaRecorder.isTypeSupported(m)) || '';
-      REC_EXT  = REC_MIME.includes('mp4') ? 'm4a' : REC_MIME.includes('ogg') ? 'ogg' : 'webm';
-
-      micStream = await navigator.mediaDevices.getUserMedia(constraints);
-      audioCtxVAD = new (window.AudioContext||window.webkitAudioContext)();
-      await audioCtxVAD.resume().catch(()=>{});
-      const src = audioCtxVAD.createMediaStreamSource(micStream);
-      analyser = audioCtxVAD.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.6;
-      micArr = new Uint8Array(analyser.fftSize); src.connect(analyser);
-      if(!rafId) rafId = requestAnimationFrame(loop);
-    }
-
-    async function startLoop(){
-      if(running) return; running=true;
-      startBtn.style.display='none'; stopBtn.style.display='inline-block';
-      try{
-        await getMicStream();
-        setStatus('LISTENING','Lyssnar… (bli tyst för att skicka)');
-        startListening();
-      }catch{
-        output.insertAdjacentHTML('beforeend', "<div class='pill'>Mikrofon kunde inte startas (behörighet eller HTTPS?).</div>");
-        running=false; startBtn.style.display='inline-block'; stopBtn.style.display='none';
+    // ---- 1) Småprat ska aldrig trigga klarifiering
+    if (isSmalltalk(message)) {
+      out.need = { clarify: false };
+      if (!out.spoken || /precisera|oklart|mer info/i.test(out.spoken)) {
+        out.spoken = "Jag mår fint – AI-varianten av pigg på kaffe! Hur kan jag hjälpa dig idag?";
       }
+      out.cards = out.cards || {};
+      out.cards.summary = out.cards.summary || "Småprat";
+      out.cards.coverage = Number(out.cards.coverage ?? 0);
+      return res.status(200).json({ reply: out });
     }
 
-    function stopLoop(){
-      running=false; state='IDLE'; setStatus(state,'Stoppad');
-      startBtn.style.display='inline-block'; stopBtn.style.display='none';
-      abortBtn.style.display='none';
-      if(rafId){ cancelAnimationFrame(rafId); rafId=null; }
-      try{ mediaRecorder && mediaRecorder.state!=='inactive' && mediaRecorder.stop(); }catch{}
-      try{ analyser && analyser.disconnect(); }catch{}
-      try{ audioCtxVAD && audioCtxVAD.close(); }catch{}
-      analyser=null; audioCtxVAD=null; micArr=null;
-      stepQueue=[]; stepOffset=0; lastQ=null; lastA=null;
-      try{ if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; } }catch{}
-      try{ if(ttsAudio){ ttsAudio.pause(); } }catch{}
+    // ---- 2) Vanligt snack (inte operativt, inte en fråga) ska inte klarifieras
+    const isOperativeQ = looksOperationalQuestion(message) || looksOperationalQuestion(prev?.question || "");
+    const hasOperativeTone = looksOperationalAnswer(out.cards, out.spoken);
+    if (!isOperativeQ && !hasOperativeTone && out?.need?.clarify && !isQuestiony(message)) {
+      out.need = { clarify: false };
+      out.spoken = out.spoken && !/precisera|oklart/.test(out.spoken)
+        ? out.spoken
+        : "Låter bra! Jag är med. Säg vad du vill göra eller fråga vad som helst, så hänger jag på.";
+      out.cards.summary = out.cards.summary || "Samtal";
+      return res.status(200).json({ reply: out });
     }
 
-    // Endast space stoppar aktivt
-    window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; startListening(); }});
-    window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') stopLoop(); });
+    // ---- 3) Tunn säkring för operativt utan manualstöd
+    const heads = Array.isArray(out?.cards?.matched_headings) ? out.cards.matched_headings : [];
+    const cov = Number(out?.cards?.coverage ?? 0);
+    const steps = Array.isArray(out?.cards?.steps) ? out.cards.steps : [];
 
-    startBtn.addEventListener('click', startLoop);
-    stopBtn.addEventListener('click', stopLoop);
-    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; startListening(); }});
-  </script>
-</body>
-</html>
+    if ((isOperativeQ || hasOperativeTone) && heads.length === 0 && cov < 0.5) {
+      out.spoken = "Det låter som en linje-/procedurfråga. För att guida säkert behöver jag veta exakt utrustning/avsnitt så jag kan peka på rätt del i manualen. Vad gäller det?";
+      out.need = { clarify: true, question: "Vilken utrustning/avsnitt gäller det? (t.ex. Tapp – sortbyte, CIP – tapp, Kvalitetsprov: produkt X)" };
+      out.cards = {
+        summary: "Operativ fråga utan tydligt manualstöd – ber om precisering.",
+        steps: [], explanation: "", pitfalls: [],
+        simple: "Säg exakt vilket avsnitt/utrustning så guidar jag rätt.",
+        pro: "Kräver rubrikvalidering innan operativa steg lämnas.",
+        follow_up: "Vill du att jag föreslår närmaste avsnitt ur manualen?",
+        coverage: cov || 0, matched_headings: []
+      };
+      out.follow_up = out.cards.follow_up;
+      return res.status(200).json({ reply: out });
+    }
+
+    // ---- 4) Delvis stöd → leverera, men be om verifiering
+    if ((isOperativeQ || hasOperativeTone) && (cov < 0.6 || heads.length < 1) && steps.length > 0) {
+      out.spoken = (out.spoken || "Okej.") + " Verifiera gärna mot manualens rubriker i detaljerna.";
+      out.cards.follow_up = out.cards.follow_up || "Vill du att jag delar upp nästa del?";
+      return res.status(200).json({ reply: out });
+    }
+
+    // ---- 5) Allt annat → släpp igenom
+    return res.status(200).json({ reply: out });
+  } catch (err) {
+    console.error("chat.js internal error:", err);
+    return res.status(500).json({ error: "Serverfel i chat.js", details: err.message || String(err) });
+  }
+}
