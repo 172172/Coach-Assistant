@@ -50,7 +50,7 @@ function isDefinitionQuery(s = "") {
   return words.length <= 2; // t.ex. "CIP", "fals"
 }
 
-/* ================= Conversation memory intents (uppdaterad) ================= */
+/* ================= Conversation memory intents (UPPDATERAD) ================= */
 function parseConversationMemoryIntent(s = "") {
   const t = norm(s);
 
@@ -62,15 +62,23 @@ function parseConversationMemoryIntent(s = "") {
     return { type: "first" };
   }
 
-  // Senaste frågan – många varianter, inkl. "dig" och tidsord
+  // Senaste frågan
   if (
     /\b(forra fragan|senaste fragan|vad var min forra fraga|min senaste fraga|vad var min senaste fraga)\b/.test(t) ||
-    /\b(vad\s+fragade\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare))\b/.test(t)
+    /\b(vad\s+fragade\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t)
   ) {
     return { type: "last" };
   }
 
-  // Senaste assistentsvar
+  // Senaste du (användaren) sa/skrev – ex: "vad sa jag innan?"
+  if (
+    /\b(vad\s+sa\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t) ||
+    /\b(vad\s+skrev\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t)
+  ) {
+    return { type: "last_user" };
+  }
+
+  // Senaste assistentens svar
   if (/\b(vad sa du (nyss|precis)|vad svarade du (nyss|precis))\b/.test(t)) {
     return { type: "assistant_last" };
   }
@@ -373,6 +381,9 @@ export default async function handler(req, res) {
         } else if (conv.type === "last") {
           const last = lastUserQuestion(sourceHistory);
           if (last) spoken = `Din senaste fråga var: “${last}”.`;
+        } else if (conv.type === "last_user") {
+          const lastU = lastUserQuestion(sourceHistory);
+          if (lastU) spoken = `Du sa: “${lastU}”.`;
         } else if (conv.type === "assistant_last") {
           const lastA = lastAssistantSpoken(sourceHistory);
           if (lastA) spoken = `Jag sa: “${lastA}”.`;
@@ -392,14 +403,14 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
-    /* -------- Lane: Smalltalk -------- */
+    /* -------- Lane: Smalltalk (lite mer mänsklig ton) -------- */
     if (isSmalltalk(userText)) {
-      const system = `Du är en svensk JARVIS för Linje 65. Småprat: kort, trevligt, jobb-fokuserat. Returnera strikt JSON enligt schema.`;
+      const system = `Du är en svensk JARVIS för Linje 65. Småprat: varm, kort och jordnära. Håll fokus på jobbet men låt det låta mänskligt. Returnera strikt JSON enligt schema.`;
       const user = `Småprat: """${userText}"""`;
       let out = await callLLM(system, user, 0.7, 600);
       out = normalizeKeys(out);
       out.cards.coverage = 0; out.cards.matched_headings = [];
-      if (!out.spoken) out.spoken = "Jag är din coach för Linje 65. Vad behöver du hjälp med?";
+      if (!out.spoken) out.spoken = "Allt bra här – laddad för linjen. Vad vill du kika på?";
       await logInteraction({ userId, question: userText, reply: out, lane: "smalltalk", intent: "smalltalk", coverage: 0, matchedHeadings: [] });
       return res.status(200).json({ reply: out });
     }
