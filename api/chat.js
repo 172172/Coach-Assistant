@@ -1,6 +1,7 @@
 // /api/chat.js
-// Manual-först (RAG) för Linje 65. Operativa svar får ENDAST bygga på utdrag vi hämtar här.
-// cards.steps ska vara rena åtgärdsmeningar UTAN numrering ("Steg 1", "1.", etc).
+// Linje 65 mentor: RAG + robust intent/slot-filling för "sortbyte" m.m.
+// Operativt svar får ENDAST bygga på RAG-kontekst. Ingen påhittad info.
+// Hanterar "läsktillläsk", "sorbyteläsk", kortsvar som "läsk", osv.
 
 const KNOWLEDGE_URL = "https://raw.githubusercontent.com/172172/Coach-Assistant/main/assistant-knowledge.txt";
 const CACHE_MS = 5 * 60 * 1000;
@@ -8,21 +9,26 @@ const CACHE_MS = 5 * 60 * 1000;
 let knowledgeCache = { text: null, fetchedAt: 0 };
 let ragCache = { sections: [], vectors: [], fetchedAt: 0 };
 
-// ---------- Helpers ----------
-const norm = (s="") => s.toLowerCase()
+// ---------- Utils ----------
+const deaccent = (s="") => s
   .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
-  .replace(/ö/g,"o").replace(/ä/g,"a").replace(/å/g,"a")
+  .replace(/[ÅåÄä]/g, m => ({'Å':'A','å':'a','Ä':'A','ä':'a'}[m]))
+  .replace(/[Öö]/g, m => ({'Ö':'O','ö':'o'}[m]));
+
+const norm = (s="") => deaccent(String(s).toLowerCase())
+  .replace(/[^a-z0-9\s]/g," ")
   .replace(/\s+/g," ").trim();
 
 function isSmalltalk(s="") {
   const t = norm(s);
-  return /\b(hej+|h[aä]ll[aå]|tja+|god morgon|godkv[aä]ll|hur m[aå]r du|allt bra|l[aä]get|tack|vars[aå]god)\b/.test(t);
+  return /\b(hej+|halla|tja+|god morgon|godkvall|hur mar du|laget|allt bra|tack|varsagod)\b/.test(t);
 }
 function looksOperational(s="") {
   const t = norm(s);
-  return /linj|tapp|fyll|sortbyte|cip|skolj|flush|rengor|sanit|recept|batch|oee|hmi|plc|felsok|alarm|tryck|temperatur|flode|ventil|pump|kvalitet|prov|qc|haccp|ccp|s[aä]kerhet|underh[aå]ll|smorj|kalibr|setup|omst[aä]ll|stopporsak|setpoint|saetpunkt|etikett|kapsyl|burk|pack/.test(t);
+  return /\b(linje|tapp|fyll|sortbyte|cip|skolj|flush|rengor|sanit|recept|batch|oee|hmi|plc|felsok|alarm|tryck|temperatur|flode|ventil|pump|kvalitet|prov|qc|haccp|ccp|sakerhet|underhall|smorj|kalibr|setup|omstall|stopporsak|setpoint|etikett|kapsyl|burk|pack)\b/.test(t);
 }
 
+// ---------- Manual fetch & chunk ----------
 async function fetchManual() {
   const now = Date.now();
   if (knowledgeCache.text && now - knowledgeCache.fetchedAt < CACHE_MS) return knowledgeCache.text;
@@ -33,7 +39,6 @@ async function fetchManual() {
   return text;
 }
 
-// Dela upp manualen till rubriksektioner + chunking ~1200 tecken
 function splitIntoChunks(manual) {
   const lines = manual.split(/\r?\n/);
   const sections = [];
@@ -49,15 +54,16 @@ function splitIntoChunks(manual) {
   }
   if (current.content.length) sections.push({ heading: current.heading, text: current.content.join("\n").trim() });
 
+  // chunk ~1200 chars
   const out = [];
-  const MAX_CHUNK = 1200;
+  const MAX = 1200;
   for (const s of sections) {
     const base = `${s.heading}\n${s.text}`.trim();
-    if (base.length <= MAX_CHUNK) { out.push({ heading: s.heading, chunk: base }); continue; }
-    const parts = s.text.split(/\n\s*\n/);
+    if (base.length <= MAX) { out.push({ heading: s.heading, chunk: base }); continue; }
+    const paras = s.text.split(/\n\s*\n/);
     let buf = s.heading + "\n";
-    for (const p of parts) {
-      if ((buf + p).length > MAX_CHUNK) { out.push({ heading: s.heading, chunk: buf.trim() }); buf = s.heading + "\n" + p + "\n"; }
+    for (const p of paras) {
+      if ((buf + p).length > MAX) { out.push({ heading: s.heading, chunk: buf.trim() }); buf = s.heading + "\n" + p + "\n"; }
       else { buf += p + "\n\n"; }
     }
     if (buf.trim().length) out.push({ heading: s.heading, chunk: buf.trim() });
@@ -65,7 +71,7 @@ function splitIntoChunks(manual) {
   return out.filter(s => s.chunk && s.chunk.replace(/\W/g,"").length > 40);
 }
 
-// Embeddings
+// ---------- Embeddings ----------
 async function embedAll(texts) {
   const r = await fetch("https://api.openai.com/v1/embeddings", {
     method: "POST",
@@ -81,7 +87,6 @@ function cosine(a, b) {
   for (let i=0;i<a.length;i++){ const x=a[i], y=b[i]; dot+=x*y; na+=x*x; nb+=y*y; }
   return dot / (Math.sqrt(na)*Math.sqrt(nb) + 1e-8);
 }
-
 async function ensureIndex() {
   const manual = await fetchManual();
   const now = Date.now();
@@ -91,13 +96,11 @@ async function ensureIndex() {
   ragCache = { sections, vectors, fetchedAt: now };
   return ragCache;
 }
-
-async function retrieve(query, prev) {
+async function retrieve(query, extraQuery="") {
   const { sections, vectors } = await ensureIndex();
-  const q = [query, prev?.question || "", prev?.assistant?.spoken || ""].filter(Boolean).join("\n");
-  const qvec = (await embedAll([q]))[0];
+  const qtext = [query, extraQuery].filter(Boolean).join("\n");
+  const qvec = (await embedAll([qtext]))[0];
   const scored = vectors.map((v,i)=>({ i, s: cosine(qvec, v) })).sort((a,b)=>b.s-a.s);
-
   const K = 8;
   const top = scored.slice(0, K).filter(o => o.s > 0.18);
   const picks = top.map(o => ({ ...sections[o.i], score: o.s }));
@@ -108,16 +111,81 @@ async function retrieve(query, prev) {
   return { context, matched_headings, coverage, any: picks.length>0 };
 }
 
-async function callOpenAI(system, user, { temperature=0.3, max_tokens=1600 } = {}) {
+// ---------- Intent & slot-filling ----------
+const DRINK_MAP = [
+  { key:"lask",   pats:[/l[aä]sk/] },
+  { key:"ol",     pats:[/o+l/] },
+  { key:"cider",  pats:[/cider/] },
+  { key:"vatten", pats:[/vatten|water|stillt?/] },
+  { key:"energi", pats:[/energi|energy|power/] },
+  { key:"juice",  pats:[/juice|jos/] },
+];
+
+const AREA_MAP = [
+  { key:"tapp", pats:[/tapp|tapplinje|tappning|fyll|fyllare|fyllning/] },
+  { key:"cip",  pats:[/\bcip\b|rengor|sanit|skolj|flush|spolning/] },
+  { key:"mix",  pats:[/mix|sirap|syrup|recept|batch/] },
+];
+
+function matchKey(text, MAP){
+  const t = norm(text);
+  for (const m of MAP){
+    for (const re of m.pats) if (re.test(t)) return m.key;
+  }
+  return null;
+}
+
+function parseSortbyte(raw, prevAssistant){
+  const sOrig = String(raw||"");
+  const s = norm(sOrig);
+
+  // Känna igen "sortbyte" med felstavningar
+  const hasSortbyte = /\b(sor?t?b[y]?te|sortbyt|receptbyte|omstall(ning)?|byte sort|byta sort)\b/.test(s);
+  if (!hasSortbyte && !(prevAssistant?.intent?.name === "sortbyte")) return null;
+
+  // Hitta "X till Y" — tolerant mot mellanrum: t\s*i\s*l\s*l
+  const sFlex = deaccent(sOrig.toLowerCase()).replace(/\s+/g," ");
+  const sFlexTolerant = sFlex.replace(/t\s*i\s*l\s*l/g,"till"); // "ti ll" -> "till"
+  let from=null, to=null;
+
+  // mönster: "<x> till <y>"
+  const m1 = sFlexTolerant.match(/([a-zåäö]+)\s*till\s*([a-zåäö]+)/i);
+  if (m1) {
+    from = matchKey(m1[1], DRINK_MAP);
+    to   = matchKey(m1[2], DRINK_MAP);
+  }
+
+  // om inget, prova att texten är en enda dryck (svar på följdfråga)
+  if (!from && !to) {
+    const one = matchKey(sOrig, DRINK_MAP);
+    if (one) {
+      // Om vi tidigare frågade "typ av dryck" betraktar vi det som ett slot-svar
+      from = prevAssistant?.intent?.from || one;
+      to   = prevAssistant?.intent?.to   || (from ? one : null);
+      if (!from) from = one;
+      if (!to) to = one;
+    }
+  }
+
+  // område (tapp/cip/mix)
+  let area = matchKey(sOrig, AREA_MAP) || prevAssistant?.intent?.area || null;
+  if (!area && /tapp/i.test(sOrig)) area = "tapp";
+
+  const out = { name:"sortbyte", area, from, to };
+  // Färdig om vi har minst area eller “sortbyte i tappen”
+  const ready = !!(area && (from || to));
+  return { intent: out, ready };
+}
+
+// ---------- OpenAI helper ----------
+async function callOpenAI(system, user, { temperature=0.28, max_tokens=1600 } = {}) {
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type":"application/json", Authorization:`Bearer ${process.env.OPENAI_API_KEY}` },
-    body: JSON.stringify({
-      model: "gpt-4o",
-      temperature,
-      max_tokens,
-      messages: [{ role:"system", content: system }, { role:"user", content: user }],
-    }),
+    body: JSON.stringify({ model: "gpt-4o", temperature, max_tokens, messages: [
+      { role:"system", content: system },
+      { role:"user",   content: user }
+    ] }),
   });
   const j = await r.json();
   if (!r.ok) { console.error("OpenAI chat error:", j); throw new Error("Chat API error"); }
@@ -126,7 +194,7 @@ async function callOpenAI(system, user, { temperature=0.3, max_tokens=1600 } = {
   catch {
     out = {
       spoken: "Hoppsan — säg det gärna en gång till, jag lyssnar.",
-      need: { clarify: true, question: "Kan du säga det på ett annat sätt?" },
+      need: { clarify: true, question: "Kan du förtydliga?" },
       cards: { summary:"Behöver förtydligande.", steps:[], explanation:"", pitfalls:[], simple:"", pro:"", follow_up:"", coverage:0, matched_headings:[] },
       follow_up: ""
     };
@@ -134,17 +202,18 @@ async function callOpenAI(system, user, { temperature=0.3, max_tokens=1600 } = {
   return out;
 }
 
-// ---------- API ----------
+// ---------- Handler ----------
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
 
     const { message = "", prev = null } = req.body || {};
+    const prevAssistant = prev?.assistant || null;
 
-    // Småprat = aldrig klarifiering
+    // 0) Småprat klart och tydligt
     if (isSmalltalk(message) && !looksOperational(message)) {
       const out = {
-        spoken: "Jag mår prima — AI-pigg. Hur är läget hos dig?",
+        spoken: "Jag mår fint — AI-pigg. Hur är läget hos dig?",
         need: { clarify: false },
         cards: { summary:"Småprat", steps:[], explanation:"", pitfalls:[], simple:"", pro:"", follow_up:"", coverage:0, matched_headings:[] },
         follow_up: ""
@@ -152,22 +221,58 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply: out });
     }
 
-    // Hämta relevanta stycken
-    const { context, matched_headings, coverage, any } = await retrieve(message, prev);
+    // 1) Intent/slots
+    const sortInfo = parseSortbyte(message, prevAssistant);
+    const intent = sortInfo?.intent || prevAssistant?.intent || null;
 
-    // Systemprompt: operativt = endast från KONTEKST; steps utan numrering
+    // 2) Om vi vet att det är sortbyte men saknar slots → ställ SPECIFIK fråga
+    if ((sortInfo && !sortInfo.ready) || (intent?.name==="sortbyte" && !(intent.from && intent.to && intent.area))) {
+      const asked = prevAssistant?.need?.clarify;
+      // fyll det vi kan och spara i assistant.intent
+      const tmpIntent = {
+        name:"sortbyte",
+        area: intent?.area || sortInfo?.intent?.area || matchKey(message, AREA_MAP),
+        from: intent?.from || sortInfo?.intent?.from || matchKey(message, DRINK_MAP),
+        to:   intent?.to   || sortInfo?.intent?.to   || null,
+      };
+      // Vad saknas?
+      const missing = [];
+      if (!tmpIntent.area) missing.push("vilken utrustning (t.ex. tappen)");
+      if (!tmpIntent.from || !tmpIntent.to) missing.push("från vilken dryck till vilken");
+      const q = missing.length
+        ? `Behöver bara ${missing.join(" och ")}. Säg t.ex. "tapp — läsk till läsk".`
+        : `Bekräfta: ${tmpIntent.area}, ${tmpIntent.from} till ${tmpIntent.to}?`;
+
+      const out = {
+        spoken: "Jag hänger med — det gäller sortbyte. Ge mig bara delarna jag saknar, så guidar jag exakt.",
+        need: { clarify: true, question: q },
+        cards: { summary:"Slot-fyllning för sortbyte", steps:[], explanation:"", pitfalls:[], simple:"", pro:"", follow_up:"", coverage:0, matched_headings:[] },
+        follow_up: "",
+        intent: tmpIntent
+      };
+      return res.status(200).json({ reply: out });
+    }
+
+    // 3) Bygg RAG-fråga
+    const manualHint = intent?.name==="sortbyte"
+      ? [`${intent.area || "tapp"} sortbyte`, `${intent.from||""} till ${intent.to||""}`].join(" ").trim()
+      : "";
+
+    const { context, matched_headings, coverage, any } = await retrieve(message, manualHint);
+
+    // 4) Systemprompt: operativt = endast KONTEKST; steps utan numrering
     const system = `
-Du är röstmentor för Linje 65 (JARVIS + torr humor light). Svenska, varmt och tydligt.
+Du är röstmentor för Linje 65 (JARVIS-ton, trygg). Svara alltid på svenska.
 
 KÄLLREGLER
-- Du får KONTEKST (utdrag ur manualen). **Alla operativa råd måste bygga på KONTEKST.** Hitta inte på.
-- Om KONTEKST är otillräcklig: ställ EN specifik följdfråga eller säg att manualen saknas. Inga gissningar.
+- Du får KONTEKST från manualen. **Alla operativa råd måste bygga på KONTEKST.** Inga gissningar.
+- Om KONTEKST är otillräcklig: ställ EN specifik följdfråga eller säg att området inte täcks.
 
 STEGFORMAT
-- "cards.steps" ska vara en lista av korta, konkreta åtgärder **utan** numrering eller prefix som "Steg 1:", "1.", "(1)". Vi numrerar i klienten.
+- "cards.steps" = korta, konkreta åtgärder **utan** numrering/prefix ("1.", "Steg 1:" etc). Klienten numrerar.
 
-TAL
-- "spoken" ska låta som mänskligt tal, korta meningar, små bekräftelser. Säkerhet = seriöst tonläge.
+TAL ("spoken")
+- Naturligt, korta meningar, små bekräftelser. Vid säkerhet: seriös ton.
 
 RETUR (EXAKT JSON):
 {
@@ -188,9 +293,13 @@ RETUR (EXAKT JSON):
 }
 `.trim();
 
+    // 5) Userprompt
     const user = `
 KONTEKST (använd endast detta för operativa svar):
 ${any ? context : "(tomt — ingen träff i manualen)"}
+
+INTENT (om given):
+${intent ? JSON.stringify(intent) : "null"}
 
 Tidigare tur:
 ${prev ? JSON.stringify(prev) : "null"}
@@ -199,40 +308,45 @@ Fråga:
 "${message}"
 
 Instruktioner:
-- Om frågan är operativ och KONTEKST är tom/otillräcklig: need.clarify=true och ställ EN konkret fråga som hjälper dig hitta rätt avsnitt.
-- Om KONTEKST räcker: ge tydliga åtgärder i "cards.steps" (utan numrering), fyll "matched_headings" med rubriker från KONTEKST, och sätt "coverage" ungefär (${coverage.toFixed(2)}).
+- Om frågan är operativ och KONTEKST är tom/otillräcklig: need.clarify=true och ställ EN konkret fråga kopplad till rubriker/moment i manualen (inte "kan du säga det igen").
+- Om KONTEKST räcker: ge tydliga åtgärder i "cards.steps" (utan numrering). Fyll "matched_headings" med rubriker från KONTEKST. Sätt "coverage" ~${coverage.toFixed(2)}.
 - Ingen text utanför JSON.
 `.trim();
 
+    // 6) Modell
     let out = await callOpenAI(system, user, { temperature: 0.28, max_tokens: 1600 });
 
-    // Efterkontroller
+    // 7) Efterkontroller
     const allowed = new Set(matched_headings);
     if (!out.cards) out.cards = { summary:"", steps:[], explanation:"", pitfalls:[], simple:"", pro:"", follow_up:"", coverage:0, matched_headings:[] };
 
-    // Tillåt bara rubriker vi gav i KONTEKST
+    // Endast rubriker från KONTEKST
     out.cards.matched_headings = Array.isArray(out.cards.matched_headings)
       ? out.cards.matched_headings.filter(h => allowed.has(h))
       : [];
 
-    // Om steg finns men inga rubriker – fyll med våra
     if (out.cards.steps?.length && out.cards.matched_headings.length === 0) {
       out.cards.matched_headings = matched_headings.slice(0, 4);
     }
-
-    // Sätt coverage om saknas
     if (!(typeof out.cards.coverage === "number" && isFinite(out.cards.coverage))) {
       out.cards.coverage = coverage;
     }
 
-    // Sista säkring: operativ fråga men KONTEKST tom → be om precisering
-    if (looksOperational(message) && !any && (out.cards.steps?.length || /steg|öppna|st[aä]ng|tryck|ventil|temperatur/i.test(out.spoken||""))) {
+    // Om operativt men KONTEKST tom → stoppa hallu och fråga specifikt
+    if (looksOperational(message) && !any && (out.cards.steps?.length || /steg|oppna|stang|tryck|ventil|temperatur/i.test(out.spoken||""))) {
+      const q = intent?.name==="sortbyte"
+        ? "Vilken rubrik i manualen gäller sortbytet? (t.ex. 'Tapp – sortbyte')"
+        : "Vilken rubrik/utrustning avser du? (t.ex. 'Tapp – gul lampa', 'CIP – tapp')";
       out = {
-        spoken: "Det där låter operativt, men jag hittar ingen träff i manualen ännu. Säg vilket moment eller rubrik det gäller så letar jag rätt.",
-        need: { clarify: true, question: "Vilken rubrik/utrustning avser du? (t.ex. 'Tapp – sortbyte', 'Tapp – gul lampa', 'CIP – tapp')" },
+        spoken: "Det där låter operativt, men jag hittar ingen träff i manualen just nu.",
+        need: { clarify: true, question: q },
         cards: { summary:"Operativ fråga utan träff i KONTEKST.", steps:[], explanation:"", pitfalls:[], simple:"", pro:"", follow_up:"", coverage:0, matched_headings:[] },
-        follow_up: ""
+        follow_up: "",
+        intent: intent || null
       };
+    } else {
+      // Bifoga intent tillbaka så klienten kan minnas slots
+      if (intent) out.intent = intent;
     }
 
     return res.status(200).json({ reply: out });
