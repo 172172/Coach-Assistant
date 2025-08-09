@@ -1,5 +1,5 @@
 // /api/chat.js
-// Router: smalltalk, conv-memory (med DB-fallback), profile-light, toolbelt (math/units), RAG (definition/operativt)
+// Router: smalltalk, identity, conv-memory (med DB-fallback), profile-light, toolbelt (math/units), RAG (definition/operativt)
 
 import { q } from "./db.js";
 import fetch from "node-fetch";
@@ -25,15 +25,17 @@ const norm = (s = "") =>
 
 function isSmalltalk(s = "") {
   const t = norm(s);
-  return /\b(hej|tja|tjena|hallo|halla|hallå|hur mar du|hur ar laget|allt bra|tack|tackar|vad gor du|vem ar du)\b/.test(t);
+  return /\b(hej|tja|tjena|hallo|halla|hallå|hur mar du|hur ar laget|allt bra|tack|tackar|vad gor du)\b/.test(t);
 }
-
+function isIdentityQuery(s = "") {
+  const t = norm(s);
+  return /\b(vem ar du|vad ar du|vad kan du|beratta om dig|presentera dig)\b/.test(t);
+}
 function isProfileQuery(s = "") {
   const t = norm(s);
   return /\b(vad|vilken|vad heter|heter)\b.*\b(min|mitt)\b.*\b(linje|line)\b/.test(t)
       || /\b(vilken linje jobbar jag pa|min profil|mina uppgifter)\b/.test(t);
 }
-
 function parseSaveCommand(s = "") {
   const t = norm(s);
   if (!/\b(spara|kom ihag|kom ihåg|remember)\b/.test(t)) return null;
@@ -42,7 +44,6 @@ function parseSaveCommand(s = "") {
   const line_name = token ? `Linje ${token.replace(/^linje/i, "").trim()}` : null;
   return { intent: "save", line_name };
 }
-
 function isDefinitionQuery(s = "") {
   const t = norm(s).trim();
   if (/\b(vad ar|vad är|vad betyder|vad gor|vad gör)\b/.test(t)) return true;
@@ -50,7 +51,7 @@ function isDefinitionQuery(s = "") {
   return words.length <= 2; // t.ex. "CIP", "fals"
 }
 
-/* ================= Conversation memory intents (UPPDATERAD) ================= */
+/* ================= Conversation memory intents (täck många varianter) ================= */
 function parseConversationMemoryIntent(s = "") {
   const t = norm(s);
 
@@ -58,35 +59,39 @@ function parseConversationMemoryIntent(s = "") {
   if (
     /\b(i borjan|i början)\b.*\b(fragan|fraga|jag fragade|jag stalde)\b/.test(t) ||
     /\b(forsta fragan|min forsta fraga|vad var min forsta fraga|fragan jag borjade med)\b/.test(t)
-  ) {
-    return { type: "first" };
-  }
+  ) return { type: "first" };
 
-  // Senaste frågan
+  // Senaste frågan (din/“min”) – “vad var min fråga innan/nyss/förut/precis/tidigare/sist”, “min senaste/förra fråga”
   if (
-    /\b(forra fragan|senaste fragan|vad var min forra fraga|min senaste fraga|vad var min senaste fraga)\b/.test(t) ||
-    /\b(vad\s+fragade\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t)
-  ) {
-    return { type: "last" };
-  }
+    /\b(vad\s+var\s+min(?:\s+\w+){0,3}?\s+fraga(?:\s+\w+){0,2}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t) ||
+    /\b(mina?|den|senaste|forra)\s+fragan\b/.test(t) ||
+    /\b(min\s+senaste\s+fraga|min\s+forra\s+fraga)\b/.test(t)
+  ) return { type: "last" };
 
-  // Senaste du (användaren) sa/skrev – ex: "vad sa jag innan?"
+  // “vad frågade jag (dig) innan/nyss/förut…”
+  if (/\b(vad\s+fragade\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t))
+    return { type: "last_user" };
+
+  // “vad sa jag …” / “vad skrev jag …”
   if (
     /\b(vad\s+sa\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t) ||
     /\b(vad\s+skrev\s+jag(?:\s+\w+){0,3}?\s+(innan|nyss|precis|forut|tidigare|sist))\b/.test(t)
-  ) {
-    return { type: "last_user" };
-  }
+  ) return { type: "last_user" };
 
-  // Senaste assistentens svar
-  if (/\b(vad sa du (nyss|precis)|vad svarade du (nyss|precis))\b/.test(t)) {
-    return { type: "assistant_last" };
-  }
+  // “vad sa du nyss/precis/förut” / “vad svarade du …” / upprepa / repetera / jag fattade inte / hörde inte
+  if (
+    /\b(vad\s+sa\s+du\s+(nyss|precis|forut|tidigare|innan|sist))\b/.test(t) ||
+    /\b(vad\s+svarade\s+du\s+(nyss|precis|forut|tidigare|innan|sist))\b/.test(t) ||
+    /\b(upprepa|repetera|kan du repetera|sag det igen|säg det igen|kan du saga det igen|kan du säga det igen|ta det en gang till|ta det en gång till|jag fattade inte|jag forstod inte|jag hörde inte|jag hord[e] inte)\b/.test(t)
+  ) return { type: "assistant_last" };
 
   // Sammanfattning
-  if (/\b(sammanfatta samtalet|sammanfattning|summering av samtalet|vad har vi pratat om)\b/.test(t)) {
+  if (/\b(sammanfatta\s+(samtalet|detta)|sammanfattning|summering|recap|vad har vi pratat om)\b/.test(t))
     return { type: "summary" };
-  }
+
+  // Generisk fallback: om frasen innehåller “fråga” + tidsord + (min/jag)
+  if (/\bfraga\b/.test(t) && /\b(min|jag)\b/.test(t) && /\b(innan|nyss|precis|forut|tidigare|sist|senaste|forra)\b/.test(t))
+    return { type: "last" };
 
   return null;
 }
@@ -224,7 +229,7 @@ async function logInteraction({ userId, question, reply, lane, intent, coverage,
       [
         userId,
         question,
-        question, // content = question (din tabell kräver NOT NULL content)
+        question, // content = question
         JSON.stringify(reply || {}),
         lane === "smalltalk",
         lane === "operative",
@@ -329,6 +334,18 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
+    /* -------- Lane: Identity (vem är du?) -------- */
+    if (isIdentityQuery(userText)) {
+      const reply = normalizeKeys({
+        spoken: "Jag är din coach för Linje 65 – svarar på driftfrågor från manualen, kan småsnacka och hjälpa till med enkla beräkningar.",
+        need: { clarify: false, question: "" },
+        cards: { summary: "AI-coach för Linje 65.", steps: [], explanation: "Jag använder manualen som källa för operativa råd. Om något saknas flaggar jag och kan föreslå utkast.", pitfalls: [], simple: "", pro: "", follow_up: "Vad vill du göra?", coverage: 0, matched_headings: [] },
+        follow_up: "Vad vill du göra?"
+      });
+      await logInteraction({ userId, question: userText, reply, lane: "identity", intent: "whoami", coverage: 0, matchedHeadings: [] });
+      return res.status(200).json({ reply });
+    }
+
     /* -------- Lane: Profile-light (save/query) -------- */
     const saveCmd = parseSaveCommand(userText);
     if (saveCmd?.intent === "save") {
@@ -378,15 +395,13 @@ export default async function handler(req, res) {
         if (conv.type === "first") {
           const first = firstUserQuestion(sourceHistory);
           if (first) spoken = `Din första fråga var: “${first}”.`;
-        } else if (conv.type === "last") {
+        } else if (conv.type === "last" || conv.type === "last_user") {
           const last = lastUserQuestion(sourceHistory);
-          if (last) spoken = `Din senaste fråga var: “${last}”.`;
-        } else if (conv.type === "last_user") {
-          const lastU = lastUserQuestion(sourceHistory);
-          if (lastU) spoken = `Du sa: “${lastU}”.`;
+          if (last) spoken = (conv.type === "last_user") ? `Du sa: “${last}”.` : `Din senaste fråga var: “${last}”.`;
         } else if (conv.type === "assistant_last") {
           const lastA = lastAssistantSpoken(sourceHistory);
           if (lastA) spoken = `Jag sa: “${lastA}”.`;
+          else spoken = "Jag har inget tidigare svar att upprepa ännu.";
         } else if (conv.type === "summary") {
           const entries = sortByTsIfAny(sourceHistory).map(h => h?.user).filter(Boolean).slice(-6);
           spoken = entries.length ? `Vi har pratat om: ${entries.join(", ")}.` : "Vi har inte pratat om något än.";
@@ -403,7 +418,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
-    /* -------- Lane: Smalltalk (lite mer mänsklig ton) -------- */
+    /* -------- Lane: Smalltalk (mänsklig ton) -------- */
     if (isSmalltalk(userText)) {
       const system = `Du är en svensk JARVIS för Linje 65. Småprat: varm, kort och jordnära. Håll fokus på jobbet men låt det låta mänskligt. Returnera strikt JSON enligt schema.`;
       const user = `Småprat: """${userText}"""`;
