@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
-    "formidable": "3.5.0",
+    "pg": "^8.11.5",
+    "node-fetch": "^2.6.7",
     "form-data": "^4.0.0",
-    "node-fetch": "^2.6.7"
+    "formidable": "3.5.0"
   }
 }
