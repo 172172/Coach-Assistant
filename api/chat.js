@@ -273,7 +273,7 @@ async function buildStatusReply({ news = [], label = "senaste veckan", history =
     tags: Array.isArray(n.tags) ? n.tags : []
   }));
 
-  // System-prompt som ENDAST omformulerar, inte lägger till information
+  // System-prompt som ENDAST omformulerar och inkluderar område/skift i spoken-text
   const system = `
 Du är en erfaren operatör som berättar för kollegan vad som hänt ${label}.
 
@@ -289,15 +289,16 @@ STIL:
 - Vardagligt svenskt språk, men professionellt
 - Använd "vi", "det" 
 - Omformulera slang till bättre språk
+- I spoken-texten: nämn ALLTID vilket område och skift (om det finns)
 - Berätta ENDAST vad som faktiskt står i rådatan
 
 STRUKTUR:
-- spoken: Sammanfatta händelserna med omformulerat språk
+- spoken: Sammanfatta händelserna med omformulerat språk + inkludera område och skift
 - steps: Lista händelserna med omformulerat språk
 
 EXEMPEL:
-Rådata: "Allt gick åt skogen, vi fick byta givare och annat skit"
-Omformat: "Det blev problem, vi fick byta givare och andra komponenter"
+Rådata: "Tapp, Skift B: Allt gick åt skogen, vi fick byta givare och annat skit"
+Omformat spoken: "Det blev problem på Tapp under skift B när vi fick byta givare och andra komponenter"
 
 Returnera strikt JSON. Hitta ALDRIG på information som inte finns i rådatan.`;
 
@@ -307,12 +308,12 @@ Omformulera språket i denna rådata från operatörer ${label}:
 RÅDATA (${newsData.length} st):
 ${newsData.map(n => `${n.when} | ${n.area}${n.shift ? ` (Skift ${n.shift})` : ""} | ${n.title || "Uppdatering"}: ${n.body}`).join("\n")}
 
-Omformulera ENDAST språket - lägg inte till information som inte finns i rådatan.`;
+Omformulera ENDAST språket - lägg inte till information som inte finns i rådatan. I spoken-texten ska du alltid nämna vilket område och skift händelsen inträffade på.`;
 
   let out = await callLLM(system, user, 0.2, 1000, history); // Mycket låg temp för att undvika fantasi
   out = normalizeKeys(out);
 
-  // Failsafe som också endast omformulerar utan att lägga till
+  // Failsafe som också endast omformulerar och inkluderar område/skift
   if (!out.spoken || out.spoken.trim().length < 10) {
     if (newsData.length === 1) {
       const item = newsData[0];
@@ -323,10 +324,15 @@ Omformulera ENDAST språket - lägg inte till information som inte finns i råda
                  .replace(/krånglade/gi, "hade problem")
                  .replace(/strulade/gi, "fungerade inte");
       
-      out.spoken = `${label}: ${item.area} ${item.shift ? `på skift ${item.shift}` : ""} - ${body}.`;
+      // Inkludera område och skift i spoken-text
+      const locationInfo = `${item.area}${item.shift ? ` under skift ${item.shift}` : ""}`;
+      out.spoken = `${label}: Det hände på ${locationInfo} - ${body}.`;
     } else if (newsData.length > 1) {
       const areas = [...new Set(newsData.map(n => n.area))];
-      out.spoken = `${newsData.length} händelser ${label} på ${areas.slice(0,2).join(" och ")}.`;
+      const shifts = [...new Set(newsData.map(n => n.shift).filter(Boolean))];
+      const locationInfo = areas.slice(0,2).join(" och ");
+      const shiftInfo = shifts.length ? ` (mest ${shifts.join(" och ")})` : "";
+      out.spoken = `${newsData.length} händelser ${label} på ${locationInfo}${shiftInfo}.`;
     }
   }
 
@@ -355,14 +361,15 @@ Omformulera ENDAST språket - lägg inte till information som inte finns i råda
     }
   }
 
-  // TTS för spoken text
+  // TTS för BARA spoken text - inte steps
   out.meta = Object.assign({}, out.meta, {
     speech: out.spoken,
     speech_source: "status_summary", 
     tts: { 
       text: out.spoken, 
       priority: "spoken", 
-      allow_fallback: false
+      allow_fallback: false,
+      skip_cards: true  // Skippa cards/steps vid uppläsning
     }
   });
 
