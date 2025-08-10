@@ -676,6 +676,29 @@ async function playSpeechHybrid(fullText) {
       target.searchParams.set('uid', uid);
       location.href = target.toString();
     });
+    async function playWelcomeGreeting() {
+  try {
+    const res = await fetch('/api/greeting');
+    const { text } = await res.json();
+
+    // Om du redan använder min hybridspelare: byta till playSpeechHybrid(text)
+    if (typeof playSpeechHybrid === 'function') {
+      await playSpeechHybrid(text);
+    } else {
+      await speak(text); // fallback till ditt nuvarande speak()
+    }
+  } catch (e) {
+    // Tyst fallback – ingen hälsning om något felar
+    console.warn("Greeting failed:", e);
+  }
+}
+
+// Kör automatiskt vid sidstart
+window.addEventListener('DOMContentLoaded', () => {
+  // Viktigt: vi sätter INTE running=true ännu, så VAD/lyssning triggas inte under hälsningen
+  playWelcomeGreeting();
+});
+
 
   </script>
 </body>
