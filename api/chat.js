@@ -1,7 +1,7 @@
 // Förbättrad Coach Assistant - Digital kollega för Linje65
 
-const { getOpenAIResponse } = require('./memory');
-const { searchKnowledge, q } = require('./db');
+import { getOpenAIResponse } from './memory.js';
+import { searchKnowledge, q } from './db.js';
 
 // PERSONLIGHET & KONTEXT
 const COACH_PERSONALITY = {
@@ -400,7 +400,7 @@ function generateFollowUp(topic, userLevel, success) {
 }
 
 // HUVUD-ENDPOINT
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
