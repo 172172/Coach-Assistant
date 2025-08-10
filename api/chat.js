@@ -178,7 +178,7 @@ const UNIT_ALIASES = {
   l: ["l","liter","liters","litre"],
   ml: ["ml","milliliter","millilitrar"],
   dl: ["dl","deciliter","decilitrar"],
-  cl: ["cl","centiliter","centilitrar"],
+  cl: ["cl","centiliter","centimetrar"],
   mm: ["mm","millimeter","millimetrar"],
   cm: ["cm","centimeter","centimetrar"],
   m: ["m","meter","metrar"]
@@ -226,19 +226,15 @@ function parseStatusRange(s = "") {
   return { key: "week", label: "senaste veckan" };
 }
 
-// Hämta line_news + incidents för intervallet
+// Hämta endast line_news för intervallet
 async function fetchStatusData(rangeKey = "week") {
   let whereNews = "news_at >= now() - interval '7 days'";
-  let whereInc  = "reported_at >= now() - interval '7 days'";
   if (rangeKey === "today") {
     whereNews = "news_at >= date_trunc('day', now())";
-    whereInc  = "reported_at >= date_trunc('day', now())";
   } else if (rangeKey === "yesterday") {
     whereNews = "news_at >= date_trunc('day', now()) - interval '1 day' AND news_at < date_trunc('day', now())";
-    whereInc  = "reported_at >= date_trunc('day', now()) - interval '1 day' AND reported_at < date_trunc('day', now())";
   } else if (rangeKey === "last_week") {
     whereNews = "news_at >= date_trunc('week', now()) - interval '1 week' AND news_at < date_trunc('week', now())";
-    whereInc  = "reported_at >= date_trunc('week', now()) - interval '1 week' AND reported_at < date_trunc('week', now())";
   }
 
   const newsSql = `
@@ -248,21 +244,14 @@ async function fetchStatusData(rangeKey = "week") {
     order by news_at desc
     limit 300
   `;
-  const incSql = `
-    select id, reported_at, area, severity, title, problem, resolution, tags, status
-    from incidents
-    where ${whereInc}
-    order by reported_at desc
-    limit 300
-  `;
 
-  const [n, i] = await Promise.all([ q(newsSql), q(incSql) ]);
-  return { news: n?.rows || [], incidents: i?.rows || [] };
+  const n = await q(newsSql);
+  return { news: n?.rows || [] };
 }
 
-// Bygg pratvänlig sammanfattning via callLLM
-async function buildStatusReply({ news = [], incidents = [], label = "senaste veckan", history = [] }) {
-  if ((!news || news.length === 0) && (!incidents || incidents.length === 0)) {
+// Bygg mer utförlig sammanfattning via callLLM
+async function buildStatusReply({ news = [], label = "senaste veckan", history = [] }) {
+  if (!news || news.length === 0) {
     const empty = {
       spoken: `Lugnt läge ${label} – inget särskilt att rapportera! Ibland är det skönt när allt bara rullar på. 😊`,
       need: { clarify: false, question: "" },
@@ -275,7 +264,7 @@ async function buildStatusReply({ news = [], incidents = [], label = "senaste ve
   const fmt = (d) => new Date(d).toLocaleString("sv-SE", { dateStyle: "short", timeStyle: "short" });
   
   // Förbered data för LLM med bättre struktur
-  const newsData = (news || []).map(n => ({
+  const newsData = news.map(n => ({
     when: fmt(n.news_at),
     area: n.area || n.section || "Okänt område",
     shift: n.shift || "",
@@ -284,94 +273,68 @@ async function buildStatusReply({ news = [], incidents = [], label = "senaste ve
     tags: Array.isArray(n.tags) ? n.tags : []
   }));
 
-  const incidentData = (incidents || []).map(x => ({
-    when: fmt(x.reported_at),
-    area: x.area || "Okänt område", 
-    severity: x.severity || "normal",
-    title: x.title || "",
-    problem: x.problem || "",
-    solution: x.resolution || "",
-    status: x.status || "",
-    tags: Array.isArray(x.tags) ? x.tags : []
-  }));
-
-  // Förbättrad system-prompt för mer vardagsspråk
+  // Förbättrad system-prompt för mer detaljerat berättande
   const system = `
 Du är en erfaren operatör som berättar för kollegan vad som hänt ${label}. Prata som en kompis på golvet:
 
 STIL:
 - Vardagligt svenskt språk, som mellan kollegor
 - Använd "vi", "det", "grabben/tjejen" etc. 
-- Inga tekniska termer utan förklaring
-- Gör det levande och engagerande
-- Fokusera på vad som FAKTISKT påverkar jobbet
+- Berätta UTFÖRLIGT vad som hänt - detaljer som påverkar jobbet
+- Gör det levande och engagerande, men informativt
+- Nämn specifika händelser, inte bara allmänna intryck
 
 STRUKTUR:
-- spoken: 2-4 meningar som summerar känslan/läget
-- steps: Max 6 punkter, skriv som "OMRÅDE: Vad som hände (varför det spelar roll)"
-- Prioritera saker som påverkar drift/produktion
+- spoken: 3-6 meningar som berättar vad som FAKTISKT hänt, med detaljer
+- steps: Alla viktiga händelser som punkter: "OMRÅDE: Vad som hände i detalj"
+- Prioritera allt som påverkar drift/produktion/kvalitet
 
 EXEMPEL PÅ TON:
-- "Ganska lugnt faktiskt, förutom att..."
-- "Det strulade lite på Tapp när..."  
-- "Bra kört av dagskiftet som..."
-- "Vi fick äntligen ordning på..."
+- "Vi hade lite trubbel på Tapp när formatbytet krånglade..."
+- "Underhållsteamet bytte sensorn på OCME igår morgon..."  
+- "Dagskiftet rapporterade att vi fick stopp på grund av..."
+- "Det blev lite rörigt när gejdrarna behövde justeras..."
 
-Returnera strikt JSON med vårt schema.`;
+Var SPECIFIK om vad som hänt, inte bara känslan. Returnera strikt JSON.`;
 
   const user = `
-Sammanfatta ${label} för en kollega.
+Berätta utförligt vad som hänt ${label} för en kollega.
 
 NYHETER (${newsData.length} st):
 ${newsData.map(n => `${n.when} | ${n.area}${n.shift ? ` (Skift ${n.shift})` : ""} | ${n.title || "Uppdatering"}: ${n.body}`).join("\n")}
 
-INCIDENTER (${incidentData.length} st):
-${incidentData.map(i => `${i.when} | ${i.area} | ${i.severity.toUpperCase()}: ${i.title || i.problem}${i.solution ? ` → ${i.solution}` : ""}`).join("\n")}
+Fokus: Berätta SPECIFIKT vad som hänt - operatörerna vill veta detaljerna!`;
 
-Fokus: Vad behöver operatörerna veta för att göra sitt jobb bra?`;
-
-  let out = await callLLM(system, user, 0.5, 800, history); // Lägre temp för konsistens
+  let out = await callLLM(system, user, 0.4, 1000, history); // Lägre temp för mer faktafokus, mer tokens för detaljer
   out = normalizeKeys(out);
 
-  // Failsafe med bättre vardagsspråk
-  if (!out.spoken || out.spoken.trim().length < 10) {
-    if (newsData.length > 0 && incidentData.length === 0) {
-      out.spoken = `Ganska lugnt ${label}. ${newsData.length} uppdateringar, mest rutin. Inget som stoppar produktionen.`;
-    } else if (incidentData.length > 0) {
-      const highSev = incidentData.filter(i => ['high', 'critical'].includes(i.severity.toLowerCase()));
-      if (highSev.length > 0) {
-        out.spoken = `Det har strulade lite ${label} – ${highSev.length} allvarligare grejer. Men vi löste det mesta.`;
-      } else {
-        out.spoken = `${incidentData.length} småsaker ${label}, inget större. Mest vardagsknep som vi fixade.`;
-      }
+  // Failsafe med mer detaljerat vardagsspråk
+  if (!out.spoken || out.spoken.trim().length < 20) {
+    if (newsData.length === 1) {
+      const item = newsData[0];
+      out.spoken = `En grej som hände ${label}: ${item.area} ${item.shift ? `på skift ${item.shift}` : ""} - ${item.body || item.title}. Annars ganska lugnt.`;
+    } else if (newsData.length > 1) {
+      const areas = [...new Set(newsData.map(n => n.area))];
+      out.spoken = `${newsData.length} grejer som hände ${label}, mest på ${areas.slice(0,2).join(" och ")}. ${newsData[0].body ? newsData[0].body.split('.')[0] + '...' : 'Lite mixat med underhåll och körning.'}`;
     } else {
-      out.spoken = `Helt okej ${label}! ${newsData.length + incidentData.length} uppdateringar, men inget som sticker ut.`;
+      out.spoken = `Helt okej ${label}! Inga stora händelser att rapportera.`;
     }
   }
 
-  // Förbättra steps med mer operatörsperspektiv  
+  // Förbättra steps med alla viktiga händelser
   if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
     const steps = [];
     
-    // Prioritera incidents först (viktigare för drift)
-    incidentData.slice(0, 3).forEach(inc => {
-      const area = inc.area.split('/').pop() || inc.area; // Ta sista delen av "B/Tapp" → "Tapp"
-      const time = inc.when.split(' ')[0]; // Bara datum
-      const issue = inc.title || inc.problem;
-      const solved = inc.solution ? ` (fixat: ${inc.solution})` : "";
-      steps.push(`${area.toUpperCase()}: ${time} - ${issue}${solved}`);
-    });
-
-    // Lägg till viktiga nyheter
-    newsData.filter(n => 
-      n.title.toLowerCase().includes('stopp') || 
-      n.title.toLowerCase().includes('byte') ||
-      n.body.toLowerCase().includes('produktion')
-    ).slice(0, 3).forEach(news => {
-      const area = news.area.split('/').pop() || news.area;
-      const time = news.when.split(' ')[0];
-      const note = news.title || news.body.slice(0, 50) + "...";
-      steps.push(`${area.toUpperCase()}: ${time} - ${note}`);
+    // Ta med alla nyheter som är viktiga
+    newsData.forEach(news => {
+      const area = (news.area || "").split('/').pop() || news.area || "Okänt";
+      const time = news.when.split(' ')[0]; // Bara datum
+      const shift = news.shift ? ` (Skift ${news.shift})` : "";
+      const content = news.body || news.title || "Uppdatering";
+      
+      // Korta ner om för långt, men behåll viktiga detaljer
+      const shortContent = content.length > 80 ? content.slice(0,75) + "..." : content;
+      steps.push(`${area.toUpperCase()}${shift}: ${time} - ${shortContent}`);
     });
 
     if (steps.length > 0) {
@@ -387,7 +350,7 @@ Fokus: Vad behöver operatörerna veta för att göra sitt jobb bra?`;
   });
 
   out.cards.coverage = 0;
-  out.cards.matched_headings = ["line_news", "incidents"];
+  out.cards.matched_headings = ["line_news"];
   out.cards.summary = out.cards.summary || `Läget ${label}`;
   out.follow_up = out.follow_up || "Vill du höra mer om något specifikt?";
 
@@ -834,8 +797,8 @@ export default async function handler(req, res) {
     /* -------- Lane: Status / Nyheter / Överlämning -------- */
     if (isStatusQuery(userText)) {
       const range = parseStatusRange(userText); // { key, label }
-      const { news, incidents } = await fetchStatusData(range.key);
-      const reply = await buildStatusReply({ news, incidents, label: range.label, history });
+      const { news } = await fetchStatusData(range.key);  // Tar bort incidents
+      const reply = await buildStatusReply({ news, label: range.label, history });
 
       await logInteraction({
         userId,
@@ -844,7 +807,7 @@ export default async function handler(req, res) {
         lane: "status",
         intent: `status_${range.key}`,
         coverage: 0,
-        matchedHeadings: ["line_news","incidents"]
+        matchedHeadings: ["line_news"]  // Uppdaterat
       });
 
       return res.status(200).json({ reply });
