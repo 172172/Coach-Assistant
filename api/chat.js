@@ -1,4 +1,4 @@
-nej asså jag menar kan skicka chat.js komplett med ändringen utan att du rör något annat i koden....
+
 // /api/chat.js
 // Kollegig AI-coach: identity, smalltalk, conversation-memory, rewrite-intents (simplify/repeat/summary/examples),
 // general-knowledge (jobbrelaterat), toolbelt (math/units), RAG (definition/operativt från manualen)
