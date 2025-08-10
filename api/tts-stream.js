@@ -1,11 +1,11 @@
 // /api/tts-stream.js
 // Streama ElevenLabs-ljud korrekt i Node-miljö (Web ReadableStream → res.write).
-// Med fallback till icke-stream om något strular.
+// Med robustare defaults + tunable query params för prosodi.
 
 export const config = {
   api: {
     bodyParser: false,
-    responseLimit: false, // låt oss streama fritt
+    responseLimit: false,
   },
 };
 
@@ -15,28 +15,45 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Only GET allowed" });
     }
 
-    const { text = "", latency = "3" } = req.query || {};
+    // --- Query overrides ---
+    const {
+      text = "",
+      // Lägre siffra = mer kvalitet/prosodi (lite högre latens), högre = snabbare/mer “klipp”
+      latency = "1",                   // ändrat från "3" → mer naturligt läge som default
+      model = "eleven_multilingual_v2",
+      stability,
+      similarity,
+      style,
+      boost,
+      format // t.ex. mp3_44100_128, wav_44100 (valfritt)
+    } = req.query || {};
+
     const apiKey = process.env.ELEVENLABS_API_KEY;
-    const voiceId =
-      process.env.ELEVENLABS_VOICE_ID || "3mwblJqg1SFnILqt4AFC"; // din svenska röst
+    const voiceId = process.env.ELEVENLABS_VOICE_ID || "3mwblJqg1SFnILqt4AFC";
+    if (!apiKey) return res.status(500).json({ error: "ELEVENLABS_API_KEY saknas" });
 
-    if (!apiKey) {
-      return res.status(500).json({ error: "ELEVENLABS_API_KEY saknas" });
-    }
+    const output_format = typeof format === "string" && format ? format : "mp3_44100_128";
 
-    const streamUrl = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?optimize_streaming_latency=${encodeURIComponent(
-      latency
-    )}&output_format=mp3_44100_128`;
+    const streamUrl =
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream` +
+      `?optimize_streaming_latency=${encodeURIComponent(latency)}` +
+      `&output_format=${encodeURIComponent(output_format)}`;
+
+    // --- Voice settings: mer mänsklig default, men styrbart via query ---
+    const voice_settings = {
+      // Lägre stability → mer variation och andning; höj om det blir för spretigt
+      stability: clamp01(toNum(stability, 0.40)),
+      // Hög similarity bevarar klonens karaktär
+      similarity_boost: clamp01(toNum(similarity, 0.85)),
+      // Stil/uttryck – ger mer energi/intonation
+      style: clamp01(toNum(style, 0.75)),
+      use_speaker_boost: toBool(boost, true)
+    };
 
     const payload = {
       text: String(text || "Okej."),
-      model_id: "eleven_multilingual_v2",
-      voice_settings: {
-        stability: 0.25,        // Ännu lägre för mer dynamik (mindre robotiskt)
-        similarity_boost: 0.8,
-        style: 0.6,            // Högre för mer uttrycksfullhet
-        use_speaker_boost: true
-      },
+      model_id: String(model || "eleven_multilingual_v2"),
+      voice_settings
     };
 
     let upstream;
@@ -50,24 +67,20 @@ export default async function handler(req, res) {
         body: JSON.stringify(payload),
       });
     } catch (e) {
-      return res
-        .status(502)
-        .json({ error: "Kunde inte nå TTS-leverantören", details: String(e) });
+      return res.status(502).json({ error: "Kunde inte nå TTS-leverantören", details: String(e) });
     }
 
     if (!upstream.ok) {
       const errTxt = await upstream.text().catch(() => "");
-      return res
-        .status(500)
-        .json({ error: "TTS stream error", details: errTxt || upstream.statusText });
+      return res.status(500).json({ error: "TTS stream error", details: errTxt || upstream.statusText });
     }
 
-    // Försök streama via Web ReadableStream → Node response
-    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Type", mimeFromFormat(output_format));
+
     try {
       const body = upstream.body;
 
-      // Fall 1: Web ReadableStream med getReader()
+      // Web ReadableStream
       if (body && typeof body.getReader === "function") {
         const reader = body.getReader();
         while (true) {
@@ -79,13 +92,13 @@ export default async function handler(req, res) {
         return;
       }
 
-      // Fall 2: Node stream (om miljön ändå ger en sådan)
+      // Node stream
       if (body && typeof body.pipe === "function") {
         body.pipe(res);
         return;
       }
 
-      // Fall 3: Ingen stream-API? Läs som buffer.
+      // Buffer fallback
       const buf = Buffer.from(await upstream.arrayBuffer());
       res.end(buf);
       return;
@@ -103,24 +116,37 @@ export default async function handler(req, res) {
         });
         if (!up2.ok) {
           const t = await up2.text().catch(() => "");
-          return res
-            .status(500)
-            .json({ error: "TTS fallback error", details: t || up2.statusText });
+          return res.status(500).json({ error: "TTS fallback error", details: t || up2.statusText });
         }
         const buf2 = Buffer.from(await up2.arrayBuffer());
-        res.setHeader("Content-Type", "audio/mpeg");
+        res.setHeader("Content-Type", mimeFromFormat(output_format));
         res.end(buf2);
       } catch (e2) {
         console.error("tts-stream fallback error:", e2);
-        res
-          .status(500)
-          .json({ error: "Serverfel i tts-stream", details: e2?.message || String(e2) });
+        res.status(500).json({ error: "Serverfel i tts-stream", details: e2?.message || String(e2) });
       }
     }
   } catch (e) {
     console.error("tts-stream error:", e);
-    res
-      .status(500)
-      .json({ error: "Serverfel i tts-stream", details: e?.message || String(e) });
+    res.status(500).json({ error: "Serverfel i tts-stream", details: e?.message || String(e) });
   }
+}
+
+/* -------- helpers -------- */
+function toNum(v, dflt) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : dflt;
+}
+function clamp01(x){ return Math.max(0, Math.min(1, Number(x)||0)); }
+function toBool(v, dflt=true){
+  if (v === undefined) return dflt;
+  if (typeof v === "string") return ["1","true","yes","on"].includes(v.toLowerCase());
+  return !!v;
+}
+function mimeFromFormat(fmt) {
+  if (!fmt) return "audio/mpeg";
+  if (fmt.startsWith("mp3")) return "audio/mpeg";
+  if (fmt.startsWith("wav")) return "audio/wav";
+  if (fmt.startsWith("pcm")) return "audio/basic";
+  return "audio/mpeg";
 }
