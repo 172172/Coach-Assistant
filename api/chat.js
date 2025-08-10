@@ -210,8 +210,9 @@ function convertUnits({ val, from, to }) {
 // Träffar frågor som: "vad har hänt idag/igår/denna vecka", "status", "nyheter", "överlämning", "underhåll"
 function isStatusQuery(s = "") {
   const t = norm(s);
-  if (!/\b(vad har hant|vad har hänt|status|laget|läget|uppdatering|nyheter|overlamning|överlämning|underhall|underhåll)\b/.test(t)) return false;
-  return true;
+  const statusWords = /(vad har hant|vad har hänt|status|laget|läget|uppdatering|nyheter|overlamning|överlämning|underhall|underhåll)/;
+  const timeHints   = /(idag|just nu|igar|igår|denna vecka|i veckan|veckan|forra veckan|förra veckan)/;
+  return statusWords.test(t) || (/(vad har)/.test(t) && timeHints.test(t));
 }
 
 // Light daterange-parser → 'today' | 'yesterday' | 'last_week' | 'week'
@@ -297,6 +298,37 @@ Returnera strikt JSON med fälten i vårt schema.`;
   out.cards.matched_headings = ["line_news", "incidents"];
   out.cards.summary = out.cards.summary || `Status för ${label}`;
   out.follow_up = out.follow_up || "Vill du filtrera på område eller skift?";
+
+  // --- Failsafe: säkerställ spoken/steps alltid finns ---
+  if (!out || typeof out !== "object") out = {};
+  out = normalizeKeys(out);
+
+  if (!out.spoken || out.spoken.trim().length < 2) {
+    const firstNews = news?.[0];
+    const firstInc  = incidents?.[0];
+    const pickTxt = firstNews
+      ? `${firstNews.title ? firstNews.title + " – " : ""}${(firstNews.body||"").slice(0,120)}${(firstNews.body||"").length>120?"…":""}`
+      : firstInc
+        ? `${firstInc.title ? firstInc.title + " – " : ""}${(firstInc.problem||"").slice(0,120)}${(firstInc.problem||"").length>120?"…":""}`
+        : null;
+
+    out.spoken = pickTxt
+      ? `Här är läget för ${label}: ${pickTxt}`
+      : `Jag hittar inget inlagt för ${label}. Vill du att vi börjar logga nyheter/överlämning här?`;
+  }
+
+  if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
+    const fmtISO = (d) => new Date(d).toISOString().replace('T',' ').slice(0,16);
+    const ns = (news||[]).slice(0,4).map(n =>
+      `[${n.section || "production"}${n.shift?"/"+n.shift:""}${n.area?"/"+n.area:""}] ${n.title || (n.body||"").slice(0,60)} (${fmtISO(n.news_at)})`
+    );
+    const is = (incidents||[]).slice(0,2).map(x =>
+      `[INC ${String(x.severity||"").toUpperCase()}${x.area?"/"+x.area:""}] ${x.title || (x.problem||"").slice(0,60)} (${fmtISO(x.reported_at)})`
+    );
+    const merged = [...ns, ...is].filter(Boolean).slice(0,6);
+    if (merged.length) out.cards.steps = merged;
+  }
+
   return out;
 }
 
@@ -656,7 +688,8 @@ export default async function handler(req, res) {
       if (rw.type === "switch_topic") {
         const reply = normalizeKeys({
           spoken: "Okej, vi byter spår! Vad vill du snacka om istället?",
-          need: { clarify: true, question: "Vad är din nya fråga?" },
+          need: { clarify: true, question: "Vad är din nya fråga?",
+          },
           cards: { summary: "Ämnesbyte.", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
           follow_up: ""
         });
@@ -739,7 +772,14 @@ export default async function handler(req, res) {
     if (isStatusQuery(userText)) {
       const range = parseStatusRange(userText); // { key, label }
       const { news, incidents } = await fetchStatusData(range.key);
-      const reply = await buildStatusReply({ news, incidents, label: range.label, history });
+
+      // Debug + håll prompten liten
+      console.log("[STATUS] Q:", userText);
+      console.log("[STATUS] counts:", { news: news.length, incidents: incidents.length });
+      const newsSlim = (news || []).slice(0, 60);
+      const incSlim  = (incidents || []).slice(0, 40);
+
+      const reply = await buildStatusReply({ news: newsSlim, incidents: incSlim, label: range.label, history });
 
       await logInteraction({
         userId,
