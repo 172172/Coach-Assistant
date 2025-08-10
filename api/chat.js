@@ -261,7 +261,15 @@ async function buildStatusReply({ news = [], label = "senaste veckan", history =
     return normalizeKeys(empty);
   }
 
-  const fmt = (d) => new Date(d).toLocaleString("sv-SE", { dateStyle: "short", timeStyle: "short" });
+  // Förbättrad datumformatering med rätt veckodag
+  const fmt = (d) => {
+    const date = new Date(d);
+    const weekdays = ['söndag', 'måndag', 'tisdag', 'onsdag', 'torsdag', 'fredag', 'lördag'];
+    const weekday = weekdays[date.getDay()];
+    const dateStr = date.toLocaleDateString("sv-SE", { month: 'short', day: 'numeric' });
+    const timeStr = date.toLocaleTimeString("sv-SE", { hour: '2-digit', minute: '2-digit' });
+    return `${weekday} ${dateStr} kl ${timeStr}`;
+  };
   
   // Förbered data för LLM med bättre struktur
   const newsData = news.map(n => ({
@@ -285,6 +293,10 @@ STIL & TON:
 - Nämn konkreta händelser, inte bara allmänna intryck
 - Som att du överlämnar till nästa skift
 
+VIKTIGT:
+- Använd EXAKTA veckodagar från datumen - inte påhittade dagar
+- När du nämner "tisdag" eller liknande, kontrollera att det stämmer med när-fältet
+
 INNEHÅLL:
 - Börja med en övergripande känsla/läge
 - Gå sedan in på specifika händelser per område
@@ -297,10 +309,10 @@ STRUKTUR:
 - steps: Alla viktiga händelser som punkter: "OMRÅDE (SKIFT): Detaljerad beskrivning"
 
 EXEMPEL PÅ BRA TON:
-- "Vi hade lite trubbel på Tapp när formatbytet krånglade efter lunch..."
-- "Underhållsteamet bytte den där sensorn på OCME som strulade igår morgon..."  
-- "Dagskiftet rapporterade stopp på Jones - gejdrarna behövde justeras igen..."
-- "Det blev lite rörigt när CIP-cykeln inte ville starta på Coolpack..."
+- "Vi hade lite trubbel på Tapp när formatbytet krånglade efter lunch på onsdag..."
+- "Underhållsteamet bytte den där sensorn på OCME som strulade måndag morgon..."  
+- "Dagskiftet rapporterade stopp på Jones på fredag - gejdrarna behövde justeras igen..."
+- "Det blev lite rörigt när CIP-cykeln inte ville starta på Coolpack på torsdag..."
 
 Var KONKRET och DETALJERAD om vad som hänt. Operatörerna vill veta exakt vad som skett. Returnera strikt JSON.`;
 
@@ -314,7 +326,8 @@ ${newsData.map(n => `
 ${n.tags.length ? `🏷️ Taggar: ${n.tags.join(", ")}` : ""}
 `).join("\n---\n")}
 
-Fokus: Berätta som en kollega som överlämnar till nästa skift - vad har hänt och vad behöver vi veta?`;
+Fokus: Berätta som en kollega som överlämnar till nästa skift - vad har hänt och vad behöver vi veta?
+VIKTIG PÅMINNELSE: Använd korrekta veckodagar från datumen ovan!`;
 
   let out = await callLLM(system, user, 0.3, 1200, history); // Lägre temp för faktafokus, mer tokens för detaljer
   out = normalizeKeys(out);
@@ -323,8 +336,8 @@ Fokus: Berätta som en kollega som överlämnar till nästa skift - vad har hän
   if (!out.spoken || out.spoken.trim().length < 30) {
     if (newsData.length === 1) {
       const item = newsData[0];
-      const time = item.when.includes('idag') ? 'idag' : item.when.split(' ')[0];
-      out.spoken = `En grej som hände ${time}: Vi hade ${item.body || item.title} på ${item.area}${item.shift ? ` under skift ${item.shift}` : ""}. ${item.tags.length ? `Handlade om ${item.tags.slice(0,2).join(" och ")}.` : ""}`;
+      const [weekday] = item.when.split(' '); // Ta första ordet = veckodag
+      out.spoken = `En grej som hände på ${weekday}: Vi hade ${item.body || item.title} på ${item.area}${item.shift ? ` under skift ${item.shift}` : ""}. ${item.tags.length ? `Handlade om ${item.tags.slice(0,2).join(" och ")}.` : ""}`;
     } else if (newsData.length > 1) {
       const areas = [...new Set(newsData.map(n => n.area))];
       const problems = newsData.filter(n => n.tags.some(tag => /problem|stopp|fel|byte/.test(tag.toLowerCase())));
@@ -346,7 +359,8 @@ Fokus: Berätta som en kollega som överlämnar till nästa skift - vad har hän
     
     newsData.forEach(news => {
       const area = (news.area || "").split('/').pop() || news.area || "Okänt";
-      const time = news.when.split(' ')[0]; // Bara datum
+      const [weekday, ...timeParts] = news.when.split(' '); // Första ordet = veckodag
+      const timeInfo = timeParts.join(' '); // Resten
       const shift = news.shift ? ` (Skift ${news.shift})` : "";
       const title = news.title ? `${news.title}: ` : "";
       const content = news.body || "Uppdatering";
@@ -357,7 +371,7 @@ Fokus: Berätta som en kollega som överlämnar till nästa skift - vad har hän
       const shortDescription = fullDescription.length > 100 ? 
         fullDescription.slice(0,95) + "..." : fullDescription;
       
-      steps.push(`${area.toUpperCase()}${shift}: ${time} - ${shortDescription}`);
+      steps.push(`${area.toUpperCase()}${shift}: ${weekday} ${timeInfo} - ${shortDescription}`);
     });
 
     if (steps.length > 0) {
@@ -365,17 +379,18 @@ Fokus: Berätta som en kollega som överlämnar till nästa skift - vad har hän
     }
   }
 
-  // Lägg till metadata för TTS - bara spoken, inte steps
+  // KRITISKT: Säkerställ att BARA spoken läses upp, inte steps
   out.meta = Object.assign({}, out.meta, {
     speech: out.spoken,
-    speech_source: "status_summary", 
+    speech_source: "status_summary",
+    speech_only: true,  // Ny flagga
     tts: { 
       text: out.spoken, 
-      priority: "spoken", 
-      allow_fallback: false,
+      priority: "spoken_only",
       read_only_spoken: true,
       skip_steps: true,
-      skip_cards: true
+      skip_cards: true,
+      skip_all_except_spoken: true  // Extra tydlig flagga
     }
   });
 
@@ -588,8 +603,12 @@ function normalizeKeys(out) {
       priority: "spoken_only",
       read_only_spoken: true,
       skip_steps: true,
-      skip_cards: true
+      skip_cards: true,
+      skip_all_except_spoken: true
     });
+    // EXTRA SÄKERHET: Ta bort steps från TTS-vy
+    out.tts_spoken_only = out.spoken;
+    out.tts_skip_steps = true;
   }
   
   return out;
