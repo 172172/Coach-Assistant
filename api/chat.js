@@ -1,4 +1,4 @@
- // Förbättrad Coach Assistant - Digital kollega för Linje65
+// Förbättrad Coach Assistant - Digital kollega för Linje65
 
 import { getOpenAIResponse } from './memory.js';
 import { searchKnowledge, q } from './db.js';
@@ -486,13 +486,27 @@ export default async function handler(req, res) {
     let aiReply;
     try {
       aiReply = JSON.parse(response);
+      console.log('Successfully parsed AI response');
     } catch (e) {
+      console.error('JSON parsing error:', e.message);
+      console.error('Raw response:', response);
+      
       // Fallback om JSON parsning misslyckas
       aiReply = {
-        spoken: response || "Ursäkta, jag hade lite tekniska problem. Kan du upprepa frågan?",
-        cards: { summary: "Tekniskt fel uppstod" },
+        spoken: "Ursäkta, jag hade lite tekniska problem med formateringen. Kan du upprepa frågan?",
+        cards: { 
+          summary: "JSON-parsningsfel", 
+          steps: [], 
+          explanation: "", 
+          pitfalls: [], 
+          matched_headings: [] 
+        },
         follow_up: generateFollowUp("general", userSession.personality.experienceLevel, false),
-        meta: { confidence: 0.1 }
+        meta: { 
+          confidence: 0.1,
+          error: true,
+          parse_error: e.message
+        }
       };
     }
 
