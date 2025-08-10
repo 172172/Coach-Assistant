@@ -211,9 +211,11 @@ function convertUnits({ val, from, to }) {
 // Träffar frågor som: "vad har hänt idag/igår/denna vecka", "status", "nyheter", "överlämning", "underhåll"
 function isStatusQuery(s = "") {
   const t = norm(s);
-  if (!/\b(vad har hant|vad har hänt|status|laget|läget|uppdatering|nyheter|overlamning|överlämning|underhall|underhåll)\b/.test(t)) return false;
-  return true;
+  const statusWords = /(vad har hant|vad har hänt|status|laget|läget|uppdatering|nyheter|overlamning|överlämning|underhall|underhåll)/;
+  const timeHints   = /(idag|just nu|igar|igår|denna vecka|i veckan|veckan|forra veckan|förra veckan)/;
+  return statusWords.test(t) || (/(vad har)/.test(t) && timeHints.test(t));
 }
+
 
 // Light daterange-parser → 'today' | 'yesterday' | 'last_week' | 'week'
 function parseStatusRange(s = "") {
@@ -298,6 +300,35 @@ Returnera strikt JSON med fälten i vårt schema.`;
   out.cards.matched_headings = ["line_news", "incidents"];
   out.cards.summary = out.cards.summary || `Status för ${label}`;
   out.follow_up = out.follow_up || "Vill du filtrera på område eller skift?";
+  // --- Failsafe: säkerställ spoken/steps alltid finns ---
+out = normalizeKeys(out);
+
+if (!out.spoken || out.spoken.trim().length < 2) {
+  const firstNews = news?.[0];
+  const firstInc  = incidents?.[0];
+  const pickTxt = firstNews
+    ? `${firstNews.title ? firstNews.title + " – " : ""}${(firstNews.body||"").slice(0,120)}${(firstNews.body||"").length>120?"…":""}`
+    : firstInc
+      ? `${firstInc.title ? firstInc.title + " – " : ""}${(firstInc.problem||"").slice(0,120)}${(firstInc.problem||"").length>120?"…":""}`
+      : null;
+
+  out.spoken = pickTxt
+    ? `Här är läget för ${label}: ${pickTxt}`
+    : `Jag hittar inget inlagt för ${label}. Vill du att vi börjar logga nyheter/överlämning här?`;
+}
+
+if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
+  const fmtISO = (d) => new Date(d).toISOString().replace('T',' ').slice(0,16);
+  const ns = (news||[]).slice(0,4).map(n =>
+    `[${n.section || "production"}${n.shift?"/"+n.shift:""}${n.area?"/"+n.area:""}] ${n.title || (n.body||"").slice(0,60)} (${fmtISO(n.news_at)})`
+  );
+  const is = (incidents||[]).slice(0,2).map(x =>
+    `[INC ${String(x.severity||"").toUpperCase()}${x.area?"/"+x.area:""}] ${x.title || (x.problem||"").slice(0,60)} (${fmtISO(x.reported_at)})`
+  );
+  const merged = [...ns, ...is].filter(Boolean).slice(0,6);
+  if (merged.length) out.cards.steps = merged;
+}
+
   return out;
 }
 
