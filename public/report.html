@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <title>Rapportera fel</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 1.25rem; max-width: 720px; margin: 0 auto; }
+    input, select, textarea { width: 100%; padding: .6rem; margin:.4rem 0 1rem; border-radius: 8px; border:1px solid #ccd3da; }
+    button { padding:.7rem 1rem; border:0; border-radius:10px; background:#0ea5e9; color:#fff; cursor:pointer; }
+    .row { display:flex; gap:.6rem; }
+    .half { flex:1; }
+    .ok { color:#10b981; }
+    .err { color:#ef4444; }
+  </style>
+</head>
+<body>
+  <h1>Rapportera fel / lösning</h1>
+  <form id="f">
+    <div class="row">
+      <div class="half">
+        <label>Område</label>
+        <select name="area">
+          <option value="">–</option>
+          <option>OCME</option>
+          <option>Kisters</option>
+          <option>Depalletizer</option>
+          <option>Coolpack</option>
+          <option>Jones</option>
+          <option>Fals</option>
+          <option>Övrigt</option>
+        </select>
+      </div>
+      <div class="half">
+        <label>Allvarlighetsgrad</label>
+        <select name="severity">
+          <option>low</option><option selected>medium</option><option>high</option><option>critical</option>
+        </select>
+      </div>
+    </div>
+
+    <label>Rubrik</label>
+    <input name="title" placeholder="Kort rubrik" required>
+
+    <label>Problem</label>
+    <textarea name="problem" rows="4" placeholder="Beskriv felet" required></textarea>
+
+    <label>Lösning</label>
+    <textarea name="resolution" rows="3" placeholder="Vad funkade (om känt)"></textarea>
+
+    <label>Rapportör (valfritt)</label>
+    <input name="reporter_name" placeholder="Namn eller signatur">
+
+    <label>Taggar (komma-separerade)</label>
+    <input name="tags" placeholder="ex: sensor, stopp, gejdrar">
+
+    <button type="submit">Skicka</button>
+    <div id="msg"></div>
+  </form>
+
+  <script>
+    const form = document.getElementById('f');
+    const msg  = document.getElementById('msg');
+    form.addEventListener('submit', async (e)=>{
+      e.preventDefault();
+      msg.textContent = '';
+      const data = Object.fromEntries(new FormData(form).entries());
+      const tags = (data.tags || "").split(",").map(s=>s.trim()).filter(Boolean);
+      const payload = {
+        area: data.area || null,
+        title: data.title?.trim(),
+        problem: data.problem?.trim(),
+        resolution: data.resolution?.trim() || "",
+        severity: data.severity || "medium",
+        tags,
+        reporter_name: data.reporter_name?.trim() || null
+      };
+      const userId = localStorage.getItem('userId') || (()=>{ const x='u_'+Math.random().toString(36).slice(2); localStorage.setItem('userId',x); return x; })();
+      try{
+        const r = await fetch('/api/incidents/report',{
+          method:'POST', headers:{'Content-Type':'application/json','x-user-id':userId},
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json();
+        if(!r.ok || !j.ok) throw new Error(j?.error || 'fel');
+        msg.innerHTML = `<p class="ok">✅ Sparat (id: ${j.id}). Tack!</p>`;
+        form.reset();
+      }catch(err){
+        msg.innerHTML = `<p class="err">❌ Kunde inte spara: ${err?.message||err}</p>`;
+      }
+    });
+  </script>
+</body>
+</html>
