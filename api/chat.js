@@ -298,11 +298,12 @@ Returnera strikt JSON med fälten i vårt schema.`;
 
   let out = await callLLM(system, user, 0.4, 800, history);
   out = normalizeKeys(out);
-  out.cards.coverage = 0;
-  out.cards.matched_headings = ["line_news", "incidents"];
-  out.cards.summary = out.cards.summary || `Status för ${label}`;
-  out.follow_up = out.follow_up || "Vill du filtrera på område eller skift?";
-  // --- Failsafe: säkerställ spoken/steps alltid finns ---
+out.cards.coverage = 0;
+out.cards.matched_headings = ["line_news", "incidents"];
+out.cards.summary = out.cards.summary || `Status för ${label}`;
+out.follow_up = out.follow_up || "Vill du filtrera på område eller skift?";
+
+// --- Failsafe: säkerställ spoken/steps alltid finns ---
 out = normalizeKeys(out);
 
 if (!out.spoken || out.spoken.trim().length < 2) {
@@ -327,7 +328,7 @@ if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
   const clean = (s) => (s || "").toString().replace(/\s+/g, " ").trim();
   const short = (s, n = 80) => {
     const t = clean(s || "");
-    return t.length > n ? t.slice(0, n - 1) + "…" : t;
+    return t.length > n ? t.slice(0, n - 1) + "…” : t;
   };
 
   // Ta sista segmentet i t.ex. "B/Tapp" => "TAPP"
@@ -348,21 +349,20 @@ if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
   if (ns.length) out.cards.steps = ns;
 }
 
-
-// --- TTS: tvinga rösten att läsa sammanfattningen, inte stegen ---
+// --- TTS: läs upp bara sammanfattningen ---
 out.meta = Object.assign({}, out.meta, {
-  speech: out.spoken,                 // primär tts-text
-  speech_source: "status_summary",    // (hjälper felsökning/logik)
-  tts: { text: out.spoken, priority: "spoken", allow_fallback: false } // bakåt/framåt-komp.
+  speech: out.spoken,
+  speech_source: "status_summary",
+  tts: { text: out.spoken, priority: "spoken", allow_fallback: false }
 });
 
-// (failsafe) om summary är tomt – spegla spoken dit också
+// (failsafe) om summary är tomt – spegla spoken
 if (!out.cards.summary || out.cards.summary.trim().length < 4) {
   out.cards.summary = out.spoken;
 }
 
-  return out;
-}
+return out;
+
 
 
 
