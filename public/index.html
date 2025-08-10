@@ -477,7 +477,7 @@ async function playSpeechHybrid(fullText) {
         const steps = Array.isArray(r.cards?.steps) ? r.cards.steps : [];
         resetSteps(steps);
         
-        // Läs alltid spoken-delen först
+        // Läs alltid spoken-delen först (hybrid TTS)
         await playSpeechHybrid(r.spoken || 'Okej.');
         
         // Läs steps ENDAST om backend inte säger att skippa dem
@@ -595,14 +595,39 @@ async function playSpeechHybrid(fullText) {
       if(!rafId) rafId = requestAnimationFrame(loop);
     }
 
+    // CHANGED: startLoop spelar hälsning först (i samma user-gesture), sedan startar lyssning
     async function startLoop(){
-      if(running) return; running=true;
-      startBtn.style.display='none'; stopBtn.style.display='inline-block';
-      try{
+      if(running) return; running = true;
+
+      state = 'THINKING';
+      setStatus(state,'Startar…');
+      startBtn.style.display='none';
+      stopBtn.style.display='inline-block';
+
+      try {
+        // 1) “Unlocka” ljud enligt autoplay-policy
+        try {
+          const tmp = new (window.AudioContext || window.webkitAudioContext)();
+          await tmp.resume().catch(()=>{});
+          try { await tmp.close(); } catch {}
+        } catch {}
+
+        // 2) Spela Jarvis-hälsning EN gång innan vi börjar lyssna
+        if (!hasGreeted && typeof playWelcomeGreeting === 'function') {
+          try {
+            await playWelcomeGreeting();
+            hasGreeted = true;
+          } catch (e) {
+            console.warn('Greeting failed:', e);
+          }
+        }
+
+        // 3) Initiera mic/visualizer och börja lyssna efter en kort paus
         await getMicStream();
         setStatus('LISTENING','Lyssnar… (bli tyst för att skicka)');
-        startListening();
-      }catch{
+        setTimeout(() => startListening(), 300);
+
+      } catch {
         output.insertAdjacentHTML('beforeend', "<div class='pill'>Mikrofon kunde inte startas (behörighet eller HTTPS?).</div>");
         running=false; startBtn.style.display='inline-block'; stopBtn.style.display='none';
       }
@@ -676,30 +701,27 @@ async function playSpeechHybrid(fullText) {
       target.searchParams.set('uid', uid);
       location.href = target.toString();
     });
+
+    // --- GPT-driven välkomsthälsning (kallas från startLoop)
     async function playWelcomeGreeting() {
-  try {
-    const res = await fetch('/api/greeting');
-    const { text } = await res.json();
+      try {
+        const res = await fetch('/api/greeting');
+        const { text } = await res.json();
 
-    // Om du redan använder min hybridspelare: byta till playSpeechHybrid(text)
-    if (typeof playSpeechHybrid === 'function') {
-      await playSpeechHybrid(text);
-    } else {
-      await speak(text); // fallback till ditt nuvarande speak()
+        if (typeof playSpeechHybrid === 'function') {
+          await playSpeechHybrid(text);
+        } else {
+          await speak(text);
+        }
+      } catch (e) {
+        console.warn("Greeting failed:", e);
+      }
     }
-  } catch (e) {
-    // Tyst fallback – ingen hälsning om något felar
-    console.warn("Greeting failed:", e);
-  }
-}
 
-// Kör automatiskt vid sidstart
-window.addEventListener('DOMContentLoaded', () => {
-  // Viktigt: vi sätter INTE running=true ännu, så VAD/lyssning triggas inte under hälsningen
-  playWelcomeGreeting();
-});
-
+    // Inga auto-startar pga autoplay-policy; hälsning triggas i startLoop
+    let hasGreeted = false;
 
   </script>
+
 </body>
 </html>
