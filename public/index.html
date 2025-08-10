@@ -80,7 +80,7 @@
     let lastSpokenText = "";
     let lastSpokenTextNorm = "";
     const ECHO_SUPPRESS_MS = 2500;      // extra hård filterperiod efter TTS
-    const LISTEN_DELAY_AFTER_TTS = 200;
+    const LISTEN_DELAY_AFTER_TTS = 350;
 
     // Stegvis uppläsning
     let stepQueue = [];
@@ -478,7 +478,7 @@ async function playSpeechHybrid(fullText) {
         resetSteps(steps);
         
         // Läs alltid spoken-delen först
-        await speak(r.spoken || 'Okej.');
+        await playSpeechHybrid(r.spoken || 'Okej.');
         
         // Läs steps ENDAST om backend inte säger att skippa dem
         if (steps.length && !shouldSkipSteps) {
