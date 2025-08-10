@@ -328,6 +328,17 @@ if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
   const merged = [...ns, ...is].filter(Boolean).slice(0,6);
   if (merged.length) out.cards.steps = merged;
 }
+// --- TTS: tvinga rösten att läsa sammanfattningen, inte stegen ---
+out.meta = Object.assign({}, out.meta, {
+  speech: out.spoken,                 // primär tts-text
+  speech_source: "status_summary",    // (hjälper felsökning/logik)
+  tts: { text: out.spoken, priority: "spoken", allow_fallback: false } // bakåt/framåt-komp.
+});
+
+// (failsafe) om summary är tomt – spegla spoken dit också
+if (!out.cards.summary || out.cards.summary.trim().length < 4) {
+  out.cards.summary = out.spoken;
+}
 
   return out;
 }
