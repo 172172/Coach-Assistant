@@ -328,14 +328,6 @@ if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
   const merged = [...ns, ...is].filter(Boolean).slice(0,6);
   if (merged.length) out.cards.steps = merged;
 }
-
-// --- TTS-hint: se till att rösten läser sammanfattningen ---
-out.meta = Object.assign({}, out.meta, { speech: out.spoken });
-
-// (valfritt skydd) om summary är tomt – spegla spoken dit också
-if (!out.cards.summary || out.cards.summary.trim().length < 4) {
-  out.cards.summary = out.spoken;
-}
 return out;
 
 
