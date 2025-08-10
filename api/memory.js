@@ -1,10 +1,10 @@
 // /api/memory.js
 // Enkel profil-minne i tabellen user_memory + OpenAI integration
 
-const { q } = require("./db.js");
+import { q } from "./db.js";
 
 // OpenAI API integration
-async function getOpenAIResponse(prompt, temperature = 0.7, maxTokens = 800) {
+export async function getOpenAIResponse(prompt, temperature = 0.7, maxTokens = 800) {
   try {
     // Detta är en placeholder - du behöver implementera din OpenAI-integration
     // Baserat på din setup, returnera ett JSON-svar eller text
@@ -32,7 +32,7 @@ async function getOpenAIResponse(prompt, temperature = 0.7, maxTokens = 800) {
   }
 }
 
-async function getMemory(userId) {
+export async function getMemory(userId) {
   try {
     const r = await q(`select user_id, line_name, updated_at from user_memory where user_id = $1`, [userId]);
     return r.rows?.[0] || null;
@@ -42,7 +42,7 @@ async function getMemory(userId) {
   }
 }
 
-async function upsertMemory(userId, patch = {}) {
+export async function upsertMemory(userId, patch = {}) {
   try {
     const { line_name = null } = patch;
     const r = await q(
@@ -61,9 +61,3 @@ async function upsertMemory(userId, patch = {}) {
     return { ok: false, error: e?.message || String(e) };
   }
 }
-
-module.exports = {
-  getOpenAIResponse,
-  getMemory,
-  upsertMemory
-};
