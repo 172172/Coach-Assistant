@@ -41,9 +41,12 @@ export default async function handler(req, res) {
 
     // --- Voice settings: mer mänsklig default, men styrbart via query ---
     const voice_settings = {
-      stability: clamp01(toNum(stability, 0.30)),
-      similarity_boost: clamp01(toNum(similarity, 0.95)),
-      style: clamp01(toNum(style, 0.85)),
+      // Lägre stability → mer variation och andning; höj om det blir för spretigt
+      stability: clamp01(toNum(stability, 0.40)),
+      // Hög similarity bevarar klonens karaktär
+      similarity_boost: clamp01(toNum(similarity, 0.85)),
+      // Stil/uttryck – ger mer energi/intonation
+      style: clamp01(toNum(style, 0.75)),
       use_speaker_boost: toBool(boost, true)
     };
 
