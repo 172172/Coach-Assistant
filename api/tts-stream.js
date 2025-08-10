@@ -40,19 +40,15 @@ export default async function handler(req, res) {
       `&output_format=${encodeURIComponent(output_format)}`;
 
     // --- Voice settings: mer mänsklig default, men styrbart via query ---
-    // Uppdatering: Lägre stability för naturlig variation (andning, tonfall), högre similarity och style för energi och mänsklighet
     const voice_settings = {
       // Lägre stability → mer variation och andning; höj om det blir för spretigt
-      stability: clamp01(toNum(stability, 0.3)),  // Uppdaterat default för mer naturlig, Grok-lik variation
+      stability: clamp01(toNum(stability, 0.40)),
       // Hög similarity bevarar klonens karaktär
-      similarity_boost: clamp01(toNum(similarity, 0.95)),  // Uppdaterat för bättre röstkaraktär
+      similarity_boost: clamp01(toNum(similarity, 0.85)),
       // Stil/uttryck – ger mer energi/intonation
-      style: clamp01(toNum(style, 0.85)),  // Uppdaterat för mer uttryck och levande intonation
+      style: clamp01(toNum(style, 0.75)),
       use_speaker_boost: toBool(boost, true)
     };
-
-    // Liten slumpfaktor för variation per call (för att kännas mer mänskligt)
-    voice_settings.stability = Math.max(0.25, Math.min(0.35, voice_settings.stability + (Math.random() * 0.1 - 0.05)));
 
     const payload = {
       text: String(text || "Okej."),
