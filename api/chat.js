@@ -1,7 +1,6 @@
 // /api/chat.js
 // Kollegig AI-coach: identity, smalltalk, conversation-memory, rewrite-intents (simplify/repeat/summary/examples),
 // general-knowledge (jobbrelaterat), toolbelt (math/units), RAG (definition/operativt från manualen)
-// + Status/Nyheter (incidents + line_news)
 
 import { q } from "./db.js";
 import fetch from "node-fetch";
@@ -11,7 +10,7 @@ import { getMemory, upsertMemory } from "./memory.js";
 async function embed(text) {
   const r = await fetch("https://api.openai.com/v1/embeddings", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    headers: { "Content-Type": "application/json", Authorization: Bearer ${process.env.OPENAI_API_KEY} },
     body: JSON.stringify({ model: "text-embedding-3-small", input: text })
   });
   const j = await r.json();
@@ -43,7 +42,7 @@ function parseSaveCommand(s = "") {
   if (!/\b(spara|kom ihag|kom ihåg|remember)\b/.test(t)) return null;
   const m = t.match(/\b(linje|line)\s*([a-z0-9\-_:]+)\b/i) || t.match(/\b(linje|line)\b.*?\b([a-z0-9\-_:]+)\b/i);
   const token = m?.[2] ? m[2].toUpperCase() : null;
-  const line_name = token ? `Linje ${token.replace(/^linje/i, "").trim()}` : null;
+  const line_name = token ? Linje ${token.replace(/^linje/i, "").trim()} : null;
   return { intent: "save", line_name };
 }
 function isDefinitionQuery(s = "") {
@@ -117,11 +116,11 @@ function parseConversationMemoryIntent(s = "") {
 function parseRewriteIntent(s = "") {
   const t = norm(s);
 
-  // tempo
+  // tempo (vi skickar bara tillbaka meta = pace, frontenden tar det)
   if (/\b(langsammare|saktare|saktare|ta det lugnare|prata langsammare|kora langsammare)\b/.test(t)) return { type: "pace_slow" };
   if (/\b(snabbare|fortare|hastigare|kora snabbare|tempo upp)\b/.test(t)) return { type: "pace_fast" };
 
-  // upprepa
+  // uttryck för “säg om det där”
   if (/\b(upprepa|repetera|sag det igen|säg det igen|ta det en gang till|ta det en gång till)\b/.test(t)) return { type: "repeat" };
 
   // förenkla / korta / sammanfatta
@@ -133,15 +132,20 @@ function parseRewriteIntent(s = "") {
   if (/\b(exempel|ge exempel|case|scenario)\b/.test(t)) return { type: "examples" };
   if (/\b(lista|punktlista|punkter|steglista)\b/.test(t)) return { type: "bulletify" };
 
-  // förtydliga/switch topic
+  // förtydliga det sista svaret
   if (/\b(jag fattade inte|jag forstod inte|oklart|kan du forklara igen)\b/.test(t)) return { type: "simplify" };
+
+  // GROK: Ny intent för switch topic / off-topic
   if (/\b(vanta|glöm det|istället|byt ämne|ny fråga|hoppa över)\b/.test(t)) return { type: "switch_topic" };
+
+  // GROK: Auto-detect för missförstånd
   if (/\b(vad\?|förstår inte|vänta vad|hur menar du|huh)\b/.test(t)) return { type: "clarify_last" };
 
   return null;
 }
 
 async function rewriteFromLast(userText, history, userId) {
+  // GROK: Ändrat för att inkludera senaste user-frågan också för bättre kontext
   let lastAssistant = lastAssistantSpoken(history || []);
   let lastUser = lastUserQuestion(history || []);
   if (!lastAssistant || !lastUser) {
@@ -166,7 +170,7 @@ function evalMath(expr) {
   if (e.length > 120) throw new Error("Expr too long");
   if (!MATH_SAFE.test(e)) throw new Error("Unsafe expr");
   // eslint-disable-next-line no-new-func
-  const val = Function(`"use strict"; return (${e});`)();
+  const val = Function("use strict"; return (${e});)();
   if (typeof val !== "number" || !isFinite(val)) throw new Error("Bad result");
   return val;
 }
@@ -202,49 +206,34 @@ function convertUnits({ val, from, to }) {
   throw new Error("Unsupported units");
 }
 
-/* ================= Status/Nyheter intents (NY) ================= */
-function parseStatusQuery(s = "") {
-  const t = norm(s);
-  const time =
-    /\bidag\b/.test(t) ? "today" :
-    /\bigar|igar|ig[aå]r\b/.test(t) ? "yesterday" :
-    /\bdenna vecka|den har veckan|den här veckan|veckan|vecka\b/.test(t) ? "week" :
-    null;
-
-  const statusHit =
-    /\b(vad har hant|vad har h[aä]nt|status|problem|fel|stopp|nyheter|skift|skiftoverlamning|skiftov|overlamning|underhall|underh[aå]ll)\b/.test(t) ||
-    /\b(vad har dom haft for problem idag|problem idag|hur har det gatt idag)\b/.test(t);
-
-  if (statusHit) return { window: time || "today" };
-  return null;
-}
-
 /* ================= Retrieval (RAG) ================= */
-async function retrieveContext(userText, k = 8, userId) {
+async function retrieveContext(userText, k = 8, userId) {  // GROK: Lade till userId för profilfiltrering
   const v = await embed(userText);
   const vec = toPgVector(v);
 
+  // GROK: Hybrid-sök: embedding + keyword för bättre träffar
   const keywords = userText.split(/\s+/).filter(w => w.length > 3).map(norm).join(" & ");
-  const keywordClause = keywords ? ` AND to_tsvector('swedish', c.chunk || ' ' || c.heading) @@ to_tsquery('swedish', '${keywords}')` : "";
+  const keywordClause = keywords ?  AND to_tsvector('swedish', c.chunk || ' ' || c.heading) @@ to_tsquery('swedish', '${keywords}') : "";
 
+  // GROK: Filtrera på user-profil om linje finns
   const mem = await getMemory(userId);
-  const lineFilter = mem?.line_name ? ` AND (c.heading ILIKE '%${mem.line_name}%' OR c.chunk ILIKE '%${mem.line_name}%')` : "";
+  const lineFilter = mem?.line_name ?  AND (c.heading ILIKE '%${mem.line_name}%' OR c.chunk ILIKE '%${mem.line_name}%') : "";
 
-  const sql = `
+  const sql = 
     with active as (select id from manual_docs where is_active = true order by version desc limit 1)
     select c.heading, c.chunk, (1.0 - (c.embedding <=> $1::vector)) as score
     from manual_chunks c
     where c.doc_id = (select id from active)${keywordClause}${lineFilter}
     order by c.embedding <=> $1::vector asc
     limit $2
-  `;
+  ;
   const r = await q(sql, [vec, k]);
   const rows = r.rows || [];
   const scores = rows.map(x => Number(x.score) || 0);
   const base = scores.length ? scores.reduce((a,b)=>a+b,0)/scores.length : 0;
   const headingBonus = Math.min(0.1, (new Set(rows.map(r => r.heading)).size - 1) * 0.025);
   const coverage = Math.max(0, Math.min(1, base + headingBonus));
-  const context = rows.map(x => `### ${x.heading}\n${x.chunk}`).join("\n\n---\n\n");
+  const context = rows.map(x => ### ${x.heading}\n${x.chunk}).join("\n\n---\n\n");
   const matchedHeadings = [...new Set(rows.map(x => x.heading))].slice(0, 6);
   return { context, coverage, matchedHeadings, scores };
 }
@@ -256,8 +245,12 @@ function passesOperativeGate({ coverage, matchedHeadings, scores }) {
 
 /* ================= LLM (strict JSON) ================= */
 async function callLLM(system, user, temp = 0.6, maxTokens = 1600, history = []) {
-  let messages = [{ role: "system", content: system }];
+  // GROK: Ändrat för att inkludera history som messages för bättre kontext/minne
+  let messages = [
+    { role: "system", content: system }
+  ];
 
+  // Lägg till senaste 5 turns från history
   if (history && history.length) {
     messages = messages.concat(
       history.slice(-5).map(h => [
@@ -267,27 +260,28 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1600, history = [])
     );
   }
 
+  // GROK: Auto-sammanfattning om lång history
   if (history.length > 10) {
     const summarySystem = "Sammanfatta samtalet kort: fokusera på nyckelfrågor och svar.";
-    const summaryUser = history.map(h => `User: ${h.user}\nAI: ${h.assistant?.spoken}`).join("\n");
-    const summary = await fetch("https://api.openai.com/v1/chat/completions", {
+    const summaryUser = history.map(h => User: ${h.user}\nAI: ${h.assistant?.spoken}).join("\n");
+    const summary = await fetch("https://api.openai.com/v1/chat/completions", {  // Snabb call för summary
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+      headers: { "Content-Type": "application/json", Authorization: Bearer ${process.env.OPENAI_API_KEY} },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: "gpt-4o-mini",  // Billigare modell för summary
         temperature: 0.3,
         max_tokens: 200,
         messages: [{ role: "system", content: summarySystem }, { role: "user", content: summaryUser }]
       })
     }).then(r => r.json()).then(j => j.choices[0].message.content);
-    messages.push({ role: "system", content: `Tidigare i samtalet: ${summary}` });
+    messages.push({ role: "system", content: Tidigare i samtalet: ${summary} });
   }
 
   messages.push({ role: "user", content: user });
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+    headers: { "Content-Type": "application/json", Authorization: Bearer ${process.env.OPENAI_API_KEY} },
     body: JSON.stringify({
       model: "gpt-4o",
       temperature: temp,
@@ -314,14 +308,14 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1600, history = [])
 async function createGapDraft({ userId, question, coverage, matchedHeadings, scores }) {
   try {
     if (process.env.GAP_DRAFTS !== "1") return null;
-    const system = `Skapa ett UTKAST för ett nytt manualavsnitt när täckning saknas. Använd "[PLATS FÖR VÄRDE]" för alla tal. Returnera JSON med title, heading, summary, outline[], md.`;
-    const user = `Fråga: "${question}"\nRubriker: ${JSON.stringify(matchedHeadings||[])}\nCoverage: ${coverage.toFixed(3)}`;
+    const system = Skapa ett UTKAST för ett nytt manualavsnitt när täckning saknas. Använd "[PLATS FÖR VÄRDE]" för alla tal. Returnera JSON med title, heading, summary, outline[], md.;
+    const user = Fråga: "${question}"\nRubriker: ${JSON.stringify(matchedHeadings||[])}\nCoverage: ${coverage.toFixed(3)};
     const draft = await callLLM(system, user, 0.2, 700);
     const r = await q(
-      `insert into kb_gaps(status,user_id,question,intent,coverage,matched_headings,scores,gap_reason,
+      insert into kb_gaps(status,user_id,question,intent,coverage,matched_headings,scores,gap_reason,
                            draft_title,draft_heading,draft_md,draft_outline,priority,created_by_ai)
        values ('open',$1,$2,'operational',$3,$4,$5,'låg täckning i manualen',$6,$7,$8,$9::jsonb,0,true)
-       returning id`,
+       returning id,
       [userId, question, coverage, matchedHeadings||[], scores||[], draft?.title||null, draft?.heading||null, draft?.md||null, JSON.stringify(draft?.outline||[])]
     );
     return r?.rows?.[0]?.id || null;
@@ -333,8 +327,8 @@ async function logInteraction({ userId, question, reply, lane, intent, coverage,
   try {
     if (process.env.LOG_CONVO !== "1") return;
     await q(
-      `insert into messages(user_id, asked_at, question, content, reply_json, smalltalk, is_operational, coverage, matched_headings, lane, intent)
-       values ($1, now(), $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
+      insert into messages(user_id, asked_at, question, content, reply_json, smalltalk, is_operational, coverage, matched_headings, lane, intent)
+       values ($1, now(), $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10),
       [
         userId,
         question,
@@ -354,11 +348,11 @@ async function logInteraction({ userId, question, reply, lane, intent, coverage,
 async function getRecentHistoryFromDB(userId, limit = 50) {
   try {
     const r = await q(
-      `select asked_at, question, reply_json
+      select asked_at, question, reply_json
        from messages
        where user_id = $1
        order by asked_at asc
-       limit $2`,
+       limit $2,
       [userId, limit]
     );
     const rows = r.rows || [];
@@ -425,46 +419,6 @@ function lastAssistantSpoken(history = []) {
   return entries.length ? entries[entries.length - 1].assistant.spoken : "";
 }
 
-/* ================== Status/nyheter – DB fetchers (NY) ================== */
-function windowSQL(where) {
-  if (where === "yesterday") {
-    return `(reported_at at time zone 'Europe/Stockholm')::date = ((now() at time zone 'Europe/Stockholm')::date - interval '1 day')::date`;
-  }
-  if (where === "week") {
-    return `(reported_at at time zone 'Europe/Stockholm')::date >= ((now() at time zone 'Europe/Stockholm')::date - interval '6 days')::date`;
-  }
-  return `(reported_at at time zone 'Europe/Stockholm')::date = (now() at time zone 'Europe/Stockholm')::date`;
-}
-function windowSQLNews(where) {
-  if (where === "yesterday") {
-    return `effective_date = ((now() at time zone 'Europe/Stockholm')::date - interval '1 day')::date`;
-  }
-  if (where === "week") {
-    return `effective_date >= ((now() at time zone 'Europe/Stockholm')::date - interval '6 days')::date`;
-  }
-  return `effective_date = (now() at time zone 'Europe/Stockholm')::date`;
-}
-async function fetchIncidentsWindow(win = "today") {
-  const r = await q(
-    `select id, reported_at, area, title, problem, resolution, severity, status, tags
-     from incidents
-     where ${windowSQL(win)}
-     order by reported_at desc
-     limit 200`
-  );
-  return r.rows || [];
-}
-async function fetchNewsWindow(win = "today") {
-  const r = await q(
-    `select id, created_at, effective_date, section, title, body, tags, created_by
-     from line_news
-     where ${windowSQLNews(win)}
-     order by created_at desc
-     limit 200`
-  );
-  return r.rows || [];
-}
-
 /* ================= Handler ================= */
 export default async function handler(req, res) {
   try {
@@ -504,7 +458,7 @@ export default async function handler(req, res) {
       const up = await upsertMemory(userId, patch);
       const saved = up?.row || patch;
       const reply = normalizeKeys({
-        spoken: saved?.line_name ? `Klart boss! Jag sparade din linje som “${saved.line_name}”.` : "Schysst, jag sparade uppgiften.",
+        spoken: saved?.line_name ? Klart boss! Jag sparade din linje som “${saved.line_name}”. : "Schysst, jag sparade uppgiften.",
         need: { clarify: false, question: "" },
         cards: { summary: "Profil uppdaterad.", steps: [], explanation: "", pitfalls: [], simple: saved?.line_name || "", pro: "", follow_up: "Vill du lägga in fler uppgifter?", coverage: 0, matched_headings: [] },
         follow_up: "Vill du lägga in fler uppgifter?"
@@ -512,12 +466,13 @@ export default async function handler(req, res) {
       await logInteraction({ userId, question: userText, reply, lane: "profile", intent: "save", coverage: 0, matchedHeadings: [] });
       return res.status(200).json({ reply });
     }
+
     if (isProfileQuery(userText)) {
       const mem = await getMemory(userId);
       const reply = normalizeKeys(
         mem?.line_name
-          ? { spoken: `Din linje är ${mem.line_name}. Fattar du, eller ska jag påminna om nåt annat?`, need: { clarify: false, question: "" },
-              cards: { summary: `Profiluppgift: ${mem.line_name}.`, steps: [], explanation: "", pitfalls: [], simple: mem.line_name, pro: "", follow_up: "Vill du att jag minns något mer?", coverage: 0, matched_headings: [] },
+          ? { spoken: Din linje är ${mem.line_name}. Fattar du, eller ska jag påminna om nåt annat?, need: { clarify: false, question: "" },
+              cards: { summary: Profiluppgift: ${mem.line_name}., steps: [], explanation: "", pitfalls: [], simple: mem.line_name, pro: "", follow_up: "Vill du att jag minns något mer?", coverage: 0, matched_headings: [] },
               follow_up: "Vill du att jag minns något mer?" }
           : { spoken: "Jag saknar info om din linje. Säg till om jag ska spara den, typ “Spara linje 65”.",
               need: { clarify: true, question: "Ska jag spara din linje? Säg: “Spara linje 65”." },
@@ -541,16 +496,16 @@ export default async function handler(req, res) {
       if (sourceHistory && sourceHistory.length) {
         if (conv.type === "first") {
           const first = firstUserQuestion(sourceHistory);
-          if (first) spoken = `Din första fråga var: “${first}”. Vad sägs om att bygga på det?`;
+          if (first) spoken = Din första fråga var: “${first}”. Vad sägs om att bygga på det?;
         } else if (conv.type === "last" || conv.type === "last_user") {
           const last = lastUserQuestion(sourceHistory);
-          if (last) spoken = (conv.type === "last_user") ? `Du sa: “${last}”.` : `Din senaste fråga var: “${last}”. Fattar du vad jag menar?`;
+          if (last) spoken = (conv.type === "last_user") ? Du sa: “${last}”. : Din senaste fråga var: “${last}”. Fattar du vad jag menar?;
         } else if (conv.type === "assistant_last") {
           const lastA = lastAssistantSpoken(sourceHistory);
-          spoken = lastA ? `Jag sa: “${lastA}”. Ska jag bryta ner det mer?` : "Jag har inget tidigare svar att upprepa ännu.";
+          spoken = lastA ? Jag sa: “${lastA}”. Ska jag bryta ner det mer? : "Jag har inget tidigare svar att upprepa ännu.";
         } else if (conv.type === "summary") {
           const entries = sortByTsIfAny(sourceHistory).map(h => h?.user).filter(Boolean).slice(-6);
-          spoken = entries.length ? `Vi har snackat om: ${entries.join(", ")}. Vad kör vi vidare på?` : "Vi har inte pratat om något än.";
+          spoken = entries.length ? Vi har snackat om: ${entries.join(", ")}. Vad kör vi vidare på? : "Vi har inte pratat om något än.";
         }
       }
 
@@ -564,9 +519,10 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
-    /* -------- Lane: Rewrite intents -------- */
+    /* -------- Lane: Rewrite intents (förklara enklare / upprepa / sammanfatta / exempel / tempo) -------- */
     const rw = parseRewriteIntent(userText);
     if (rw) {
+      // Hämta källsvar (senaste assistent + user)
       const base = await rewriteFromLast(userText, history, userId);
       if (!base.lastAssistant) {
         const fallback = normalizeKeys({
@@ -615,7 +571,7 @@ export default async function handler(req, res) {
 
       if (rw.type === "clarify_last") {
         const reply = normalizeKeys({
-          spoken: `Du frågade om “${base.lastUser}” och jag sa “${base.lastAssistant}”. Fattar du nu, eller ska jag förklara annorlunda?`,
+          spoken: Du frågade om “${base.lastUser}” och jag sa “${base.lastAssistant}”. Fattar du nu, eller ska jag förklara annorlunda?,
           need: { clarify: false, question: "" },
           cards: { summary: "Förtydligande.", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
           follow_up: ""
@@ -624,13 +580,14 @@ export default async function handler(req, res) {
         return res.status(200).json({ reply });
       }
 
-      const system = `Du är en chill svensk kollega på golvet. Omskriv senaste svar som en polare: vardagligt, med 'jag', slang som 'fattar', 'kör vi'. Var kort, pratvänlig. Returnera strikt JSON.`;
+      // Anropa LLM för att omskriva base
+      const system = Du är en chill svensk kollega på golvet. Omskriv senaste svar som en polare: vardagligt, med 'jag', slang som 'fattar', 'kör vi'. Var kort, pratvänlig. Returnera strikt JSON.;  // GROK: Uppdaterad prompt för ton
       const user = JSON.stringify({
         intent: rw.type,
         base: base.lastAssistant,
         previous_question: base.lastUser
       });
-      let out = await callLLM(system, user, 0.7, 800, history);
+      let out = await callLLM(system, user, 0.7, 800, history);  // GROK: Högre temp för variation, inkl history
       out = normalizeKeys(out);
       out.cards.coverage = 0; out.cards.matched_headings = [];
       out.follow_up = out.follow_up || (rw.type === "simplify" ? "Vill du ha ett exempel också?" :
@@ -643,9 +600,9 @@ export default async function handler(req, res) {
 
     /* -------- Lane: Smalltalk -------- */
     if (isSmalltalk(userText)) {
-      const system = `Du är en chill svensk kollega på fabriksgolvet för Linje 65 – snacka som en polare: vardagligt, kort, med humor/empati och slang. Låt det kännas naturligt. Returnera strikt JSON.`;
-      const user = `Småprat: """${userText}"""`;
-      let out = await callLLM(system, user, 0.8, 600, history);
+      const system = Du är en chill svensk kollega på fabriksgolvet för Linje 65 – snacka som en polare: vardagligt, kort, med humor/empati och slang. Låt det kännas naturligt. Returnera strikt JSON.;  // GROK: Uppdaterad för ton
+      const user = Småprat: """${userText}""";
+      let out = await callLLM(system, user, 0.8, 600, history);  // GROK: Högre temp, inkl history
       out = normalizeKeys(out);
       out.cards.coverage = 0; out.cards.matched_headings = [];
       if (!out.spoken) out.spoken = "Allt lugnt här – på tårna. Vad kör vi på idag? 😊";
@@ -660,7 +617,7 @@ export default async function handler(req, res) {
         const val = convertUnits(unitReq);
         const rounded = Math.abs(val) < 1e6 ? +(Math.round(val * 1000) / 1000) : val;
         const reply = normalizeKeys({
-          spoken: `${unitReq.val} ${unitReq.from} är ${rounded} ${unitReq.to}. Schysst, eller hur?`,
+          spoken: ${unitReq.val} ${unitReq.from} är ${rounded} ${unitReq.to}. Schysst, eller hur?,
           need: { clarify: false, question: "" },
           cards: { summary: "Omvandling", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
           follow_up: ""
@@ -674,7 +631,7 @@ export default async function handler(req, res) {
         const val = evalMath(userText);
         const rounded = Math.abs(val) < 1e9 ? +(Math.round(val * 1e6) / 1e6) : val;
         const reply = normalizeKeys({
-          spoken: `Det blir ${rounded}. Fattar du hur jag räknade?`,
+          spoken: Det blir ${rounded}. Fattar du hur jag räknade?,
           need: { clarify: false, question: "" },
           cards: { summary: "Beräkning", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
           follow_up: ""
@@ -684,53 +641,15 @@ export default async function handler(req, res) {
       } catch {}
     }
 
-    /* -------- Lane: Status/Nyheter (NY) -------- */
-    const statusIntent = parseStatusQuery(userText);
-    if (statusIntent) {
-      const win = statusIntent.window || "today";
-      const [ incidents, news ] = await Promise.all([
-        fetchIncidentsWindow(win),
-        fetchNewsWindow(win)
-      ]);
-
-      const brief = {
-        window: win,
-        incidents_count: incidents.length,
-        incidents_by_severity: incidents.reduce((acc, x)=>{ acc[x.severity||"unknown"]=(acc[x.severity||"unknown"]||0)+1; return acc; },{}),
-        incidents_by_area: incidents.reduce((acc, x)=>{ const k=(x.area||"Övrigt"); acc[k]=(acc[k]||0)+1; return acc; },{}),
-        sample: incidents.slice(0,20).map(x=>({ when:x.reported_at, area:x.area, title:x.title, problem:x.problem, resolution:x.resolution, severity:x.severity, status:x.status })),
-        news_count: news.length,
-        news_sections: news.reduce((acc,x)=>{ acc[x.section]=(acc[x.section]||0)+1; return acc; },{}),
-        news_sample: news.slice(0,20).map(x=>({ when:x.effective_date || x.created_at, section:x.section, title:x.title, body:x.body }))
-      };
-
-      const system = `
-Du är en svensk kollega på Linje 65. Sammanfatta läget kort och tydligt baserat på incidents (fel/åtgärder) och line_news (skift/underhåll/chefer).
-- Prioritera kritiska/allvarliga stopp först och nämn område (OCME/Kisters/…).
-- "spoken": 2–4 meningar, pratvänligt.
-- "cards.steps": upp till 3 punkter över viktigaste problem/åtgärder.
-- Om inga händelser: säg det rakt ut.
-Returnera strikt JSON (spoken, need, cards{...}, follow_up).`.trim();
-
-      const user = JSON.stringify(brief);
-      let out = await callLLM(system, user, 0.3, 800, history);
-      out = normalizeKeys(out);
-      out.cards.coverage = 1;          // bygger inte på manualen
-      out.cards.matched_headings = []; // inga manualrubriker
-      out.follow_up = out.follow_up || (win === "today" ? "Vill du se gårdagens också?" : "Vill du att jag jämför med idag?");
-      await logInteraction({ userId, question: userText, reply: out, lane: "status", intent: `status_${win}`, coverage: 1, matchedHeadings: [] });
-      return res.status(200).json({ reply: out });
-    }
-
     /* -------- Lane: General knowledge (jobbrelaterat, ej parametrar) -------- */
     if (isGeneralManufacturingQuery(userText)) {
-      const system = `
+      const system = 
 Du är en chill svensk kollega. Svara kort (1–4 meningar) på allmänna produktionsfrågor (Lean/OEE etc.).
 - Ge principer och enkla exempel, som en polare på golvet.
 - Ge INTE lokala parametrar. Hänvisa till manualen om behövs.
-Returnera strikt JSON.`.trim();
-      const user = `Fråga: """${userText}"""`;
-      let out = await callLLM(system, user, 0.6, 700, history);
+Returnera strikt JSON.;  // GROK: Uppdaterad för ton
+      const user = Fråga: """${userText}""";
+      let out = await callLLM(system, user, 0.6, 700, history);  // GROK: Inkl history
       out = normalizeKeys(out);
       out.cards.coverage = 0;
       out.cards.matched_headings = [];
@@ -740,16 +659,16 @@ Returnera strikt JSON.`.trim();
     }
 
     /* -------- Lane: RAG (definition / operativt) -------- */
-    const { context, coverage, matchedHeadings, scores } = await retrieveContext(userText, 8, userId);
+    const { context, coverage, matchedHeadings, scores } = await retrieveContext(userText, 8, userId);  // GROK: Passar userId för filtrering
     const definitionMode = isDefinitionQuery(userText);
 
-    const system = `
+    const system = 
 Du är en chill svensk kollega för Linje 65. Operativa råd från ManualContext – snacka som en erfaren operatör med 'jag', vardagsspråk.
 - Definitioner: kort, inga påhitt.
 - Steg: endast vid stark täckning.
-Returnera strikt JSON.`.trim();
+Returnera strikt JSON.;  // GROK: Uppdaterad för ton
 
-    const user = `
+    const user = 
 ManualContext:
 ${context || "(tom)"}
 
@@ -763,9 +682,9 @@ Instruktioner:
 - För operativa: steg bara vid stark täckning; annars precisera.
 - Vid låg coverage: föreslå allmän kunskap som fallback.
 Schema:
-{"spoken": string, "need": {"clarify": boolean, "question"?: string}, "cards": {"summary": string, "steps": string[], "explanation": string, "pitfalls": string[], "simple": string, "pro": string, "follow_up": string, "coverage": number, "matched_headings": string[]}, "follow_up": string}`.trim();
+{"spoken": string, "need": {"clarify": boolean, "question"?: string}, "cards": {"summary": string, "steps": string[], "explanation": string, "pitfalls": string[], "simple": string, "pro": string, "follow_up": string, "coverage": number, "matched_headings": string[]}, "follow_up": string}.trim();
 
-    let out = await callLLM(system, user, 0.6, 1600, history);
+    let out = await callLLM(system, user, 0.6, 1600, history);  // GROK: Inkl history
     out = normalizeKeys(out);
 
     if (!out.cards.matched_headings.length) out.cards.matched_headings = matchedHeadings;
@@ -775,6 +694,7 @@ Schema:
     const defSignalOK = definitionMode && (coverage >= 0.35 || matchedHeadings.length >= 1);
 
     if (!operativeOK && !defSignalOK) {
+      // GROK: Bättre fallback till general om möjligt
       if (isGeneralManufacturingQuery(userText)) {
         out.spoken = "Jag har inte exakt från manualen, men generellt... " + (out.spoken || "Låt mig förklara principen.");
       } else {
