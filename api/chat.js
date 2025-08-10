@@ -1,4 +1,4 @@
-// Förbättrad Coach Assistant - Digital kollega för Linje65
+ // Förbättrad Coach Assistant - Digital kollega för Linje65
 
 import { getOpenAIResponse } from './memory.js';
 import { searchKnowledge, q } from './db.js';
