@@ -36,4 +36,3 @@ export async function searchKnowledge(query) {
     return "Kunde inte söka i kunskapsdatabasen just nu.";
   }
 }
- 
