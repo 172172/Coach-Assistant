@@ -1,4 +1,4 @@
-// /api/news/append.js
+// /api/news/append.js 
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
