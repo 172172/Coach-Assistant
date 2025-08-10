@@ -273,66 +273,79 @@ async function buildStatusReply({ news = [], label = "senaste veckan", history =
     tags: Array.isArray(n.tags) ? n.tags : []
   }));
 
-  // Förbättrad system-prompt för mer detaljerat berättande
+  // System-prompt som ENDAST omformulerar, inte lägger till information
   const system = `
-Du är en erfaren operatör som berättar för kollegan vad som hänt ${label}. Prata som en kompis på golvet:
+Du är en erfaren operatör som berättar för kollegan vad som hänt ${label}.
+
+VIKTIGT: Du får ENDAST omformulera språket i den exakta informationen som finns. Lägg ALDRIG till detaljer som inte finns i rådatan.
+
+OMFORMULERING AV SPRÅK:
+- "allt gick åt skogen" → "det blev problem"
+- "annat skit" → "andra komponenter"  
+- "krånglade" → "hade problem"
+- "strulade" → "fungerade inte"
 
 STIL:
-- Vardagligt svenskt språk, som mellan kollegor
-- Använd "vi", "det", "grabben/tjejen" etc. 
-- Berätta UTFÖRLIGT vad som hänt - detaljer som påverkar jobbet
-- Gör det levande och engagerande, men informativt
-- Nämn specifika händelser, inte bara allmänna intryck
+- Vardagligt svenskt språk, men professionellt
+- Använd "vi", "det" 
+- Omformulera slang till bättre språk
+- Berätta ENDAST vad som faktiskt står i rådatan
 
 STRUKTUR:
-- spoken: 3-6 meningar som berättar vad som FAKTISKT hänt, med detaljer
-- steps: Alla viktiga händelser som punkter: "OMRÅDE: Vad som hände i detalj"
-- Prioritera allt som påverkar drift/produktion/kvalitet
+- spoken: Sammanfatta händelserna med omformulerat språk
+- steps: Lista händelserna med omformulerat språk
 
-EXEMPEL PÅ TON:
-- "Vi hade lite trubbel på Tapp när formatbytet krånglade..."
-- "Underhållsteamet bytte sensorn på OCME igår morgon..."  
-- "Dagskiftet rapporterade att vi fick stopp på grund av..."
-- "Det blev lite rörigt när gejdrarna behövde justeras..."
+EXEMPEL:
+Rådata: "Allt gick åt skogen, vi fick byta givare och annat skit"
+Omformat: "Det blev problem, vi fick byta givare och andra komponenter"
 
-Var SPECIFIK om vad som hänt, inte bara känslan. Returnera strikt JSON.`;
+Returnera strikt JSON. Hitta ALDRIG på information som inte finns i rådatan.`;
 
   const user = `
-Berätta utförligt vad som hänt ${label} för en kollega.
+Omformulera språket i denna rådata från operatörer ${label}:
 
-NYHETER (${newsData.length} st):
+RÅDATA (${newsData.length} st):
 ${newsData.map(n => `${n.when} | ${n.area}${n.shift ? ` (Skift ${n.shift})` : ""} | ${n.title || "Uppdatering"}: ${n.body}`).join("\n")}
 
-Fokus: Berätta SPECIFIKT vad som hänt - operatörerna vill veta detaljerna!`;
+Omformulera ENDAST språket - lägg inte till information som inte finns i rådatan.`;
 
-  let out = await callLLM(system, user, 0.4, 1000, history); // Lägre temp för mer faktafokus, mer tokens för detaljer
+  let out = await callLLM(system, user, 0.2, 1000, history); // Mycket låg temp för att undvika fantasi
   out = normalizeKeys(out);
 
-  // Failsafe med mer detaljerat vardagsspråk
-  if (!out.spoken || out.spoken.trim().length < 20) {
+  // Failsafe som också endast omformulerar utan att lägga till
+  if (!out.spoken || out.spoken.trim().length < 10) {
     if (newsData.length === 1) {
       const item = newsData[0];
-      out.spoken = `En grej som hände ${label}: ${item.area} ${item.shift ? `på skift ${item.shift}` : ""} - ${item.body || item.title}. Annars ganska lugnt.`;
+      // Enkel omformulering utan att lägga till information
+      let body = item.body || item.title || "";
+      body = body.replace(/allt gick åt skogen/gi, "det blev problem")
+                 .replace(/annat skit/gi, "andra komponenter")  
+                 .replace(/krånglade/gi, "hade problem")
+                 .replace(/strulade/gi, "fungerade inte");
+      
+      out.spoken = `${label}: ${item.area} ${item.shift ? `på skift ${item.shift}` : ""} - ${body}.`;
     } else if (newsData.length > 1) {
       const areas = [...new Set(newsData.map(n => n.area))];
-      out.spoken = `${newsData.length} grejer som hände ${label}, mest på ${areas.slice(0,2).join(" och ")}. ${newsData[0].body ? newsData[0].body.split('.')[0] + '...' : 'Lite mixat med underhåll och körning.'}`;
-    } else {
-      out.spoken = `Helt okej ${label}! Inga stora händelser att rapportera.`;
+      out.spoken = `${newsData.length} händelser ${label} på ${areas.slice(0,2).join(" och ")}.`;
     }
   }
 
-  // Förbättra steps med alla viktiga händelser
+  // Steps med endast omformulerat språk från rådata
   if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
     const steps = [];
     
-    // Ta med alla nyheter som är viktiga
     newsData.forEach(news => {
       const area = (news.area || "").split('/').pop() || news.area || "Okänt";
-      const time = news.when.split(' ')[0]; // Bara datum
+      const time = news.when.split(' ')[0];
       const shift = news.shift ? ` (Skift ${news.shift})` : "";
-      const content = news.body || news.title || "Uppdatering";
+      let content = news.body || news.title || "Uppdatering";
       
-      // Korta ner om för långt, men behåll viktiga detaljer
+      // Omformulera endast språket, inte innehållet
+      content = content.replace(/allt gick åt skogen/gi, "det blev problem")
+                      .replace(/annat skit/gi, "andra komponenter")
+                      .replace(/krånglade/gi, "hade problem") 
+                      .replace(/strulade/gi, "fungerade inte");
+      
       const shortContent = content.length > 80 ? content.slice(0,75) + "..." : content;
       steps.push(`${area.toUpperCase()}${shift}: ${time} - ${shortContent}`);
     });
@@ -342,11 +355,15 @@ Fokus: Berätta SPECIFIKT vad som hänt - operatörerna vill veta detaljerna!`;
     }
   }
 
-  // Lägg till metadata för TTS
+  // TTS för spoken text
   out.meta = Object.assign({}, out.meta, {
     speech: out.spoken,
     speech_source: "status_summary", 
-    tts: { text: out.spoken, priority: "spoken", allow_fallback: false }
+    tts: { 
+      text: out.spoken, 
+      priority: "spoken", 
+      allow_fallback: false
+    }
   });
 
   out.cards.coverage = 0;
