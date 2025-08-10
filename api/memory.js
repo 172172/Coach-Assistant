@@ -1,9 +1,38 @@
 // /api/memory.js
-// Enkel profil-minne i tabellen user_memory
+// Enkel profil-minne i tabellen user_memory + OpenAI integration
 
-import { q } from "./db.js";
+const { q } = require("./db.js");
 
-export async function getMemory(userId) {
+// OpenAI API integration
+async function getOpenAIResponse(prompt, temperature = 0.7, maxTokens = 800) {
+  try {
+    // Detta är en placeholder - du behöver implementera din OpenAI-integration
+    // Baserat på din setup, returnera ett JSON-svar eller text
+    
+    // För nu, simulera ett svar
+    const response = {
+      spoken: "Det här är en placeholder för OpenAI-integration. Implementera din AI-logik här.",
+      cards: {
+        summary: "Simulerat svar",
+        steps: [],
+        explanation: "",
+        pitfalls: [],
+        matched_headings: []
+      },
+      follow_up: "Vad mer vill du veta?",
+      meta: {
+        confidence: 0.8
+      }
+    };
+    
+    return JSON.stringify(response);
+  } catch (error) {
+    console.error('OpenAI API error:', error);
+    throw error;
+  }
+}
+
+async function getMemory(userId) {
   try {
     const r = await q(`select user_id, line_name, updated_at from user_memory where user_id = $1`, [userId]);
     return r.rows?.[0] || null;
@@ -13,7 +42,7 @@ export async function getMemory(userId) {
   }
 }
 
-export async function upsertMemory(userId, patch = {}) {
+async function upsertMemory(userId, patch = {}) {
   try {
     const { line_name = null } = patch;
     const r = await q(
@@ -32,3 +61,9 @@ export async function upsertMemory(userId, patch = {}) {
     return { ok: false, error: e?.message || String(e) };
   }
 }
+
+module.exports = {
+  getOpenAIResponse,
+  getMemory,
+  upsertMemory
+};
