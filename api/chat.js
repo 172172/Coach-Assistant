@@ -10,7 +10,7 @@ import { getMemory, upsertMemory } from "./memory.js";
 async function embed(text) {
   const r = await fetch("https://api.openai.com/v1/embeddings", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: Bearer ${process.env.OPENAI_API_KEY} },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: JSON.stringify({ model: "text-embedding-3-small", input: text })
   });
   const j = await r.json();
@@ -42,7 +42,7 @@ function parseSaveCommand(s = "") {
   if (!/\b(spara|kom ihag|kom ihåg|remember)\b/.test(t)) return null;
   const m = t.match(/\b(linje|line)\s*([a-z0-9\-_:]+)\b/i) || t.match(/\b(linje|line)\b.*?\b([a-z0-9\-_:]+)\b/i);
   const token = m?.[2] ? m[2].toUpperCase() : null;
-  const line_name = token ? Linje ${token.replace(/^linje/i, "").trim()} : null;
+  const line_name = token ? `Linje ${token.replace(/^linje/i, "").trim()}` : null;
   return { intent: "save", line_name };
 }
 function isDefinitionQuery(s = "") {
@@ -170,7 +170,7 @@ function evalMath(expr) {
   if (e.length > 120) throw new Error("Expr too long");
   if (!MATH_SAFE.test(e)) throw new Error("Unsafe expr");
   // eslint-disable-next-line no-new-func
-  const val = Function("use strict"; return (${e});)();
+  const val = Function(`"use strict"; return (${e});`)();
   if (typeof val !== "number" || !isFinite(val)) throw new Error("Bad result");
   return val;
 }
@@ -213,27 +213,27 @@ async function retrieveContext(userText, k = 8, userId) {  // GROK: Lade till us
 
   // GROK: Hybrid-sök: embedding + keyword för bättre träffar
   const keywords = userText.split(/\s+/).filter(w => w.length > 3).map(norm).join(" & ");
-  const keywordClause = keywords ?  AND to_tsvector('swedish', c.chunk || ' ' || c.heading) @@ to_tsquery('swedish', '${keywords}') : "";
+  const keywordClause = keywords ? ` AND to_tsvector('swedish', c.chunk || ' ' || c.heading) @@ to_tsquery('swedish', '${keywords}')` : "";
 
   // GROK: Filtrera på user-profil om linje finns
   const mem = await getMemory(userId);
-  const lineFilter = mem?.line_name ?  AND (c.heading ILIKE '%${mem.line_name}%' OR c.chunk ILIKE '%${mem.line_name}%') : "";
+  const lineFilter = mem?.line_name ? ` AND (c.heading ILIKE '%${mem.line_name}%' OR c.chunk ILIKE '%${mem.line_name}%')` : "";
 
-  const sql = 
+  const sql = `
     with active as (select id from manual_docs where is_active = true order by version desc limit 1)
     select c.heading, c.chunk, (1.0 - (c.embedding <=> $1::vector)) as score
     from manual_chunks c
     where c.doc_id = (select id from active)${keywordClause}${lineFilter}
     order by c.embedding <=> $1::vector asc
     limit $2
-  ;
+  `;
   const r = await q(sql, [vec, k]);
   const rows = r.rows || [];
   const scores = rows.map(x => Number(x.score) || 0);
   const base = scores.length ? scores.reduce((a,b)=>a+b,0)/scores.length : 0;
   const headingBonus = Math.min(0.1, (new Set(rows.map(r => r.heading)).size - 1) * 0.025);
   const coverage = Math.max(0, Math.min(1, base + headingBonus));
-  const context = rows.map(x => ### ${x.heading}\n${x.chunk}).join("\n\n---\n\n");
+  const context = rows.map(x => `### ${x.heading}\n${x.chunk}`).join("\n\n---\n\n");
   const matchedHeadings = [...new Set(rows.map(x => x.heading))].slice(0, 6);
   return { context, coverage, matchedHeadings, scores };
 }
@@ -263,10 +263,10 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1600, history = [])
   // GROK: Auto-sammanfattning om lång history
   if (history.length > 10) {
     const summarySystem = "Sammanfatta samtalet kort: fokusera på nyckelfrågor och svar.";
-    const summaryUser = history.map(h => User: ${h.user}\nAI: ${h.assistant?.spoken}).join("\n");
+    const summaryUser = history.map(h => `User: ${h.user}\nAI: ${h.assistant?.spoken}`).join("\n");
     const summary = await fetch("https://api.openai.com/v1/chat/completions", {  // Snabb call för summary
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: Bearer ${process.env.OPENAI_API_KEY} },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
       body: JSON.stringify({
         model: "gpt-4o-mini",  // Billigare modell för summary
         temperature: 0.3,
@@ -274,14 +274,14 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1600, history = [])
         messages: [{ role: "system", content: summarySystem }, { role: "user", content: summaryUser }]
       })
     }).then(r => r.json()).then(j => j.choices[0].message.content);
-    messages.push({ role: "system", content: Tidigare i samtalet: ${summary} });
+    messages.push({ role: "system", content: `Tidigare i samtalet: ${summary}` });
   }
 
   messages.push({ role: "user", content: user });
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: Bearer ${process.env.OPENAI_API_KEY} },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: JSON.stringify({
       model: "gpt-4o",
       temperature: temp,
@@ -308,14 +308,14 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1600, history = [])
 async function createGapDraft({ userId, question, coverage, matchedHeadings, scores }) {
   try {
     if (process.env.GAP_DRAFTS !== "1") return null;
-    const system = Skapa ett UTKAST för ett nytt manualavsnitt när täckning saknas. Använd "[PLATS FÖR VÄRDE]" för alla tal. Returnera JSON med title, heading, summary, outline[], md.;
-    const user = Fråga: "${question}"\nRubriker: ${JSON.stringify(matchedHeadings||[])}\nCoverage: ${coverage.toFixed(3)};
+    const system = `Skapa ett UTKAST för ett nytt manualavsnitt när täckning saknas. Använd "[PLATS FÖR VÄRDE]" för alla tal. Returnera JSON med title, heading, summary, outline[], md.`;
+    const user = `Fråga: "${question}"\nRubriker: ${JSON.stringify(matchedHeadings||[])}\nCoverage: ${coverage.toFixed(3)}`;
     const draft = await callLLM(system, user, 0.2, 700);
     const r = await q(
-      insert into kb_gaps(status,user_id,question,intent,coverage,matched_headings,scores,gap_reason,
+      `insert into kb_gaps(status,user_id,question,intent,coverage,matched_headings,scores,gap_reason,
                            draft_title,draft_heading,draft_md,draft_outline,priority,created_by_ai)
        values ('open',$1,$2,'operational',$3,$4,$5,'låg täckning i manualen',$6,$7,$8,$9::jsonb,0,true)
-       returning id,
+       returning id`,
       [userId, question, coverage, matchedHeadings||[], scores||[], draft?.title||null, draft?.heading||null, draft?.md||null, JSON.stringify(draft?.outline||[])]
     );
     return r?.rows?.[0]?.id || null;
@@ -327,8 +327,8 @@ async function logInteraction({ userId, question, reply, lane, intent, coverage,
   try {
     if (process.env.LOG_CONVO !== "1") return;
     await q(
-      insert into messages(user_id, asked_at, question, content, reply_json, smalltalk, is_operational, coverage, matched_headings, lane, intent)
-       values ($1, now(), $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10),
+      `insert into messages(user_id, asked_at, question, content, reply_json, smalltalk, is_operational, coverage, matched_headings, lane, intent)
+       values ($1, now(), $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)`,
       [
         userId,
         question,
@@ -348,11 +348,11 @@ async function logInteraction({ userId, question, reply, lane, intent, coverage,
 async function getRecentHistoryFromDB(userId, limit = 50) {
   try {
     const r = await q(
-      select asked_at, question, reply_json
+      `select asked_at, question, reply_json
        from messages
        where user_id = $1
        order by asked_at asc
-       limit $2,
+       limit $2`,
       [userId, limit]
     );
     const rows = r.rows || [];
@@ -458,7 +458,7 @@ export default async function handler(req, res) {
       const up = await upsertMemory(userId, patch);
       const saved = up?.row || patch;
       const reply = normalizeKeys({
-        spoken: saved?.line_name ? Klart boss! Jag sparade din linje som “${saved.line_name}”. : "Schysst, jag sparade uppgiften.",
+        spoken: saved?.line_name ? `Klart boss! Jag sparade din linje som “${saved.line_name}”.` : "Schysst, jag sparade uppgiften.",
         need: { clarify: false, question: "" },
         cards: { summary: "Profil uppdaterad.", steps: [], explanation: "", pitfalls: [], simple: saved?.line_name || "", pro: "", follow_up: "Vill du lägga in fler uppgifter?", coverage: 0, matched_headings: [] },
         follow_up: "Vill du lägga in fler uppgifter?"
@@ -471,8 +471,8 @@ export default async function handler(req, res) {
       const mem = await getMemory(userId);
       const reply = normalizeKeys(
         mem?.line_name
-          ? { spoken: Din linje är ${mem.line_name}. Fattar du, eller ska jag påminna om nåt annat?, need: { clarify: false, question: "" },
-              cards: { summary: Profiluppgift: ${mem.line_name}., steps: [], explanation: "", pitfalls: [], simple: mem.line_name, pro: "", follow_up: "Vill du att jag minns något mer?", coverage: 0, matched_headings: [] },
+          ? { spoken: `Din linje är ${mem.line_name}. Fattar du, eller ska jag påminna om nåt annat?`, need: { clarify: false, question: "" },
+              cards: { summary: `Profiluppgift: ${mem.line_name}.`, steps: [], explanation: "", pitfalls: [], simple: mem.line_name, pro: "", follow_up: "Vill du att jag minns något mer?", coverage: 0, matched_headings: [] },
               follow_up: "Vill du att jag minns något mer?" }
           : { spoken: "Jag saknar info om din linje. Säg till om jag ska spara den, typ “Spara linje 65”.",
               need: { clarify: true, question: "Ska jag spara din linje? Säg: “Spara linje 65”." },
@@ -496,16 +496,16 @@ export default async function handler(req, res) {
       if (sourceHistory && sourceHistory.length) {
         if (conv.type === "first") {
           const first = firstUserQuestion(sourceHistory);
-          if (first) spoken = Din första fråga var: “${first}”. Vad sägs om att bygga på det?;
+          if (first) spoken = `Din första fråga var: “${first}”. Vad sägs om att bygga på det?`;
         } else if (conv.type === "last" || conv.type === "last_user") {
           const last = lastUserQuestion(sourceHistory);
-          if (last) spoken = (conv.type === "last_user") ? Du sa: “${last}”. : Din senaste fråga var: “${last}”. Fattar du vad jag menar?;
+          if (last) spoken = (conv.type === "last_user") ? `Du sa: “${last}”.` : `Din senaste fråga var: “${last}”. Fattar du vad jag menar?`;
         } else if (conv.type === "assistant_last") {
           const lastA = lastAssistantSpoken(sourceHistory);
-          spoken = lastA ? Jag sa: “${lastA}”. Ska jag bryta ner det mer? : "Jag har inget tidigare svar att upprepa ännu.";
+          spoken = lastA ? `Jag sa: “${lastA}”. Ska jag bryta ner det mer?` : "Jag har inget tidigare svar att upprepa ännu.";
         } else if (conv.type === "summary") {
           const entries = sortByTsIfAny(sourceHistory).map(h => h?.user).filter(Boolean).slice(-6);
-          spoken = entries.length ? Vi har snackat om: ${entries.join(", ")}. Vad kör vi vidare på? : "Vi har inte pratat om något än.";
+          spoken = entries.length ? `Vi har snackat om: ${entries.join(", ")}. Vad kör vi vidare på?` : "Vi har inte pratat om något än.";
         }
       }
 
@@ -571,7 +571,7 @@ export default async function handler(req, res) {
 
       if (rw.type === "clarify_last") {
         const reply = normalizeKeys({
-          spoken: Du frågade om “${base.lastUser}” och jag sa “${base.lastAssistant}”. Fattar du nu, eller ska jag förklara annorlunda?,
+          spoken: `Du frågade om “${base.lastUser}” och jag sa “${base.lastAssistant}”. Fattar du nu, eller ska jag förklara annorlunda?`,
           need: { clarify: false, question: "" },
           cards: { summary: "Förtydligande.", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
           follow_up: ""
@@ -581,7 +581,7 @@ export default async function handler(req, res) {
       }
 
       // Anropa LLM för att omskriva base
-      const system = Du är en chill svensk kollega på golvet. Omskriv senaste svar som en polare: vardagligt, med 'jag', slang som 'fattar', 'kör vi'. Var kort, pratvänlig. Returnera strikt JSON.;  // GROK: Uppdaterad prompt för ton
+      const system = `Du är en chill svensk kollega på golvet. Omskriv senaste svar som en polare: vardagligt, med 'jag', slang som 'fattar', 'kör vi'. Var kort, pratvänlig. Returnera strikt JSON.`;  // GROK: Uppdaterad prompt för ton
       const user = JSON.stringify({
         intent: rw.type,
         base: base.lastAssistant,
@@ -600,8 +600,8 @@ export default async function handler(req, res) {
 
     /* -------- Lane: Smalltalk -------- */
     if (isSmalltalk(userText)) {
-      const system = Du är en chill svensk kollega på fabriksgolvet för Linje 65 – snacka som en polare: vardagligt, kort, med humor/empati och slang. Låt det kännas naturligt. Returnera strikt JSON.;  // GROK: Uppdaterad för ton
-      const user = Småprat: """${userText}""";
+      const system = `Du är en chill svensk kollega på fabriksgolvet för Linje 65 – snacka som en polare: vardagligt, kort, med humor/empati och slang. Låt det kännas naturligt. Returnera strikt JSON.`;  // GROK: Uppdaterad för ton
+      const user = `Småprat: """${userText}"""`;
       let out = await callLLM(system, user, 0.8, 600, history);  // GROK: Högre temp, inkl history
       out = normalizeKeys(out);
       out.cards.coverage = 0; out.cards.matched_headings = [];
@@ -617,7 +617,7 @@ export default async function handler(req, res) {
         const val = convertUnits(unitReq);
         const rounded = Math.abs(val) < 1e6 ? +(Math.round(val * 1000) / 1000) : val;
         const reply = normalizeKeys({
-          spoken: ${unitReq.val} ${unitReq.from} är ${rounded} ${unitReq.to}. Schysst, eller hur?,
+          spoken: `${unitReq.val} ${unitReq.from} är ${rounded} ${unitReq.to}. Schysst, eller hur?`,
           need: { clarify: false, question: "" },
           cards: { summary: "Omvandling", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
           follow_up: ""
@@ -631,7 +631,7 @@ export default async function handler(req, res) {
         const val = evalMath(userText);
         const rounded = Math.abs(val) < 1e9 ? +(Math.round(val * 1e6) / 1e6) : val;
         const reply = normalizeKeys({
-          spoken: Det blir ${rounded}. Fattar du hur jag räknade?,
+          spoken: `Det blir ${rounded}. Fattar du hur jag räknade?`,
           need: { clarify: false, question: "" },
           cards: { summary: "Beräkning", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
           follow_up: ""
@@ -643,12 +643,12 @@ export default async function handler(req, res) {
 
     /* -------- Lane: General knowledge (jobbrelaterat, ej parametrar) -------- */
     if (isGeneralManufacturingQuery(userText)) {
-      const system = 
+      const system = `
 Du är en chill svensk kollega. Svara kort (1–4 meningar) på allmänna produktionsfrågor (Lean/OEE etc.).
 - Ge principer och enkla exempel, som en polare på golvet.
 - Ge INTE lokala parametrar. Hänvisa till manualen om behövs.
-Returnera strikt JSON.;  // GROK: Uppdaterad för ton
-      const user = Fråga: """${userText}""";
+Returnera strikt JSON.`;  // GROK: Uppdaterad för ton
+      const user = `Fråga: """${userText}"""`;
       let out = await callLLM(system, user, 0.6, 700, history);  // GROK: Inkl history
       out = normalizeKeys(out);
       out.cards.coverage = 0;
@@ -662,13 +662,13 @@ Returnera strikt JSON.;  // GROK: Uppdaterad för ton
     const { context, coverage, matchedHeadings, scores } = await retrieveContext(userText, 8, userId);  // GROK: Passar userId för filtrering
     const definitionMode = isDefinitionQuery(userText);
 
-    const system = 
+    const system = `
 Du är en chill svensk kollega för Linje 65. Operativa råd från ManualContext – snacka som en erfaren operatör med 'jag', vardagsspråk.
 - Definitioner: kort, inga påhitt.
 - Steg: endast vid stark täckning.
-Returnera strikt JSON.;  // GROK: Uppdaterad för ton
+Returnera strikt JSON.`;  // GROK: Uppdaterad för ton
 
-    const user = 
+    const user = `
 ManualContext:
 ${context || "(tom)"}
 
@@ -682,7 +682,7 @@ Instruktioner:
 - För operativa: steg bara vid stark täckning; annars precisera.
 - Vid låg coverage: föreslå allmän kunskap som fallback.
 Schema:
-{"spoken": string, "need": {"clarify": boolean, "question"?: string}, "cards": {"summary": string, "steps": string[], "explanation": string, "pitfalls": string[], "simple": string, "pro": string, "follow_up": string, "coverage": number, "matched_headings": string[]}, "follow_up": string}.trim();
+{"spoken": string, "need": {"clarify": boolean, "question"?: string}, "cards": {"summary": string, "steps": string[], "explanation": string, "pitfalls": string[], "simple": string, "pro": string, "follow_up": string, "coverage": number, "matched_headings": string[]}, "follow_up": string}`.trim();
 
     let out = await callLLM(system, user, 0.6, 1600, history);  // GROK: Inkl history
     out = normalizeKeys(out);
