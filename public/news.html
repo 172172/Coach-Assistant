@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <title>Lägg in nyhet/skiftinfo</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 1.25rem; max-width: 720px; margin: 0 auto; }
+    input, select, textarea { width: 100%; padding: .6rem; margin:.4rem 0 1rem; border-radius: 8px; border:1px solid #ccd3da; }
+    button { padding:.7rem 1rem; border:0; border-radius:10px; background:#0ea5e9; color:#fff; cursor:pointer; }
+    .row { display:flex; gap:.6rem; }
+    .half { flex:1; }
+    .ok { color:#10b981; }
+    .err { color:#ef4444; }
+  </style>
+</head>
+<body>
+  <h1>Nyhet / skiftöverlämning</h1>
+  <form id="f">
+    <div class="row">
+      <div class="half">
+        <label>Section</label>
+        <select name="section" required>
+          <option value="shift">Skift</option>
+          <option value="maintenance">Underhåll</option>
+          <option value="management">Chefer</option>
+          <option value="production">Produktion</option>
+        </select>
+      </div>
+      <div class="half">
+        <label>Effektdatum (valfritt)</label>
+        <input name="effective_date" placeholder="YYYY-MM-DD">
+      </div>
+    </div>
+
+    <label>Rubrik</label>
+    <input name="title" required>
+
+    <label>Text</label>
+    <textarea name="body" rows="6" required></textarea>
+
+    <label>Skapad av</label>
+    <input name="created_by" placeholder="Namn/roll">
+
+    <label>Taggar (komma-separerade)</label>
+    <input name="tags">
+
+    <label>Admin Token</label>
+    <input name="token" type="password" placeholder="ADMIN_TOKEN" required>
+
+    <button type="submit">Spara</button>
+    <div id="msg"></div>
+  </form>
+
+  <script>
+    const form = document.getElementById('f');
+    const msg  = document.getElementById('msg');
+    form.addEventListener('submit', async (e)=>{
+      e.preventDefault(); msg.textContent = '';
+      const data = Object.fromEntries(new FormData(form).entries());
+      const tags = (data.tags || "").split(",").map(s=>s.trim()).filter(Boolean);
+      try{
+        const r = await fetch('/api/news/upsert', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json', 'x-admin-token': data.token},
+          body: JSON.stringify({
+            section: data.section,
+            title: data.title,
+            body: data.body,
+            tags,
+            effective_date: data.effective_date || null,
+            created_by: data.created_by || null
+          })
+        });
+        const j = await r.json();
+        if(!r.ok || !j.ok) throw new Error(j?.error || 'fel');
+        msg.innerHTML = `<p class="ok">✅ Sparat (id: ${j.id}).</p>`;
+        form.reset();
+      }catch(err){
+        msg.innerHTML = `<p class="err">❌ Kunde inte spara: ${err?.message||err}</p>`;
+      }
+    });
+  </script>
+</body>
+</html>
