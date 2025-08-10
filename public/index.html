@@ -1,4 +1,4 @@
- <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="sv">
 <head>
   <meta charset="UTF-8" />
@@ -58,51 +58,66 @@
     const debugInput = document.getElementById('debugInput');
     const debugBtn = document.getElementById('debugBtn');
 
+    // ---------- STATE ----------
     let state = 'IDLE', running = false;
     let chatHistory = [];
 
+    // Pace (om du tidigare använde den – vi låter standard vara 4)
     let STEP_CHUNK_SIZE = 4;
 
+    // Mic / analyser
     let micStream = null, mediaRecorder = null, chunks = [];
     let audioCtxVAD = null, analyser = null, micArr = null;
 
+    // TTS (stream)
     let ttsCtx = null, ttsGainNode = null, ttsAnalyser = null;
     let ttsAudio = null;
     let lastTTSEnd = 0;
     const TTS_BASE_GAIN = 0.9;
 
+    // Eko-skydd
     let lastSpokenText = "";
     let lastSpokenTextNorm = "";
-    const ECHO_SUPPRESS_MS = 2500;
+    const ECHO_SUPPRESS_MS = 2500;      // extra hård filterperiod efter TTS
     const LISTEN_DELAY_AFTER_TTS = 200;
 
+    // Stegvis uppläsning
     let stepQueue = [];
     let stepOffset = 0;
     let lastQ = null, lastA = null;
 
+    // VAD
     const MAX_RECORD_MS   = 10000;
     const SILENCE_HOLD_MS = 800;
 
+    // MIME
     const MIME_CANDIDATES = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg',''];
     let REC_MIME = '', REC_EXT = 'webm';
 
+    // Gates
     const MIN_SPEECH_MS       = 160;
     const MIN_SPEECH_MS_ECHO  = 320;
     const MIN_BLOB_BYTES      = 1200;
 
-    const MIN_DUTY            = 0.18;
-    const MIN_DUTY_ECHO       = 0.28;
+    // Nytt: “duty cycle” – kräver tillräcklig andel tal i klippet
+    const MIN_DUTY            = 0.18;   // 18% av tiden ska vara över tröskeln
+    const MIN_DUTY_ECHO       = 0.28;   // hårdare direkt efter TTS
 
+    // Hallu/eko-filter
     const HALLU = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
 
+    // Fillers vi vill SLÄNGA (vanliga falsk-väckningar på svenska)
     const DISCARD_FILLERS = [
       "tack","tack sa mycket","tack så mycket","tack for mig","tack för mig",
       "ok","okej","mm","mmm","mhm","öh","eh","ah","aha","aa","jaa","yes","jo"
     ];
 
-    const GREETING_OK = /^(hej( hej)?|tja|tjena|hall[aå]|god morgon|god kväll)$/i;
+    // Hälsningar vi VILL TILLÅTA även om de är korta
+    const GREETINGS_OK = /^(hej( hej)?|tja|tjena|hall[aå]|god morgon|god kväll)$/i;
+
     const STEP_COMMANDS = /(nästa|fortsätt|mer|continue|next)/i;
 
+    // ---------- Utils ----------
     function normalize(s){
       return (s||"").toLowerCase()
         .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
@@ -111,6 +126,7 @@
         .replace(/\s+/g," ").trim();
     }
 
+    // Bedöm om en transkription ska slängas (falsk väckning / brus / kortfiller)
     function shouldDropUtterance(text, talkMs, elapsedMs){
       const withinEcho = (Date.now() - lastTTSEnd) < ECHO_SUPPRESS_MS;
       const duty = talkMs / Math.max(1, elapsedMs);
@@ -119,13 +135,14 @@
       const raw = (text||"").trim();
       const norm = normalize(raw);
 
-      if (!norm) return true;
-      if (raw.length < 2) return true;
-      if (DISCARD_FILLERS.includes(norm)) return true;
-      if (duty < dutyMin) return true;
+      if (!norm) return true;                          // tomt
+      if (raw.length < 2) return true;                 // extremt kort
+      if (DISCARD_FILLERS.includes(norm)) return true; // kända brus-filler
+      if (duty < dutyMin) return true;                 // för lite faktisk tal-energi
 
+      // Om väldigt kort och inte fråga: släng, utom hälsningar och stegkommandon
       const words = norm.split(" ").filter(Boolean);
-      if (words.length <= 2 && !/[?]/.test(raw) && !GREETING_OK.test(raw) && !STEP_COMMANDS.test(raw)) {
+      if (words.length <= 2 && !/[?]/.test(raw) && !GREETINGS_OK.test(raw) && !STEP_COMMANDS.test(raw)) {
         return true;
       }
       return false;
@@ -137,6 +154,7 @@
       recStatus.textContent = text;
     }
 
+    // ---------- Viz ----------
     function rmsLevel(uint8PCM) {
       let sum=0; for (let i=0;i<uint8PCM.length;i++){ const v=uint8PCM[i]-128; sum+=v*v; }
       const rms=Math.sqrt(sum/uint8PCM.length);
@@ -175,6 +193,7 @@
       rafId = requestAnimationFrame(loop);
     }
 
+    // ---------- TTS (stream) ----------
     let _speakResolve = null;
     function stopTTS(){
       try { if (ttsAudio) { ttsAudio.pause(); ttsAudio.src = ""; ttsAudio.load(); } } catch {}
@@ -196,7 +215,7 @@
           ttsAudio = new Audio(); ttsAudio.src = url; ttsAudio.preload = "auto"; ttsAudio.crossOrigin = "anonymous";
           ttsCtx = new (window.AudioContext||window.webkitAudioContext)(); await ttsCtx.resume().catch(()=>{});
           const srcNode = ttsCtx.createMediaElementSource(ttsAudio);
-            ttsGainNode = ttsCtx.createGain(); ttsGainNode.gain.value = parseFloat(document.getElementById('volumeSlider').value) || TTS_BASE_GAIN;
+          ttsGainNode = ttsCtx.createGain(); ttsGainNode.gain.value = parseFloat(document.getElementById('volumeSlider').value) || TTS_BASE_GAIN;
           document.getElementById('volumeSlider').addEventListener('input', (e) => {
             if (ttsGainNode) ttsGainNode.gain.value = parseFloat(e.target.value);
           });
@@ -222,8 +241,8 @@
         }
       });
     }
-    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
 
+    // ---------- Steps reading ----------
     function resetSteps(steps){
       stepQueue = Array.isArray(steps) ? steps.slice() : [];
       stepOffset = 0;
@@ -238,6 +257,7 @@
       await speak(text);
     }
 
+    // ---------- Chat/UI ----------
     function renderDetails(cards, followUp){
       const srcNote = (Array.isArray(cards?.matched_headings) && cards.matched_headings.length)
         ? `<div class="src">Hämtat från: ${cards.matched_headings.join(', ')}</div>` : '';
@@ -268,7 +288,7 @@
 
         if (r.need?.clarify) {
           resetSteps([]);
-            output.insertAdjacentHTML('beforeend', `<div class="pill">${r.need.question || r.spoken || 'Behöver lite mer info.'}</div>`);
+          output.insertAdjacentHTML('beforeend', `<div class="pill">${r.need.question || r.spoken || 'Behöver lite mer info.'}</div>`);
           await speak(r.spoken || r.need.question || 'En sak till…');
           lastQ = text; lastA = r;
           return;
@@ -292,16 +312,29 @@
 
         lastQ = text; lastA = r;
 
+        // KRITISK FIX: Kolla om backend säger att bara läsa spoken
+        const shouldSkipSteps = r.meta?.tts?.skip_steps || 
+                               r.meta?.tts?.read_only_spoken || 
+                               r.meta?.speech_source === "status_summary";
+        
         const steps = Array.isArray(r.cards?.steps) ? r.cards.steps : [];
         resetSteps(steps);
+        
+        // Läs alltid spoken-delen först
         await speak(r.spoken || 'Okej.');
-        if (steps.length) await speakStepsChunk();
+        
+        // Läs steps ENDAST om backend inte säger att skippa dem
+        if (steps.length && !shouldSkipSteps) {
+          await speakStepsChunk();
+        }
+
       }catch(err){
         output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI. (${err?.message||'okänt fel'})</div>`);
         if(running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
       }
     }
 
+    // ---------- Whisper ----------
     async function transcribe(blob){
       const fd = new FormData();
       fd.append('audio', blob, `audio.${REC_EXT}`);
@@ -311,6 +344,7 @@
       return (data.text||'').trim();
     }
 
+    // ---------- VAD ----------
     function calibrateThreshold(){
       return new Promise(async (resolve)=>{
         const t0 = performance.now();
@@ -326,6 +360,7 @@
       });
     }
 
+    // ---------- LISTEN ----------
     async function startListening(){
       if(!running) return;
       state='LISTENING'; setStatus(state,'Lyssnar… (bli tyst för att skicka)');
@@ -357,6 +392,7 @@
           const text = await transcribe(blob);
           if (!text || HALLU.test(text) || likelyEchoOfTTS(text)) { if(running) startListening(); return; }
 
+          // NYTT: kastar bort falsk-väckningar och korta fillers
           if (shouldDropUtterance(text, talkMs, elapsed)) { if(running) startListening(); return; }
 
           const t = text.toLowerCase();
@@ -387,6 +423,7 @@
       },100);
     }
 
+    // ---------- START/STOP ----------
     async function getMicStream(){
       const constraints = { audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:false } };
       REC_MIME = MIME_CANDIDATES.find(m => !m || MediaRecorder.isTypeSupported(m)) || '';
@@ -430,19 +467,14 @@
       STEP_CHUNK_SIZE = 4;
     }
 
-    window.addEventListener('keydown',(e)=>{
-      if(e.key===' ' && state==='SPEAKING'){
-        e.preventDefault();
-        stopTTS();
-        abortBtn.style.display='none';
-        setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
-      }
-    });
+    window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
     window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') stopLoop(); });
 
     startBtn.addEventListener('click', startLoop);
     stopBtn.addEventListener('click', stopLoop);
+    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
 
+    // Debug: text till chat (oförändrat – inget filter här)
     debugBtn.addEventListener('click', async () => {
       const text = debugInput.value.trim();
       if (text) {
@@ -452,6 +484,7 @@
       }
     });
 
+    // --- likelyEchoOfTTS (behåller din tidigare)
     function likelyEchoOfTTS(text){
       const within = Date.now() - lastTTSEnd < ECHO_SUPPRESS_MS;
       if (!within) return false;
@@ -469,18 +502,24 @@
 
     const reportBtn = document.getElementById('reportBtn');
     reportBtn.addEventListener('click', () => {
+      // Se till att userId finns innan vi lämnar sidan (report.html läser från localStorage)
       const uid = localStorage.getItem('userId') || (() => {
         const x = 'u_' + Math.random().toString(36).slice(2);
         localStorage.setItem('userId', x);
         return x;
       })();
+
+      // Avsluta loop/tts snyggt innan vi navigerar
       try { stopTTS(); } catch {}
       try { stopLoop(); } catch {}
-      const target = new URL('./report.html', location.href);
+
+      // Navigera till rapport-sidan (skickar även med uid som query om du vill använda den där)
+      const target = new URL('https://coach-assistant.vercel.app/report.html', location.href);
       target.searchParams.set('from', 'voice');
       target.searchParams.set('uid', uid);
       location.href = target.toString();
     });
+
   </script>
 </body>
 </html>
