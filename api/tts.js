@@ -9,11 +9,11 @@ export default async function handler(req, res) {
     const voiceId = "3mwblJqg1SFnILqt4AFC"; // din svenska röst
     const apiKey = process.env.ELEVENLABS_API_KEY;
 
-    // Neutral, tydlig leverans (inte “pepp”)
+    // Uppdatering: Mer dynamiska inställningar för naturlig, Grok-lik ton – lägre stability för variation, högre style för energi
     const voice_settings = {
-      stability: 0.6,
-      similarity_boost: 0.9,
-      style: 0.2,
+      stability: 0.35,  // Uppdaterat: Lägre för mer naturlig variation och mänsklighet
+      similarity_boost: 0.95,  // Uppdaterat: Högre för bättre röstkaraktär
+      style: 0.8,  // Uppdaterat: Högre för mer uttryck och intonation
       use_speaker_boost: true
     };
 
