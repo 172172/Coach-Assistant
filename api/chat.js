@@ -1,4 +1,3 @@
-
 // /api/chat.js
 // Kollegig AI-coach: identity, smalltalk, conversation-memory, rewrite-intents (simplify/repeat/summary/examples),
 // general-knowledge (jobbrelaterat), toolbelt (math/units), RAG (definition/operativt från manualen)
@@ -265,109 +264,132 @@ async function fetchStatusData(rangeKey = "week") {
 async function buildStatusReply({ news = [], incidents = [], label = "senaste veckan", history = [] }) {
   if ((!news || news.length === 0) && (!incidents || incidents.length === 0)) {
     const empty = {
-      spoken: `Jag hittar inget inlagt för ${label}. Vill du att vi börjar logga nyheter/överlämning här?`,
+      spoken: `Lugnt läge ${label} – inget särskilt att rapportera! Ibland är det skönt när allt bara rullar på. 😊`,
       need: { clarify: false, question: "" },
       cards: { summary: `Inget registrerat ${label}.`, steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
-      follow_up: "Ska jag visa hur du lägger in nyheter?"
+      follow_up: "Vill du att vi börjar logga vad som händer?"
     };
     return normalizeKeys(empty);
   }
 
   const fmt = (d) => new Date(d).toLocaleString("sv-SE", { dateStyle: "short", timeStyle: "short" });
-  const newsLines = (news || []).map(n =>
-    `NEWS [${n.section || "production"}] ${fmt(n.news_at)} ${n.area ? "["+n.area+"] " : ""}${n.shift ? "[Shift "+n.shift+"] " : ""}${n.title ? n.title + " – " : ""}${(n.body||"").trim()}${Array.isArray(n.tags)&&n.tags.length? " #"+n.tags.join(" #") : ""}`
-  );
-  const incLines = (incidents || []).map(x =>
-    `INCIDENT [${(x.severity||"").toUpperCase()}] ${fmt(x.reported_at)} ${x.area? "["+x.area+"] " : ""}${x.title? x.title+" – " : ""}${x.problem||""}${x.resolution? " | Åtgärd: "+x.resolution : ""}${Array.isArray(x.tags)&&x.tags.length? " #"+x.tags.join(" #") : ""}`
-  );
+  
+  // Förbered data för LLM med bättre struktur
+  const newsData = (news || []).map(n => ({
+    when: fmt(n.news_at),
+    area: n.area || n.section || "Okänt område",
+    shift: n.shift || "",
+    title: n.title || "",
+    body: n.body || "",
+    tags: Array.isArray(n.tags) ? n.tags : []
+  }));
 
+  const incidentData = (incidents || []).map(x => ({
+    when: fmt(x.reported_at),
+    area: x.area || "Okänt område", 
+    severity: x.severity || "normal",
+    title: x.title || "",
+    problem: x.problem || "",
+    solution: x.resolution || "",
+    status: x.status || "",
+    tags: Array.isArray(x.tags) ? x.tags : []
+  }));
+
+  // Förbättrad system-prompt för mer vardagsspråk
   const system = `
-Du är en svensk kollega. Du får rårader från "line_news" (NEWS) och "incidents" (INCIDENT).
-- Ge en superkort pratvänlig summering för ${label} (2–5 meningar).
-- Skriv i neutral/proffsig ton och rensa svordomar/grova ord. T.ex. “Allt gick åt skogen…” → “Det strulade. Vi bytte givare…”.
-- I steps[]: ta bara punkter från NEWS och skriv talvänligt: “OMRÅDE. dd mmm hh:mm. Kort notis.” (max ~1–2 meningar).
-- Lista 3–8 nyckelpunkter i steps[] (gruppera gärna på sektion/område).
-- Lyft ev. återkommande problem + föreslå nästa steg (follow_up).
-- Ingen påhittad data.
-Returnera strikt JSON med fälten i vårt schema.`;
-  const user = [
-    `Sammanfatta ${label}.`,
-    `NEWS:\n${newsLines.join("\n") || "(tomt)"}`,
-    `INCIDENTS:\n${incLines.join("\n") || "(tomt)"}`
-  ].join("\n\n");
+Du är en erfaren operatör som berättar för kollegan vad som hänt ${label}. Prata som en kompis på golvet:
 
-  let out = await callLLM(system, user, 0.4, 800, history);
+STIL:
+- Vardagligt svenskt språk, som mellan kollegor
+- Använd "vi", "det", "grabben/tjejen" etc. 
+- Inga tekniska termer utan förklaring
+- Gör det levande och engagerande
+- Fokusera på vad som FAKTISKT påverkar jobbet
+
+STRUKTUR:
+- spoken: 2-4 meningar som summerar känslan/läget
+- steps: Max 6 punkter, skriv som "OMRÅDE: Vad som hände (varför det spelar roll)"
+- Prioritera saker som påverkar drift/produktion
+
+EXEMPEL PÅ TON:
+- "Ganska lugnt faktiskt, förutom att..."
+- "Det strulade lite på Tapp när..."  
+- "Bra kört av dagskiftet som..."
+- "Vi fick äntligen ordning på..."
+
+Returnera strikt JSON med vårt schema.`;
+
+  const user = `
+Sammanfatta ${label} för en kollega.
+
+NYHETER (${newsData.length} st):
+${newsData.map(n => `${n.when} | ${n.area}${n.shift ? ` (Skift ${n.shift})` : ""} | ${n.title || "Uppdatering"}: ${n.body}`).join("\n")}
+
+INCIDENTER (${incidentData.length} st):
+${incidentData.map(i => `${i.when} | ${i.area} | ${i.severity.toUpperCase()}: ${i.title || i.problem}${i.solution ? ` → ${i.solution}` : ""}`).join("\n")}
+
+Fokus: Vad behöver operatörerna veta för att göra sitt jobb bra?`;
+
+  let out = await callLLM(system, user, 0.5, 800, history); // Lägre temp för konsistens
   out = normalizeKeys(out);
-out.cards.coverage = 0;
-out.cards.matched_headings = ["line_news", "incidents"];
-out.cards.summary = out.cards.summary || `Status för ${label}`;
-out.follow_up = out.follow_up || "Vill du filtrera på område eller skift?";
 
-// --- Failsafe: säkerställ spoken/steps alltid finns ---
+  // Failsafe med bättre vardagsspråk
+  if (!out.spoken || out.spoken.trim().length < 10) {
+    if (newsData.length > 0 && incidentData.length === 0) {
+      out.spoken = `Ganska lugnt ${label}. ${newsData.length} uppdateringar, mest rutin. Inget som stoppar produktionen.`;
+    } else if (incidentData.length > 0) {
+      const highSev = incidentData.filter(i => ['high', 'critical'].includes(i.severity.toLowerCase()));
+      if (highSev.length > 0) {
+        out.spoken = `Det har strulade lite ${label} – ${highSev.length} allvarligare grejer. Men vi löste det mesta.`;
+      } else {
+        out.spoken = `${incidentData.length} småsaker ${label}, inget större. Mest vardagsknep som vi fixade.`;
+      }
+    } else {
+      out.spoken = `Helt okej ${label}! ${newsData.length + incidentData.length} uppdateringar, men inget som sticker ut.`;
+    }
+  }
 
-out = normalizeKeys(out);
-  out.cards.coverage = 0;
-  out.cards.matched_headings = ["line_news", "incidents"];
-  out.cards.summary = out.cards.summary || `Status för ${label}`;
-  out.follow_up = out.follow_up || "Vill du filtrera på område eller skift?";
-  // --- Failsafe: säkerställ spoken/steps alltid finns ---
-out = normalizeKeys(out);
+  // Förbättra steps med mer operatörsperspektiv  
+  if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
+    const steps = [];
+    
+    // Prioritera incidents först (viktigare för drift)
+    incidentData.slice(0, 3).forEach(inc => {
+      const area = inc.area.split('/').pop() || inc.area; // Ta sista delen av "B/Tapp" → "Tapp"
+      const time = inc.when.split(' ')[0]; // Bara datum
+      const issue = inc.title || inc.problem;
+      const solved = inc.solution ? ` (fixat: ${inc.solution})` : "";
+      steps.push(`${area.toUpperCase()}: ${time} - ${issue}${solved}`);
+    });
 
-if (!out.spoken || out.spoken.trim().length < 2) {
-  const firstNews = news?.[0];
-  const firstInc  = incidents?.[0];
-  const pickTxt = firstNews
-    ? `${firstNews.title ? firstNews.title + " – " : ""}${(firstNews.body||"").slice(0,120)}${(firstNews.body||"").length>120?"…":""}`
-    : firstInc
-      ? `${firstInc.title ? firstInc.title + " – " : ""}${(firstInc.problem||"").slice(0,120)}${(firstInc.problem||"").length>120?"…":""}`
-      : null;
+    // Lägg till viktiga nyheter
+    newsData.filter(n => 
+      n.title.toLowerCase().includes('stopp') || 
+      n.title.toLowerCase().includes('byte') ||
+      n.body.toLowerCase().includes('produktion')
+    ).slice(0, 3).forEach(news => {
+      const area = news.area.split('/').pop() || news.area;
+      const time = news.when.split(' ')[0];
+      const note = news.title || news.body.slice(0, 50) + "...";
+      steps.push(`${area.toUpperCase()}: ${time} - ${note}`);
+    });
 
-  out.spoken = pickTxt
-    ? `Här är läget för ${label}: ${pickTxt}`
-    : `Jag hittar inget inlagt för ${label}. Vill du att vi börjar logga nyheter/överlämning här?`;
-}
+    if (steps.length > 0) {
+      out.cards.steps = steps;
+    }
+  }
 
-// --- Failsafe: steps ENDAST från NEWS ---
-if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
-  const fmtNice = (d) =>
-    new Date(d).toLocaleString("sv-SE", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
-
-  const clean = (s) => (s || "").toString().replace(/\s+/g, " ").trim();
-  const short = (s, n = 80) => {
-    const t = clean(s || "");
-    return t.length > n ? t.slice(0, n - 1) + "…" : t;
-  };
-
-  // Ta sista segmentet i t.ex. "B/Tapp" => "TAPP"
-  const areaOnly = (s) => {
-    if (!s) return null;
-    const last = String(s).split(/[\/>]/).pop().trim();
-    return last.toUpperCase();
-  };
-
-  const ns = (news || []).slice(0, 6).map((n) => {
-    const area = areaOnly(n.area) || areaOnly(n.section) || "OMRÅDE";
-    const date = fmtNice(n.news_at);
-    const note = short(n.title ? `${n.title} – ${n.body || ""}` : (n.body || n.title || ""));
-    // Ex: "TAPP. 10 aug 09:24. Problem – bytte givare…"
-    return `${area}. ${date}. ${note}`;
+  // Lägg till metadata för TTS
+  out.meta = Object.assign({}, out.meta, {
+    speech: out.spoken,
+    speech_source: "status_summary", 
+    tts: { text: out.spoken, priority: "spoken", allow_fallback: false }
   });
 
-  if (ns.length) out.cards.steps = ns;
-}
-
-
-// --- TTS: tvinga rösten att läsa sammanfattningen, inte stegen ---
-out.meta = Object.assign({}, out.meta, {
-  speech: out.spoken,                 // primär tts-text
-  speech_source: "status_summary",    // (hjälper felsökning/logik)
-  tts: { text: out.spoken, priority: "spoken", allow_fallback: false } // bakåt/framåt-komp.
-});
-
-// (failsafe) om summary är tomt – spegla spoken dit också
-if (!out.cards.summary || out.cards.summary.trim().length < 4) {
-  out.cards.summary = out.spoken;
-}
+  out.cards.coverage = 0;
+  out.cards.matched_headings = ["line_news", "incidents"];
+  out.cards.summary = out.cards.summary || `Läget ${label}`;
+  out.follow_up = out.follow_up || "Vill du höra mer om något specifikt?";
 
   return out;
 }
