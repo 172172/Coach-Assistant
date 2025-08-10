@@ -328,7 +328,9 @@ if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
   const merged = [...ns, ...is].filter(Boolean).slice(0,6);
   if (merged.length) out.cards.steps = merged;
 }
-return out;
+
+  return out;
+}
 
 
 
