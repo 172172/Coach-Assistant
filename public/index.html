@@ -33,6 +33,7 @@
     <button id="startBtn">▶️ Starta röstloop</button>
     <button id="stopBtn" class="ghost" style="display:none">⏹️ Stoppa</button>
     <button id="abortTTSBtn" class="ghost" style="display:none">⏸️ Avbryt tal</button>
+    <button id="reportBtn" class="ghost">📝 Rapportera problem</button>
   </div>
 
   <div style="margin-top:1rem">
@@ -487,6 +488,26 @@
       ts.forEach(w=>{ if(ls.has(w)) overlap++; });
       return (overlap / ts.length) >= 0.7;
     }
+    const reportBtn = document.getElementById('reportBtn');
+reportBtn.addEventListener('click', () => {
+  // Se till att userId finns innan vi lämnar sidan (report.html läser från localStorage)
+  const uid = localStorage.getItem('userId') || (() => {
+    const x = 'u_' + Math.random().toString(36).slice(2);
+    localStorage.setItem('userId', x);
+    return x;
+  })();
+
+  // Avsluta loop/tts snyggt innan vi navigerar
+  try { stopTTS(); } catch {}
+  try { stopLoop(); } catch {}
+
+  // Navigera till rapport-sidan (skickar även med uid som query om du vill använda den där)
+  const target = new URL('https://coach-assistant.vercel.app/report.html', location.href);
+  target.searchParams.set('from', 'voice');
+  target.searchParams.set('uid', uid);
+  location.href = target.toString();
+});
+
   </script>
 </body>
 </html>
