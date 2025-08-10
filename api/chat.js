@@ -1,4 +1,3 @@
-
 // /api/chat.js
 // Kollegig AI-coach: identity, smalltalk, conversation-memory, rewrite-intents (simplify/repeat/summary/examples),
 // general-knowledge (jobbrelaterat), toolbelt (math/units), RAG (definition/operativt från manualen)
@@ -6,6 +5,7 @@
 import { q } from "./db.js";
 import fetch from "node-fetch";
 import { getMemory, upsertMemory } from "./memory.js";
+import { getState, updateRollingSummary, logEvent, upsertState } from "./memory.js";
 
 /* ================= Embeddings ================= */
 async function embed(text) {
@@ -251,7 +251,7 @@ async function fetchStatusData(rangeKey = "week") {
 }
 
 // Bygg mer utförlig sammanfattning via callLLM
-async function buildStatusReply({ news = [], label = "senaste veckan", history = [] }) {
+async function buildStatusReply({ news = [], label = "senaste veckan", history = [], personaState = null }) {
   if (!news || news.length === 0) {
     const empty = {
       spoken: `Lugnt läge ${label} – inget särskilt att rapportera! Ibland är det skönt när allt bara rullar på. 😊`,
@@ -284,38 +284,11 @@ async function buildStatusReply({ news = [], label = "senaste veckan", history =
 
   // Förbättrad system-prompt för mer detaljerat berättande som en kollega
   const system = `
-Du är en erfaren operatör som berättar för en kollega vad som hänt ${label}. Prata som en kompis på golvet:
-
-STIL & TON:
-- Vardagligt svenskt språk, som mellan kollegor
-- Använd "vi", "det", "grabben/tjejen" etc naturligt
-- Berätta UTFÖRLIGT och SPECIFIKT vad som hänt - ge detaljer som påverkar jobbet
-- Gör det levande och engagerande, men informativt
-- Nämn konkreta händelser, inte bara allmänna intryck
-- Som att du överlämnar till nästa skift
-
-VIKTIGT:
-- Använd EXAKTA veckodagar från datumen - inte påhittade dagar
-- När du nämner "tisdag" eller liknande, kontrollera att det stämmer med när-fältet
-
-INNEHÅLL:
-- Börja med en övergripande känsla/läge
-- Gå sedan in på specifika händelser per område
-- Nämn alltid VILKET område/skift det gällde
-- Inkludera tekniska detaljer som är relevanta
-- Prioritera allt som påverkar drift/produktion/kvalitet
-
-STRUKTUR:
-- spoken: 4-8 meningar som berättar vad som FAKTISKT hänt med konkreta detaljer
-- steps: Alla viktiga händelser som punkter: "OMRÅDE (SKIFT): Detaljerad beskrivning"
-
-EXEMPEL PÅ BRA TON:
-- "Vi hade lite trubbel på Tapp när formatbytet krånglade efter lunch på onsdag..."
-- "Underhållsteamet bytte den där sensorn på OCME som strulade måndag morgon..."  
-- "Dagskiftet rapporterade stopp på Jones på fredag - gejdrarna behövde justeras igen..."
-- "Det blev lite rörigt när CIP-cykeln inte ville starta på Coolpack på torsdag..."
-
-Var KONKRET och DETALJERAD om vad som hänt. Operatörerna vill veta exakt vad som skett. Returnera strikt JSON.`;
+Du är Grok-lik svensk operatör som gör muntlig överlämning (${label}).
+Ton: naturligt, kollegialt, lite torr humor. Var konkret.
+spoken: 4–8 meningar, varierad rytm, inga listtecken.
+cards.steps: formella händelser.
+Returnera JSON.`;
 
   const user = `
 Berätta utförligt som en kollega vad som hänt ${label}. Gå in på detaljer - vad hände exakt?
@@ -330,27 +303,27 @@ ${n.tags.length ? `🏷️ Taggar: ${n.tags.join(", ")}` : ""}
 Fokus: Berätta som en kollega som överlämnar till nästa skift - vad har hänt och vad behöver vi veta?
 VIKTIG PÅMINNELSE: Använd korrekta veckodagar från datumen ovan!`;
 
-  let out = await callLLM(system, user, 0.3, 1200, history); // Lägre temp för faktafokus, mer tokens för detaljer
+  let out = await callLLM(system, user, 0.85, 1200, history, personaState); // <-- passera personaState
   out = normalizeKeys(out);
 
   // Förbättrad failsafe med mer detaljerat vardagsspråk
   if (!out.spoken || out.spoken.trim().length < 30) {
+    const humor = personaState?.humor_level ?? 2;
+    const pace = personaState?.pace || "normal";
+    const addHumor = humor >= 3;
+    const paceTag = pace === "slow" ? "Tar det lugnt: " : "";
     if (newsData.length === 1) {
       const item = newsData[0];
-      const [weekday] = item.when.split(' '); // Ta första ordet = veckodag
-      out.spoken = `En grej som hände på ${weekday}: Vi hade ${item.body || item.title} på ${item.area}${item.shift ? ` under skift ${item.shift}` : ""}. ${item.tags.length ? `Handlade om ${item.tags.slice(0,2).join(" och ")}.` : ""}`;
+      const [weekday] = item.when.split(' ');
+      out.spoken = `${paceTag}En grej som hände på ${weekday}: ${item.body || item.title} på ${item.area}${item.shift ? ` (skift ${item.shift})` : ""}.${item.tags.length ? ` Taggar: ${item.tags.slice(0,2).join(", ")}.` : ""} ${addHumor ? "I övrigt rätt soft." : ""}`.trim();
     } else if (newsData.length > 1) {
       const areas = [...new Set(newsData.map(n => n.area))];
       const problems = newsData.filter(n => n.tags.some(tag => /problem|stopp|fel|byte/.test(tag.toLowerCase())));
       const maintenance = newsData.filter(n => n.tags.some(tag => /underhåll|byte|service/.test(tag.toLowerCase())));
-      
       let details = [];
-      if (problems.length) details.push(`${problems.length} problem/stopp`);
-      if (maintenance.length) details.push(`${maintenance.length} underhållsgrejer`);
-      
-      out.spoken = `${newsData.length} händelser ${label}, mest aktivitet på ${areas.slice(0,2).join(" och ")}. ` +
-                   `${details.length ? `Hade ${details.join(" och ")} att hålla koll på. ` : ""}` +
-                   `${newsData[0].body ? `Senaste var: ${newsData[0].body.split('.')[0]}...` : "Blandad körning helt enkelt."}`;
+      if (problems.length) details.push(`${problems.length} stopp/strul`);
+      if (maintenance.length) details.push(`${maintenance.length} underhållsjobb`);
+      out.spoken = `${paceTag}${newsData.length} händelser ${label}, mest på ${areas.slice(0,2).join(" och ")}. ${details.length ? `Vi hade ${details.join(" och ")}. ` : ""}${newsData[0].body ? `Senaste noteringen: ${newsData[0].body.split('.')[0]}...` : ""} ${addHumor ? "Inget fullständig kaos – vi lever. 😅" : ""}`.trim();
     }
   }
 
@@ -444,10 +417,12 @@ function passesOperativeGate({ coverage, matchedHeadings, scores }) {
 }
 
 /* ================= LLM (strict JSON) ================= */
-async function callLLM(system, user, temp = 0.6, maxTokens = 1600, history = []) {
+async function callLLM(system, user, temp = 0.85, maxTokens = 1600, history = [], personaState = null) {
   // GROK: Ändrat för att inkludera history som messages för bättre kontext/minne
+  // REPLACE system injection (vi wrappar system med persona)
+  const persona = buildPersonaPrompt(personaState);
   let messages = [
-    { role: "system", content: system }
+    { role: "system", content: persona + "\n" + system }
   ];
 
   // Lägg till senaste 5 turns från history
@@ -469,7 +444,7 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1600, history = [])
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
       body: JSON.stringify({
         model: "gpt-4o-mini",  // Billigare modell för summary
-        temperature: 0.3,
+        temperature: 0.5,
         max_tokens: 200,
         messages: [{ role: "system", content: summarySystem }, { role: "user", content: summaryUser }]
       })
@@ -484,7 +459,7 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1600, history = [])
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: JSON.stringify({
       model: "gpt-4o",
-      temperature: temp,
+      temperature: temp,  // höjd default
       max_tokens: maxTokens,
       response_format: { type: "json_object" },
       messages
@@ -505,12 +480,25 @@ async function callLLM(system, user, temp = 0.6, maxTokens = 1600, history = [])
 }
 
 /* ================= Gap-drafts (valfritt) ================= */
-async function createGapDraft({ userId, question, coverage, matchedHeadings, scores }) {
+async function createGapDraft({ userId, question, coverage, matchedHeadings, scores, personaState = null }) {
   try {
     if (process.env.GAP_DRAFTS !== "1") return null;
-    const system = `Skapa ett UTKAST för ett nytt manualavsnitt när täckning saknas. Använd "[PLATS FÖR VÄRDE]" för alla tal. Returnera JSON med title, heading, summary, outline[], md.`;
-    const user = `Fråga: "${question}"\nRubriker: ${JSON.stringify(matchedHeadings||[])}\nCoverage: ${coverage.toFixed(3)}`;
-    const draft = await callLLM(system, user, 0.2, 700);
+    const system = `Skapa ett UTKAST för ett nytt manualavsnitt när täckning saknas.
+Persona (kort): ${personaState ? `pace=${personaState.pace||"normal"}, humor=${personaState.humor_level??2}, detail=${personaState.detail_level||"medel"}` : "standard"}
+Krav:
+- Använd "[PLATS FÖR VÄRDE]" för alla tal/värden
+- title: kort
+- heading: specifik (H2-nivå)
+- summary: 1–2 meningar
+- outline: lista av sektionstitlar
+- md: markdown med sektioner och tydliga steg om relevant
+Returnera JSON: { "title": "", "heading": "", "summary": "", "outline": [], "md": "" }`;
+    const user = `Fråga: "${question}"
+Coverage: ${coverage.toFixed(3)}
+MatchedHeadings: ${JSON.stringify(matchedHeadings||[])}
+Scores: ${(scores||[]).map(s=>s.toFixed(2)).join(", ")}
+Motivera implicit vad som saknas och skapa ett förslag.`;
+    const draft = await callLLM(system, user, 0.25, 900, [], personaState);  // <-- pass personaState
     const r = await q(
       `insert into kb_gaps(status,user_id,question,intent,coverage,matched_headings,scores,gap_reason,
                            draft_title,draft_heading,draft_md,draft_outline,priority,created_by_ai)
@@ -634,6 +622,31 @@ function lastAssistantSpoken(history = []) {
   return entries.length ? entries[entries.length - 1].assistant.spoken : "";
 }
 
+// --- Persona builder (central ton) ---
+function buildPersonaPrompt(state) {
+  const pace = state?.pace || "normal";
+  const detail = state?.detail_level || "medel";
+  const humor = state?.humor_level ?? 3;
+  return `PERSONA (Grok-lik svensk kollegial AI):
+Du är en smart, kvick, ibland torrt sarkastisk men hjälpsam svensk operatörscoach.
+Stil:
+- Vardagligt talspråk: "typ", "okej", "all right", "så", "eh" sparsamt (max 1 per mening)
+- Humor & lätt sarkasm men aldrig elak eller nedlåtande
+- Variation i meningslängd (3–18 ord), mix av korta och längre
+- Slang lagom: "fattar", "lirar", "krånglar", "kör vi"
+- Aldrig grovt / stötande / diskriminerande
+Pace: ${pace}. Detaljnivå: ${detail}. Humor-nivå: ${humor}.
+Utdata:
+- spoken: helt naturligt tal (inga listtecken eller numrerade steg)
+- cards: faktastruktur (ren, utan slang)
+Regler:
+- Hitta inte på siffror/parametrar
+- Om osäker → säg det och be om precisering
+- Förklara först kort i spoken; detaljer i cards/explanation om behövs
+- Undvik exakt upprepning av föregående inledningar
+`;
+}
+
 /* ================= Handler ================= */
 export default async function handler(req, res) {
   try {
@@ -653,6 +666,29 @@ export default async function handler(req, res) {
       return res.status(200).json({ reply });
     }
 
+    const personaState = await getState(userId).catch(()=>null);
+
+    // Hjälp-funktion för att applicera efterbearbetning (rolling summary + frustration)
+    async function finalize(reply) {
+      try {
+        // Rolling summary
+        await updateRollingSummary(userId, `User: ${userText}\nAI: ${reply?.spoken || ""}`);
+
+        // Frustrationsheuristik: om samma (normaliserad) fråga upprepas 2 gånger i rad
+        const recent = (history || []).slice(-4).map(h => (h.user||"").trim().toLowerCase());
+        recent.push(userText.trim().toLowerCase());
+        const last2 = recent.slice(-2);
+        if (last2.length === 2 && last2[0] === last2[1]) {
+          await logEvent(userId, "frustration_repeat", { question: userText });
+          reply.spoken = "Jag hör dig – vi fastnar på det där. Låt mig ta det extra tydligt: " + (reply.spoken || "");
+          reply.meta = Object.assign({}, reply.meta, { tone_override: "empathetic" });
+        }
+      } catch {}
+      return res.status(200).json({ reply });
+    }
+
+    // === ÄNDRA return-punkter: ersätt res.status(...).json({ reply }) med finalize(reply) ===
+
     /* -------- Lane: Identity -------- */
     if (isIdentityQuery(userText)) {
       const reply = normalizeKeys({
@@ -662,7 +698,7 @@ export default async function handler(req, res) {
         follow_up: "Vad behöver du?"
       });
       await logInteraction({ userId, question: userText, reply, lane: "identity", intent: "whoami", coverage: 0, matchedHeadings: [] });
-      return res.status(200).json({ reply });
+      return finalize(reply);
     }
 
     /* -------- Lane: Profile-light (save/query) -------- */
@@ -679,7 +715,7 @@ export default async function handler(req, res) {
         follow_up: "Vill du lägga in fler uppgifter?"
       });
       await logInteraction({ userId, question: userText, reply, lane: "profile", intent: "save", coverage: 0, matchedHeadings: [] });
-      return res.status(200).json({ reply });
+      return finalize(reply);
     }
 
     if (isProfileQuery(userText)) {
@@ -695,7 +731,7 @@ export default async function handler(req, res) {
               follow_up: "Säg: “Spara linje 65”." }
       );
       await logInteraction({ userId, question: userText, reply, lane: "profile", intent: "query", coverage: 0, matchedHeadings: [] });
-      return res.status(200).json({ reply });
+      return finalize(reply);
     }
 
     /* -------- Lane: Conversation memory -------- */
@@ -731,7 +767,7 @@ export default async function handler(req, res) {
         follow_up: ""
       });
       await logInteraction({ userId, question: userText, reply, lane: "conv_memory", intent: conv.type, coverage: 0, matchedHeadings: [] });
-      return res.status(200).json({ reply });
+      return finalize(reply);
     }
 
     /* -------- Lane: Rewrite intents (förklara enklare / upprepa / sammanfatta / exempel / tempo) -------- */
@@ -747,19 +783,22 @@ export default async function handler(req, res) {
           follow_up: ""
         });
         await logInteraction({ userId, question: userText, reply: fallback, lane: "rewrite", intent: rw.type, coverage: 0, matchedHeadings: [] });
-        return res.status(200).json({ reply: fallback });
+        return finalize(fallback);
       }
 
       if (rw.type === "pace_slow" || rw.type === "pace_fast") {
+        const newPace = rw.type === "pace_slow" ? "slow" : "fast";
+        // Spara preferensen
+        try { await upsertState(userId, { pace: newPace }); } catch {}
         const reply = normalizeKeys({
-          spoken: rw.type === "pace_slow" ? "Okej, jag tar det lugnare nu. 👍" : "Absolut, jag gasar på lite!",
+          spoken: newPace === "slow" ? "Okej, jag tar det lugnare nu. 👍" : "Absolut, jag gasar på lite!",
           need: { clarify: false, question: "" },
-          cards: { summary: "Pace uppdaterad.", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
+            cards: { summary: "Pace uppdaterad.", steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
           follow_up: "",
-          meta: { pace: rw.type === "pace_slow" ? "slow" : "fast" }
+          meta: { pace: newPace }
         });
         await logInteraction({ userId, question: userText, reply, lane: "rewrite", intent: rw.type, coverage: 0, matchedHeadings: [] });
-        return res.status(200).json({ reply });
+        return finalize(reply);
       }
 
       if (rw.type === "repeat") {
@@ -770,7 +809,7 @@ export default async function handler(req, res) {
           follow_up: ""
         });
         await logInteraction({ userId, question: userText, reply, lane: "rewrite", intent: "repeat", coverage: 0, matchedHeadings: [] });
-        return res.status(200).json({ reply });
+        return finalize(reply);
       }
 
       if (rw.type === "switch_topic") {
@@ -781,7 +820,7 @@ export default async function handler(req, res) {
           follow_up: ""
         });
         await logInteraction({ userId, question: userText, reply, lane: "rewrite", intent: "switch_topic", coverage: 0, matchedHeadings: [] });
-        return res.status(200).json({ reply });
+        return finalize(reply);
       }
 
       if (rw.type === "clarify_last") {
@@ -792,17 +831,15 @@ export default async function handler(req, res) {
           follow_up: ""
         });
         await logInteraction({ userId, question: userText, reply, lane: "rewrite", intent: "clarify_last", coverage: 0, matchedHeadings: [] });
-        return res.status(200).json({ reply });
+        return finalize(reply);
       }
 
-      // Anropa LLM för att omskriva base
-      const system = `Du är en chill svensk kollega på golvet. Omskriv senaste svar som en polare: vardagligt, med 'jag', slang som 'fattar', 'kör vi'. Var kort, pratvänlig. Returnera strikt JSON.`;  // GROK: Uppdaterad prompt för ton
-      const user = JSON.stringify({
-        intent: rw.type,
-        base: base.lastAssistant,
-        previous_question: base.lastUser
-      });
-      let out = await callLLM(system, user, 0.7, 800, history);  // GROK: Högre temp för variation, inkl history
+      // Anropa LLM för omskrivning
+      const system = `Du är Grok-lik smart svensk AI-kompis på linjen.
+Smalltalk: humor, kvickt, lätt sarkasm ok, aldrig otrevlig. 1–4 meningar.
+Variation i längd. Max en emoji. Returnera JSON: {"spoken": "..."} `;
+      const user = JSON.stringify({ intent: rw.type, base: base.lastAssistant, previous_question: base.lastUser });
+      let out = await callLLM(system, user, 0.95, 600, history, personaState); // <-- personaState
       out = normalizeKeys(out);
       out.cards.coverage = 0; out.cards.matched_headings = [];
       out.follow_up = out.follow_up || (rw.type === "simplify" ? "Vill du ha ett exempel också?" :
@@ -810,19 +847,21 @@ export default async function handler(req, res) {
                                         rw.type === "examples" ? "Ska jag koppla detta till ett område på linjen?" :
                                         "");
       await logInteraction({ userId, question: userText, reply: out, lane: "rewrite", intent: rw.type, coverage: 0, matchedHeadings: [] });
-      return res.status(200).json({ reply: out });
+      return finalize(out);
     }
 
     /* -------- Lane: Smalltalk -------- */
     if (isSmalltalk(userText)) {
-      const system = `Du är en chill svensk kollega på fabriksgolvet för Linje 65 – snacka som en polare: vardagligt, kort, med humor/empati och slang. Låt det kännas naturligt. Returnera strikt JSON.`;  // GROK: Uppdaterad för ton
+      const system = `Du är Grok-lik smart svensk AI-kompis på linjen.
+Smalltalk: humor, kvickt, lätt sarkasm ok, aldrig otrevlig. 1–4 meningar.
+Variation i längd. Max en emoji. Returnera JSON: {"spoken": "..."} `;
       const user = `Småprat: """${userText}"""`;
-      let out = await callLLM(system, user, 0.8, 600, history);  // GROK: Högre temp, inkl history
+      let out = await callLLM(system, user, 0.95, 600, history, personaState); // <-- personaState
       out = normalizeKeys(out);
       out.cards.coverage = 0; out.cards.matched_headings = [];
       if (!out.spoken) out.spoken = "Allt lugnt här – på tårna. Vad kör vi på idag? 😊";
       await logInteraction({ userId, question: userText, reply: out, lane: "smalltalk", intent: "smalltalk", coverage: 0, matchedHeadings: [] });
-      return res.status(200).json({ reply: out });
+      return finalize(out);
     }
 
     /* -------- Lane: Toolbelt (units & math) -------- */
@@ -838,7 +877,7 @@ export default async function handler(req, res) {
           follow_up: ""
         });
         await logInteraction({ userId, question: userText, reply, lane: "toolbelt", intent: "unit_convert", coverage: 0, matchedHeadings: [] });
-        return res.status(200).json({ reply });
+        return finalize(reply);
       } catch {}
     }
     if (isMathExpr(userText)) {
@@ -852,14 +891,14 @@ export default async function handler(req, res) {
           follow_up: ""
         });
         await logInteraction({ userId, question: userText, reply, lane: "toolbelt", intent: "math", coverage: 0, matchedHeadings: [] });
-        return res.status(200).json({ reply });
+        return finalize(reply);
       } catch {}
     }
     /* -------- Lane: Status / Nyheter / Överlämning -------- */
     if (isStatusQuery(userText)) {
-      const range = parseStatusRange(userText); // { key, label }
-      const { news } = await fetchStatusData(range.key);  // Tar bort incidents
-      const reply = await buildStatusReply({ news, label: range.label, history });
+      const range = parseStatusRange(userText);
+      const { news } = await fetchStatusData(range.key);
+      const reply = await buildStatusReply({ news, label: range.label, history, personaState }); // <-- personaState
 
       await logInteraction({
         userId,
@@ -871,53 +910,39 @@ export default async function handler(req, res) {
         matchedHeadings: ["line_news"]  // Uppdaterat
       });
 
-      return res.status(200).json({ reply });
+      return finalize(reply);
     }
 
-    /* -------- Lane: General knowledge (jobbrelaterat, ej parametrar) -------- */
+    /* -------- Lane: General knowledge -------- */
     if (isGeneralManufacturingQuery(userText)) {
+      // General knowledge lane – uppdatera system + temp
       const system = `
-Du är en chill svensk kollega. Svara kort (1–4 meningar) på allmänna produktionsfrågor (Lean/OEE etc.).
-- Ge principer och enkla exempel, som en polare på golvet.
-- Ge INTE lokala parametrar. Hänvisa till manualen om behövs.
-Returnera strikt JSON.`;  // GROK: Uppdaterad för ton
+Du är Grok-lik svensk AI-kollega.
+Svara kort (2–5 meningar) med naturligt talspråk + lätt humor.
+Ingen punktlista i spoken. Fakta i cards.
+Returnera JSON med "spoken" och "cards".`;
       const user = `Fråga: """${userText}"""`;
-      let out = await callLLM(system, user, 0.6, 700, history);  // GROK: Inkl history
+      let out = await callLLM(system, user, 0.88, 700, history, personaState); // <-- personaState
       out = normalizeKeys(out);
       out.cards.coverage = 0;
       out.cards.matched_headings = [];
       out.follow_up = out.follow_up || "Vill du att jag kopplar detta till ett specifikt område på linjen? 😊";
       await logInteraction({ userId, question: userText, reply: out, lane: "general", intent: "general_manufacturing", coverage: 0, matchedHeadings: [] });
-      return res.status(200).json({ reply: out });
+      return finalize(out); // <-- FIX (tidigare finalize(reply))
     }
 
     /* -------- Lane: RAG (definition / operativt) -------- */
     const { context, coverage, matchedHeadings, scores } = await retrieveContext(userText, 8, userId);  // GROK: Passar userId för filtrering
     const definitionMode = isDefinitionQuery(userText);
 
+    // RAG system prompt – uppdatera
     const system = `
-Du är en chill svensk kollega för Linje 65. Operativa råd från ManualContext – snacka som en erfaren operatör med 'jag', vardagsspråk.
-- Definitioner: kort, inga påhitt.
-- Steg: endast vid stark täckning.
-Returnera strikt JSON.`;  // GROK: Uppdaterad för ton
-
-    const user = `
-ManualContext:
-${context || "(tom)"}
-
-Coverage: ${coverage.toFixed(3)}
-Fråga:
-"""${userText}"""
-
-Instruktioner:
-- Fyll matched_headings och coverage (${coverage.toFixed(2)} ±0.05 om motiverat).
-- Om definition och signal OK: kort förklaring.
-- För operativa: steg bara vid stark täckning; annars precisera.
-- Vid låg coverage: föreslå allmän kunskap som fallback.
-Schema:
-{"spoken": string, "need": {"clarify": boolean, "question"?: string}, "cards": {"summary": string, "steps": string[], "explanation": string, "pitfalls": string[], "simple": string, "pro": string, "follow_up": string, "coverage": number, "matched_headings": string[]}, "follow_up": string}`.trim();
-
-    let out = await callLLM(system, user, 0.6, 1600, history);  // GROK: Inkl history
+Du är Grok-lik svensk AI-operatör.
+Spoken: naturligt tal (inga listor), blandad meningslängd, lätt humor utan att offra tydlighet.
+Steg (om bra täckning) läggs i cards.steps (formellt språk, ingen slang).
+Om låg täckning: erkänn osäkerhet och be om precisering.
+Returnera JSON.`;
+    let out = await callLLM(system, user, 0.9, 1600, history, personaState); // <-- personaState
     out = normalizeKeys(out);
 
     if (!out.cards.matched_headings.length) out.cards.matched_headings = matchedHeadings;
@@ -942,7 +967,7 @@ Schema:
         out.cards.follow_up = "Skapa utkast? Säg 'Skapa utkast'.";
       }
       if (process.env.GAP_DRAFTS === "1") {
-        try { await createGapDraft({ userId, question: userText, coverage, matchedHeadings, scores }); } catch {}
+        try { await createGapDraft({ userId, question: userText, coverage, matchedHeadings, scores, personaState }); } catch {}
       }
     }
 
@@ -973,7 +998,7 @@ Schema:
       matchedHeadings: out.cards.matched_headings
     });
 
-    return res.status(200).json({ reply: out });
+    return finalize(out);
 
   } catch (err) {
     console.error("chat.js internal error:", err);
