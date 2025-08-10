@@ -110,11 +110,130 @@ button.ghost{ background: linear-gradient(180deg,#0e1423,#0b101a); }
 #debugInput{
   background:#0f1424; border-color:#22304a;
 }
+/* ==== JARVIS MODE ==== */
+:root{
+  --jarvis-c1:#6ae1ff; --jarvis-c2:#9f7bff; --jarvis-bg0:#05060a; --jarvis-bg1:#0a0f1b;
+}
+body{
+  background:
+    radial-gradient(1200px 700px at 90% -10%, rgba(159,123,255,.08), transparent 55%),
+    radial-gradient(900px 700px at -10% 110%, rgba(106,225,255,.10), transparent 50%),
+    linear-gradient(180deg,var(--jarvis-bg0),var(--jarvis-bg1) 46%, #06070b);
+  transition: background .6s ease;
+}
+body.awake{
+  background:
+    radial-gradient(1200px 700px at 80% -10%, rgba(159,123,255,.14), transparent 55%),
+    radial-gradient(900px 700px at -10% 110%, rgba(106,225,255,.16), transparent 50%),
+    linear-gradient(180deg,#070a12,#0b1120 46%, #06070b);
+}
+
+/* Headline glow sweep */
+h1{
+  background: linear-gradient(90deg, #ffffff, #cde8ff 40%, #bfa8ff);
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  position:relative; display:inline-block;
+}
+h1::after{
+  content:""; position:absolute; left:0; right:0; bottom:-8px; height:2px;
+  background: linear-gradient(90deg, transparent, var(--jarvis-c1), var(--jarvis-c2), transparent);
+  filter: blur(.2px); opacity:.55; transform:translateX(-30%);
+  animation: sweep 2.6s ease-in-out infinite;
+}
+@keyframes sweep{ 50%{ transform:translateX(30%);} }
+
+/* Glass panels */
+.pill, #vizWrap{
+  background: rgba(17,22,34,.55);
+  border: 1px solid rgba(139,172,255,.18);
+  box-shadow: 0 0 24px rgba(106,225,255,.28), 0 0 48px rgba(159,123,255,.12);
+  backdrop-filter: blur(10px) saturate(130%);
+  transition: transform .2s ease, box-shadow .2s ease;
+}
+body.awake #vizWrap{ box-shadow: 0 0 26px rgba(106,225,255,.35), 0 0 60px rgba(159,123,255,.18); }
+
+/* Futuristic grid under visualizer */
+#vizWrap{ position:relative; overflow:hidden; }
+#vizWrap::before, #vizWrap::after{ content:""; position:absolute; inset:0; pointer-events:none; }
+#vizWrap::before{
+  background:
+    linear-gradient(rgba(120,140,180,.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120,140,180,.07) 1px, transparent 1px);
+  background-size: 28px 28px, 28px 28px;
+  mask-image: radial-gradient(70% 100% at 50% 0%, rgba(0,0,0,.95), transparent 75%);
+  opacity:.85;
+}
+#vizWrap::after{
+  background: linear-gradient(180deg, transparent, rgba(106,225,255,.10), transparent);
+  height:40%; transform: translateY(-120%);
+  animation: scan 4.6s linear infinite;
+}
+@keyframes scan{ to{ transform: translateY(230%);} }
+
+/* Buttons neon */
+button{
+  position:relative; overflow:hidden;
+  background: linear-gradient(180deg,#1a2237,#121826);
+  border:1px solid rgba(170,200,255,.25);
+  box-shadow: inset 0 0 0 1px rgba(106,225,255,.25), 0 8px 22px rgba(0,0,0,.35);
+  transition: transform .14s ease, border-color .2s ease, box-shadow .2s ease;
+}
+button:hover{ transform: translateY(-1px); border-color: rgba(170,200,255,.5); }
+button.ghost{ background: linear-gradient(180deg,#0e1423,#0b101a); }
+
+/* Status dot glow */
+.dot{ box-shadow: 0 0 12px currentColor; }
+
+/* ==== Boot overlay ==== */
+#bootFx{ position:fixed; inset:0; pointer-events:none; opacity:0; z-index:999; }
+#bootFx.active{ opacity:1; }
+#bootFx .boot-flash{
+  position:absolute; inset:0;
+  background: radial-gradient(circle at 50% 50%, rgba(200,240,255,.55), transparent 55%);
+  filter: blur(14px); opacity:0; transform: scale(0.92);
+}
+#bootFx .boot-vignette{
+  position:absolute; inset:0;
+  background: radial-gradient(circle at 50% 50%, transparent 45%, rgba(0,0,0,.65));
+  opacity:0;
+}
+#bootFx .boot-scan{
+  position:absolute; left:0; right:0; height:18%;
+  top:-25%; opacity:0;
+  background: linear-gradient(180deg, transparent, rgba(106,225,255,.25), transparent);
+  filter: blur(1px);
+}
+
+/* boot animations (triggeras via JS) */
+#bootFx.flash .boot-flash{ animation: fxFlash .32s ease forwards; }
+#bootFx.flash .boot-vignette{ animation: fxVignette .9s ease forwards; }
+#bootFx.flash .boot-scan{ animation: fxScan 1.6s ease-out forwards .14s; }
+
+@keyframes fxFlash{
+  0%{ opacity:.0; transform:scale(0.92) }
+  25%{ opacity:1; transform:scale(1.02) }
+  100%{ opacity:0; transform:scale(1) }
+}
+@keyframes fxVignette{
+  0%{ opacity:0 } 20%{ opacity:.6 } 100%{ opacity:0 }
+}
+@keyframes fxScan{
+  0%{ opacity:0; top:-25% }
+  10%{ opacity:1 }
+  100%{ opacity:0; top:120% }
+}
 
   </style>
 </head>
 <body>
   <h1>Coach Assistant</h1>
+  <!-- JARVIS boot-overlay -->
+<div id="bootFx" aria-hidden="true">
+  <div class="boot-flash"></div>
+  <div class="boot-vignette"></div>
+  <div class="boot-scan"></div>
+</div>
+
   <p class="status"><span class="dot idle"></span><span id="recStatus">Redo – tryck start. Prata för att avbryta svaret när som helst.</span></p>
 
   <div class="row">
@@ -722,41 +841,51 @@ async function playSpeechHybrid(fullText) {
 
     // CHANGED: startLoop spelar hälsning först (i samma user-gesture), sedan startar lyssning
     async function startLoop(){
-      if(running) return; running = true;
+  if (running) return; 
+  running = true;
 
-      state = 'THINKING';
-      setStatus(state,'Startar…');
-      startBtn.style.display='none';
-      stopBtn.style.display='inline-block';
+  state = 'THINKING';
+  setStatus(state,'Startar…');
+  startBtn.style.display = 'none';
+  stopBtn.style.display  = 'inline-block';
 
+  try {
+    // 0) Jarvis power-on: visuellt + chime
+    document.body.classList.add('awake');
+    if (typeof triggerBootFX === 'function') triggerBootFX();
+    if (typeof playPowerOnChime === 'function') await playPowerOnChime();
+
+    // 1) “Unlocka” ljud enligt autoplay-policy
+    try {
+      const tmp = new (window.AudioContext || window.webkitAudioContext)();
+      await tmp.resume().catch(()=>{});
+      try { await tmp.close(); } catch {}
+    } catch {}
+
+    // 2) Spela Jarvis-hälsning EN gång innan vi börjar lyssna
+    if (!hasGreeted && typeof playWelcomeGreeting === 'function') {
       try {
-        // 1) “Unlocka” ljud enligt autoplay-policy
-        try {
-          const tmp = new (window.AudioContext || window.webkitAudioContext)();
-          await tmp.resume().catch(()=>{});
-          try { await tmp.close(); } catch {}
-        } catch {}
-
-        // 2) Spela Jarvis-hälsning EN gång innan vi börjar lyssna
-        if (!hasGreeted && typeof playWelcomeGreeting === 'function') {
-          try {
-            await playWelcomeGreeting();
-            hasGreeted = true;
-          } catch (e) {
-            console.warn('Greeting failed:', e);
-          }
-        }
-
-        // 3) Initiera mic/visualizer och börja lyssna efter en kort paus
-        await getMicStream();
-        setStatus('LISTENING','Lyssnar… (bli tyst för att skicka)');
-        setTimeout(() => startListening(), 300);
-
-      } catch {
-        output.insertAdjacentHTML('beforeend', "<div class='pill'>Mikrofon kunde inte startas (behörighet eller HTTPS?).</div>");
-        running=false; startBtn.style.display='inline-block'; stopBtn.style.display='none';
+        await playWelcomeGreeting();
+        hasGreeted = true;
+      } catch (e) {
+        console.warn('Greeting failed:', e);
       }
     }
+
+    // 3) Initiera mic/visualizer och börja lyssna efter en kort paus
+    await getMicStream();
+    setStatus('LISTENING','Lyssnar… (bli tyst för att skicka)');
+    setTimeout(() => startListening(), 300);
+
+  } catch {
+    output.insertAdjacentHTML('beforeend', "<div class='pill'>Mikrofon kunde inte startas (behörighet eller HTTPS?).</div>");
+    running = false; 
+    startBtn.style.display = 'inline-block'; 
+    stopBtn.style.display  = 'none';
+    document.body.classList.remove('awake'); // reset om boot misslyckas
+  }
+}
+
 
     function stopLoop(){
       running=false; state='IDLE'; setStatus(state,'Stoppad');
@@ -845,6 +974,34 @@ async function playSpeechHybrid(fullText) {
 
     // Inga auto-startar pga autoplay-policy; hälsning triggas i startLoop
     let hasGreeted = false;
+// Minimal chime som spelas av klicket (lagligt enligt autoplay-policy)
+async function playPowerOnChime() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  await ctx.resume();
+  const o1 = ctx.createOscillator();
+  const g  = ctx.createGain();
+  o1.type = 'sine';
+  o1.frequency.setValueAtTime(440, ctx.currentTime);
+  o1.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.18);
+  g.gain.setValueAtTime(0.001, ctx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.05, ctx.currentTime + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.28);
+  o1.connect(g).connect(ctx.destination);
+  o1.start();
+  o1.stop(ctx.currentTime + 0.30);
+  // stäng efter en stund för att frigöra
+  setTimeout(()=>ctx.close().catch(()=>{}), 500);
+}
+
+function triggerBootFX() {
+  const fx = document.getElementById('bootFx');
+  if (!fx) return;
+  fx.classList.add('active');
+  // retrigger animation
+  fx.classList.remove('flash'); void fx.offsetWidth; fx.classList.add('flash');
+  // auto-hide overlay efter 1.2s
+  setTimeout(()=> fx.classList.remove('active'), 1200);
+}
 
   </script>
 
