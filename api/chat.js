@@ -369,7 +369,9 @@ Omformulera ENDAST språket - lägg inte till information som inte finns i råda
       text: out.spoken, 
       priority: "spoken", 
       allow_fallback: false,
-      skip_cards: true  // Skippa cards/steps vid uppläsning
+      read_only_spoken: true,  // Explicit flagga för att bara läsa spoken
+      skip_steps: true,        // Skippa steps specifikt
+      skip_cards: true         // Skippa hela cards-sektionen
     }
   });
 
@@ -574,7 +576,18 @@ function normalizeKeys(out) {
   if (!Array.isArray(out.cards.matched_headings)) out.cards.matched_headings = [];
   if (typeof out.cards.coverage !== "number" || isNaN(out.cards.coverage)) out.cards.coverage = 0;
   if (typeof out.follow_up !== "string") out.follow_up = out.cards.follow_up || "";
-  // meta tillåts vara valfritt
+  
+  // För status-svar: säkerställ att bara spoken läses upp
+  if (out.meta?.speech_source === "status_summary") {
+    out.meta.tts = Object.assign({}, out.meta.tts, {
+      text: out.spoken,
+      priority: "spoken_only",
+      read_only_spoken: true,
+      skip_steps: true,
+      skip_cards: true
+    });
+  }
+  
   return out;
 }
 
