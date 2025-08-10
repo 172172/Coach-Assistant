@@ -1,5 +1,5 @@
 // /api/db.js
-import { Pool } from "pg";
+const { Pool } = require("pg");
 
 // Använd enbart separata PG-variabler (pooler 6543) och stäng av cert-verifiering.
 const pool = new Pool({
@@ -14,7 +14,7 @@ const pool = new Pool({
   connectionTimeoutMillis: 10000,
 });
 
-export async function q(text, params) {
+async function q(text, params) {
   const client = await pool.connect();
   try {
     return await client.query(text, params);
@@ -22,3 +22,22 @@ export async function q(text, params) {
     client.release();
   }
 }
+
+// Sök kunskap i databasen (placeholder implementation)
+async function searchKnowledge(query) {
+  try {
+    // Placeholder för kunskapssökning
+    // Du kan implementera full-text search eller annan söklogik här
+    
+    // För nu, returnera en grundläggande kunskap
+    return `Kunskapssökning för: "${query}". Implementera din söklogik här för att hämta relevant information från kunskapsdatabasen.`;
+  } catch (error) {
+    console.error('Knowledge search error:', error);
+    return "Kunde inte söka i kunskapsdatabasen just nu.";
+  }
+}
+
+module.exports = {
+  q,
+  searchKnowledge
+};
