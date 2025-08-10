@@ -205,6 +205,101 @@ function convertUnits({ val, from, to }) {
   if (from in volBase && to in volBase) return (val * volBase[from]) / volBase[to];
   throw new Error("Unsupported units");
 }
+/* ================= Status / News lane ================= */
+
+// Träffar frågor som: "vad har hänt idag/igår/denna vecka", "status", "nyheter", "överlämning", "underhåll"
+function isStatusQuery(s = "") {
+  const t = norm(s);
+  if (!/\b(vad har hant|vad har hänt|status|laget|läget|uppdatering|nyheter|overlamning|överlämning|underhall|underhåll)\b/.test(t)) return false;
+  return true;
+}
+
+// Light daterange-parser → 'today' | 'yesterday' | 'last_week' | 'week'
+function parseStatusRange(s = "") {
+  const t = norm(s);
+  if (/\bidag|just nu|idag\b/.test(t)) return { key: "today", label: "idag" };
+  if (/\bigar|igår\b/.test(t)) return { key: "yesterday", label: "igår" };
+  if (/\bforra veckan|förra veckan\b/.test(t)) return { key: "last_week", label: "förra veckan" };
+  if (/\bdenna vecka|i veckan|veckan\b/.test(t)) return { key: "week", label: "denna vecka" };
+  return { key: "week", label: "senaste veckan" };
+}
+
+// Hämta line_news + incidents för intervallet
+async function fetchStatusData(rangeKey = "week") {
+  let whereNews = "news_at >= now() - interval '7 days'";
+  let whereInc  = "reported_at >= now() - interval '7 days'";
+  if (rangeKey === "today") {
+    whereNews = "news_at >= date_trunc('day', now())";
+    whereInc  = "reported_at >= date_trunc('day', now())";
+  } else if (rangeKey === "yesterday") {
+    whereNews = "news_at >= date_trunc('day', now()) - interval '1 day' AND news_at < date_trunc('day', now())";
+    whereInc  = "reported_at >= date_trunc('day', now()) - interval '1 day' AND reported_at < date_trunc('day', now())";
+  } else if (rangeKey === "last_week") {
+    whereNews = "news_at >= date_trunc('week', now()) - interval '1 week' AND news_at < date_trunc('week', now())";
+    whereInc  = "reported_at >= date_trunc('week', now()) - interval '1 week' AND reported_at < date_trunc('week', now())";
+  }
+
+  const newsSql = `
+    select id, news_at, section, area, shift, title, body, tags
+    from line_news
+    where ${whereNews}
+    order by news_at desc
+    limit 300
+  `;
+  const incSql = `
+    select id, reported_at, area, severity, title, problem, resolution, tags, status
+    from incidents
+    where ${whereInc}
+    order by reported_at desc
+    limit 300
+  `;
+
+  const [n, i] = await Promise.all([ q(newsSql), q(incSql) ]);
+  return { news: n?.rows || [], incidents: i?.rows || [] };
+}
+
+// Bygg pratvänlig sammanfattning via callLLM
+async function buildStatusReply({ news = [], incidents = [], label = "senaste veckan", history = [] }) {
+  if ((!news || news.length === 0) && (!incidents || incidents.length === 0)) {
+    const empty = {
+      spoken: `Jag hittar inget inlagt för ${label}. Vill du att vi börjar logga nyheter/överlämning här?`,
+      need: { clarify: false, question: "" },
+      cards: { summary: `Inget registrerat ${label}.`, steps: [], explanation: "", pitfalls: [], simple: "", pro: "", follow_up: "", coverage: 0, matched_headings: [] },
+      follow_up: "Ska jag visa hur du lägger in nyheter?"
+    };
+    return normalizeKeys(empty);
+  }
+
+  const fmt = (d) => new Date(d).toLocaleString("sv-SE", { dateStyle: "short", timeStyle: "short" });
+  const newsLines = (news || []).map(n =>
+    `NEWS [${n.section || "production"}] ${fmt(n.news_at)} ${n.area ? "["+n.area+"] " : ""}${n.shift ? "[Shift "+n.shift+"] " : ""}${n.title ? n.title + " – " : ""}${(n.body||"").trim()}${Array.isArray(n.tags)&&n.tags.length? " #"+n.tags.join(" #") : ""}`
+  );
+  const incLines = (incidents || []).map(x =>
+    `INCIDENT [${(x.severity||"").toUpperCase()}] ${fmt(x.reported_at)} ${x.area? "["+x.area+"] " : ""}${x.title? x.title+" – " : ""}${x.problem||""}${x.resolution? " | Åtgärd: "+x.resolution : ""}${Array.isArray(x.tags)&&x.tags.length? " #"+x.tags.join(" #") : ""}`
+  );
+
+  const system = `
+Du är en svensk kollega. Du får rårader från "line_news" (NEWS) och "incidents" (INCIDENT).
+- Ge en superkort pratvänlig summering för ${label} (2–5 meningar).
+- Lista 3–8 nyckelpunkter i steps[] (gruppera gärna på sektion/område).
+- Lyft ev. återkommande problem + föreslå nästa steg (follow_up).
+- Ingen påhittad data.
+Returnera strikt JSON med fälten i vårt schema.`;
+  const user = [
+    `Sammanfatta ${label}.`,
+    `NEWS:\n${newsLines.join("\n") || "(tomt)"}`,
+    `INCIDENTS:\n${incLines.join("\n") || "(tomt)"}`
+  ].join("\n\n");
+
+  let out = await callLLM(system, user, 0.4, 800, history);
+  out = normalizeKeys(out);
+  out.cards.coverage = 0;
+  out.cards.matched_headings = ["line_news", "incidents"];
+  out.cards.summary = out.cards.summary || `Status för ${label}`;
+  out.follow_up = out.follow_up || "Vill du filtrera på område eller skift?";
+  return out;
+}
+
 
 /* ================= Retrieval (RAG) ================= */
 async function retrieveContext(userText, k = 8, userId) {  // GROK: Lade till userId för profilfiltrering
@@ -639,6 +734,24 @@ export default async function handler(req, res) {
         await logInteraction({ userId, question: userText, reply, lane: "toolbelt", intent: "math", coverage: 0, matchedHeadings: [] });
         return res.status(200).json({ reply });
       } catch {}
+    }
+    /* -------- Lane: Status / Nyheter / Överlämning -------- */
+    if (isStatusQuery(userText)) {
+      const range = parseStatusRange(userText); // { key, label }
+      const { news, incidents } = await fetchStatusData(range.key);
+      const reply = await buildStatusReply({ news, incidents, label: range.label, history });
+
+      await logInteraction({
+        userId,
+        question: userText,
+        reply,
+        lane: "status",
+        intent: `status_${range.key}`,
+        coverage: 0,
+        matchedHeadings: ["line_news","incidents"]
+      });
+
+      return res.status(200).json({ reply });
     }
 
     /* -------- Lane: General knowledge (jobbrelaterat, ej parametrar) -------- */
