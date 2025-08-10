@@ -1,4 +1,4 @@
- <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="sv">
 <head>
   <meta charset="UTF-8" />
@@ -312,19 +312,22 @@
 
         lastQ = text; lastA = r;
 
-        // FÖRBÄTTRING: Respektera TTS-flaggor från backend
-        const shouldReadSteps = !r.meta?.tts?.skip_steps && !r.meta?.tts?.read_only_spoken;
+        // KRITISK FIX: Kolla om backend säger att bara läsa spoken
+        const shouldSkipSteps = r.meta?.tts?.skip_steps || 
+                               r.meta?.tts?.read_only_spoken || 
+                               r.meta?.speech_source === "status_summary";
         
         const steps = Array.isArray(r.cards?.steps) ? r.cards.steps : [];
         resetSteps(steps);
         
-        // Läs bara spoken-delen
+        // Läs alltid spoken-delen först
         await speak(r.spoken || 'Okej.');
         
-        // Läs steps endast om backend inte säger att skippa dem
-        if (steps.length && shouldReadSteps) {
+        // Läs steps ENDAST om backend inte säger att skippa dem
+        if (steps.length && !shouldSkipSteps) {
           await speakStepsChunk();
         }
+
       }catch(err){
         output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI. (${err?.message||'okänt fel'})</div>`);
         if(running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
