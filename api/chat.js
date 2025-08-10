@@ -329,8 +329,15 @@ if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
   if (merged.length) out.cards.steps = merged;
 }
 
-  return out;
+// --- TTS-hint: se till att rösten läser sammanfattningen ---
+out.meta = Object.assign({}, out.meta, { speech: out.spoken });
+
+// (valfritt skydd) om summary är tomt – spegla spoken dit också
+if (!out.cards.summary || out.cards.summary.trim().length < 4) {
+  out.cards.summary = out.spoken;
 }
+return out;
+
 
 
 /* ================= Retrieval (RAG) ================= */
