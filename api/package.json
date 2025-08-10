@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
+    "@supabase/supabase-js": "^2.45.1",
     "pg": "^8.11.5",
     "node-fetch": "^2.6.7",
     "form-data": "^4.0.0",
