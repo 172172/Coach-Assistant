@@ -222,6 +222,32 @@ button.ghost{ background: linear-gradient(180deg,#0e1423,#0b101a); }
   10%{ opacity:1 }
   100%{ opacity:0; top:120% }
 }
+    /* Immersive JARVIS mode */
+body.immersive *:not(#vizWrap):not(#vizWrap *):not(#bootFx){ 
+  opacity:0; pointer-events:none; 
+  transition: opacity .25s ease;
+}
+body.immersive #vizWrap{
+  position:fixed; inset:0; padding:0; margin:0;
+  border:none; background:transparent; z-index:999;
+}
+body.immersive #vizWrap canvas{
+  width:100vw; height:100vh; border-radius:0; 
+}
+
+/* Undertext / “röst” */
+#speechSub{
+  position:absolute; left:50%; bottom:6vh; transform:translateX(-50%);
+  max-width:min(90vw,1000px);
+  padding:.85rem 1.1rem; border-radius:14px;
+  background: rgba(10,14,26,.55);
+  border: 1px solid rgba(140,170,255,.22);
+  backdrop-filter: blur(8px) saturate(130%);
+  color:#e6f0ff; font-size:1.05rem; line-height:1.4;
+  opacity:0; transition: opacity .18s ease, transform .18s ease;
+}
+#speechSub.visible{ opacity:1; transform:translateX(-50%) translateY(0); }
+
 
   </style>
 </head>
@@ -249,6 +275,7 @@ button.ghost{ background: linear-gradient(180deg,#0e1423,#0b101a); }
   </div>
 
   <div id="vizWrap"><canvas id="viz" width="800" height="140"></canvas></div>
+  <div id="speechSub" aria-live="polite"></div>
   <div id="output"></div>
 
   <input id="debugInput" type="text" placeholder="Skriv en testfråga här (för debugging)" />
@@ -838,6 +865,15 @@ async function playSpeechHybrid(fullText) {
       micArr = new Uint8Array(analyser.fftSize); src.connect(analyser);
       if(!rafId) rafId = requestAnimationFrame(loop);
     }
+function enterImmersive(){ document.body.classList.add('immersive'); }
+function exitImmersive(){ document.body.classList.remove('immersive'); setHudSpeech(''); }
+function setHudSpeech(t){
+  const el = document.getElementById('speechSub');
+  if (!el) return;
+  const txt = String(t||'').trim();
+  el.textContent = txt;
+  el.classList.toggle('visible', !!txt);
+}
 
     // CHANGED: startLoop spelar hälsning först (i samma user-gesture), sedan startar lyssning
     async function startLoop(){
