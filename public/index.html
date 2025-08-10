@@ -61,11 +61,11 @@
     let state = 'IDLE', running = false;
     let chatHistory = [];
 
-    // Pace för steg (kan påverkas av “pace”-intent)
+    // Pace (om du tidigare använde den – vi låter standard vara 4)
     let STEP_CHUNK_SIZE = 4;
 
-    // Mic / analyser / processad inspelningsström
-    let micStream = null, recStream = null, mediaRecorder = null, chunks = [];
+    // Mic / analyser
+    let micStream = null, mediaRecorder = null, chunks = [];
     let audioCtxVAD = null, analyser = null, micArr = null;
 
     // TTS (stream)
@@ -77,7 +77,7 @@
     // Eko-skydd
     let lastSpokenText = "";
     let lastSpokenTextNorm = "";
-    const ECHO_SUPPRESS_MS = 2500;
+    const ECHO_SUPPRESS_MS = 2500;      // extra hård filterperiod efter TTS
     const LISTEN_DELAY_AFTER_TTS = 200;
 
     // Stegvis uppläsning
@@ -85,13 +85,12 @@
     let stepOffset = 0;
     let lastQ = null, lastA = null;
 
-    // VAD/endpointing
-    let MAX_RECORD_MS   = 15000; // längre för långsam talare
-    const SILENCE_HOLD_MS_BASE = 800; // bas
-    const SILENCE_HOLD_MS_EXT  = 1200; // när du redan pratar länge
+    // VAD
+    const MAX_RECORD_MS   = 10000;
+    const SILENCE_HOLD_MS = 800;
 
     // MIME
-    const MIME_CANDIDATES = ['audio/webm;codecs=opus','audio/webm','audio/ogg',''];
+    const MIME_CANDIDATES = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg',''];
     let REC_MIME = '', REC_EXT = 'webm';
 
     // Gates
@@ -99,27 +98,23 @@
     const MIN_SPEECH_MS_ECHO  = 320;
     const MIN_BLOB_BYTES      = 1200;
 
-    // Duty cycle
-    const MIN_DUTY            = 0.18;
-    const MIN_DUTY_ECHO       = 0.28;
+    // Nytt: “duty cycle” – kräver tillräcklig andel tal i klippet
+    const MIN_DUTY            = 0.18;   // 18% av tiden ska vara över tröskeln
+    const MIN_DUTY_ECHO       = 0.28;   // hårdare direkt efter TTS
 
     // Hallu/eko-filter
     const HALLU = /(patreon|prenumerera|videon|undertexter|amara\.org)/i;
 
-    // Filler-ord vi slänger
+    // Fillers vi vill SLÄNGA (vanliga falsk-väckningar på svenska)
     const DISCARD_FILLERS = [
       "tack","tack sa mycket","tack så mycket","tack for mig","tack för mig",
       "ok","okej","mm","mmm","mhm","öh","eh","ah","aha","aa","jaa","yes","jo"
     ];
 
-    const GREETINGS_OK = /^(hej( hej)?|tja|tjena|hall[aå]|god morgon|god kväll)$/i;
-    const STEP_COMMANDS = /(nästa|fortsätt|mer|continue|next)/i;
-    const SEND_COMMANDS = /\b(skicka|klart|kör|go)\b/i;
+    // Hälsningar vi VILL TILLÅTA även om de är korta
+    const GREETING_OK = /^(hej( hej)?|tja|tjena|hall[aå]|god morgon|god kväll)$/i;
 
-    // Stitching av långsam/upphackad tal
-    let stitchBuffer = "";
-    let stitchTimer = null;
-    const STITCH_MS = 1100; // vänta lite för fortsättning
+    const STEP_COMMANDS = /(nästa|fortsätt|mer|continue|next)/i;
 
     // ---------- Utils ----------
     function normalize(s){
@@ -129,19 +124,8 @@
         .replace(/[^a-z0-9\s]/g," ")
         .replace(/\s+/g," ").trim();
     }
-    function likelyEchoOfTTS(text){
-      const within = Date.now() - lastTTSEnd < ECHO_SUPPRESS_MS;
-      if (!within) return false;
-      const t = normalize(text);
-      if (!t) return true;
-      if (!lastSpokenTextNorm) return false;
-      if (lastSpokenTextNorm.includes(t)) return true;
-      const ts = t.split(" ").filter(w=>w.length>=3);
-      if (!ts.length) return true;
-      const ls = new Set(lastSpokenTextNorm.split(" ").filter(w=>w.length>=3));
-      let overlap=0; ts.forEach(w=>{ if(ls.has(w)) overlap++; });
-      return (overlap / ts.length) >= 0.7;
-    }
+
+    // Bedöm om en transkription ska slängas (falsk väckning / brus / kortfiller)
     function shouldDropUtterance(text, talkMs, elapsedMs){
       const withinEcho = (Date.now() - lastTTSEnd) < ECHO_SUPPRESS_MS;
       const duty = talkMs / Math.max(1, elapsedMs);
@@ -150,82 +134,17 @@
       const raw = (text||"").trim();
       const norm = normalize(raw);
 
-      if (!norm) return true;
-      if (raw.length < 2) return true;
-      if (DISCARD_FILLERS.includes(norm)) return true;
-      if (duty < dutyMin) return true;
+      if (!norm) return true;                          // tomt
+      if (raw.length < 2) return true;                 // extremt kort
+      if (DISCARD_FILLERS.includes(norm)) return true; // kända brus-filler
+      if (duty < dutyMin) return true;                 // för lite faktisk tal-energi
 
+      // Om väldigt kort och inte fråga: släng, utom hälsningar och stegkommandon
       const words = norm.split(" ").filter(Boolean);
       if (words.length <= 2 && !/[?]/.test(raw) && !GREETINGS_OK.test(raw) && !STEP_COMMANDS.test(raw)) {
         return true;
       }
       return false;
-    }
-
-    // Domän-korrigering (exakt + fuzzy)
-    const DOMAIN_ALIASES = {
-      "cip": ["cippa","zipa","zippa","sippa","cipa","cib","sip","zip","chip","cippe"],
-      "ocme": ["åsme","osme","ocne","okme","åcme","åseme","åcme","ocmé"],
-      "kisters": ["kister","kisters","kistas","kistars","kistens"],
-      "depalletizer": ["depallettizer","depallettisör","depalletisör","depalletizerare","depalletajser"],
-      "coolpack": ["cool pack","kolpack","coolpacken","coolpak"],
-      "jones": ["jons","joness","jånes","djones"],
-      "fals": ["falss","vals","falls","falsen","falsa"],
-      "givare": ["givaren","givaree","givarr","sensor","sensorn"],
-      "gejdrar": ["gejd", "gejder", "gejdrar", "gejdarna", "guideskenor","skensystem"],
-      "kisters limaggregat": ["lim aggregat","limmaggregat","kisters lim","limstation"],
-      "ocme formatbyte": ["ocme byta format","ocme format byte","ocme omställning","ocme omstallning"]
-    };
-    const DOMAIN_KEYS = Object.keys(DOMAIN_ALIASES);
-
-    function levenshtein(a, b) {
-      if (a === b) return 0;
-      const m = [];
-      for (let i=0; i<=b.length; i++) { m[i] = [i]; }
-      for (let j=0; j<=a.length; j++) { m[0][j] = j; }
-      for (let i=1; i<=b.length; i++) {
-        for (let j=1; j<=a.length; j++) {
-          m[i][j] = Math.min(
-            m[i-1][j]+1,
-            m[i][j-1]+1,
-            m[i-1][j-1] + (a[j-1] === b[i-1] ? 0 : 1)
-          );
-        }
-      }
-      return m[b.length][a.length];
-    }
-
-    function domainCorrect(text){
-      let out = text;
-
-      // 1) hård ersättning för aliaslistor
-      for (const canonical of DOMAIN_KEYS) {
-        const aliases = DOMAIN_ALIASES[canonical];
-        for (const alt of aliases) {
-          const re = new RegExp(`\\b${alt.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}\\b`, 'gi');
-          out = out.replace(re, canonical.toUpperCase());
-        }
-      }
-
-      // 2) fuzzy: ordvis matchning
-      const tokens = out.split(/\b/);
-      for (let i=0; i<tokens.length; i++) {
-        const w = tokens[i];
-        if (!/^[A-Za-zÅÄÖåäö]+$/.test(w)) continue;
-        const low = w.toLowerCase();
-        for (const canonical of DOMAIN_KEYS) {
-          const dist = levenshtein(low, canonical);
-          if (dist > 0 && dist <= 2 && Math.abs(low.length - canonical.length) <= 2) {
-            tokens[i] = canonical.toUpperCase();
-            break;
-          }
-        }
-      }
-      out = tokens.join("");
-
-      // 3) CIP singular/plural-variationer i svensk tal
-      out = out.replace(/\b(cippar|cippan|cippas)\b/gi, "CIP");
-      return out;
     }
 
     function setStatus(mode, text) {
@@ -291,7 +210,7 @@
         lastSpokenText = String(text||"");
         lastSpokenTextNorm = normalize(lastSpokenText);
         try{
-          const url = `/api/tts-stream?text=${encodeURIComponent(text)}&latency=1`;
+          const url = `/api/tts-stream?text=${encodeURIComponent(text)}&latency=3`;
           ttsAudio = new Audio(); ttsAudio.src = url; ttsAudio.preload = "auto"; ttsAudio.crossOrigin = "anonymous";
           ttsCtx = new (window.AudioContext||window.webkitAudioContext)(); await ttsCtx.resume().catch(()=>{});
           const srcNode = ttsCtx.createMediaElementSource(ttsAudio);
@@ -403,33 +322,6 @@
       }
     }
 
-    // Stitch-kö (slå ihop långsam/upphackad tal till en fråga)
-    function queueOrSendTranscript(text){
-      const raw = text.trim();
-      // “skicka/klart” → flush direkt
-      if (SEND_COMMANDS.test(raw)) return flushStitch(true);
-
-      // om förra buffern slutar tydligt (punkt/frågetecken) → skicka förra först
-      if (stitchBuffer && /[.!?…]$/.test(stitchBuffer.trim())) {
-        flushStitch(false);
-      }
-
-      stitchBuffer = stitchBuffer ? (stitchBuffer + " " + raw) : raw;
-
-      if (stitchTimer) clearTimeout(stitchTimer);
-      stitchTimer = setTimeout(()=> flushStitch(false), STITCH_MS);
-    }
-    function flushStitch(force){
-      if (!stitchBuffer) return;
-      const toSend = stitchBuffer.trim();
-      stitchBuffer = "";
-      if (stitchTimer) { clearTimeout(stitchTimer); stitchTimer=null; }
-      if (force || toSend.length) {
-        output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${toSend}</div>`);
-        askAssistant(toSend);
-      }
-    }
-
     // ---------- Whisper ----------
     async function transcribe(blob){
       const fd = new FormData();
@@ -466,8 +358,8 @@
       const speechThreshold = await calibrateThreshold();
 
       try{
-        mediaRecorder = new MediaRecorder(recStream || micStream, REC_MIME ? { mimeType: REC_MIME, audioBitsPerSecond: 192000 } : { audioBitsPerSecond: 192000 });
-      }catch{ mediaRecorder = new MediaRecorder(recStream || micStream); }
+        mediaRecorder = new MediaRecorder(micStream, REC_MIME ? { mimeType: REC_MIME, audioBitsPerSecond: 128000 } : undefined);
+      }catch{ mediaRecorder = new MediaRecorder(micStream); }
 
       mediaRecorder.ondataavailable = (e)=>{ if(e.data.size>0) chunks.push(e.data); };
       mediaRecorder.onstop = async ()=>{
@@ -485,28 +377,19 @@
         if (!accept || blob.size < MIN_BLOB_BYTES) { if(running) startListening(); return; }
 
         try{
-          let text = await transcribe(blob);
+          const text = await transcribe(blob);
           if (!text || HALLU.test(text) || likelyEchoOfTTS(text)) { if(running) startListening(); return; }
 
-          // Domän-korrigering (CIP/OCME m.m.)
-          text = domainCorrect(text);
-
-          // Kast bort falskväckningar/kortfiller
+          // NYTT: kastar bort falsk-väckningar och korta fillers
           if (shouldDropUtterance(text, talkMs, elapsed)) { if(running) startListening(); return; }
 
-          // Röstkommandon för steg (går före stitch)
           const t = text.toLowerCase();
           if (stepQueue.length && STEP_COMMANDS.test(t) && !likelyEchoOfTTS(text)) {
-            await speakStepsChunk(); if(running) startListening(); return;
+            await speakStepsChunk(); return;
           }
 
-          // “skicka/klart” röstkommando → flush
-          if (SEND_COMMANDS.test(t)) { flushStitch(true); if(running) startListening(); return; }
-
-          // Stitch långsam/upphackad tal till en hel mening
-          queueOrSendTranscript(text);
-
-          if(running) startListening();
+          output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du sa:</strong> ${text}</div>`);
+          await askAssistant(text);
         }catch{
           output.insertAdjacentHTML('beforeend',"<div class='pill'>Kunde inte transkribera ljudet.</div>");
           if(running) startListening();
@@ -520,11 +403,8 @@
         const lvl = rmsLevel(micArr);
         if (lvl >= speechThreshold) { talkMs += 100; silentMs = 0; }
         else { silentMs += 100; }
-
         const elapsed = performance.now()-startedAt;
-        const silenceHold = (talkMs >= 1200) ? SILENCE_HOLD_MS_EXT : SILENCE_HOLD_MS_BASE;
-
-        if (silentMs >= silenceHold || elapsed > MAX_RECORD_MS){
+        if (silentMs >= SILENCE_HOLD_MS || elapsed > MAX_RECORD_MS){
           clearInterval(vadTimer);
           try{ mediaRecorder.state!=='inactive' && mediaRecorder.stop(); }catch{}
         }
@@ -533,55 +413,16 @@
 
     // ---------- START/STOP ----------
     async function getMicStream(){
-      const constraints = {
-        audio: {
-          echoCancellation:true,
-          noiseSuppression:true,
-          autoGainControl:false,     // vi kör egen kompressor/gain
-          channelCount: 1
-        }
-      };
+      const constraints = { audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:false } };
       REC_MIME = MIME_CANDIDATES.find(m => !m || MediaRecorder.isTypeSupported(m)) || '';
-      REC_EXT  = REC_MIME.includes('ogg') ? 'ogg' : 'webm';
+      REC_EXT  = REC_MIME.includes('mp4') ? 'm4a' : REC_MIME.includes('ogg') ? 'ogg' : 'webm';
 
       micStream = await navigator.mediaDevices.getUserMedia(constraints);
-
-      // === Ljudkedja: HPF -> Kompressor -> Gain -> Dest (till MediaRecorder) + Analyser (VAD/viz) ===
       audioCtxVAD = new (window.AudioContext||window.webkitAudioContext)();
       await audioCtxVAD.resume().catch(()=>{});
       const src = audioCtxVAD.createMediaStreamSource(micStream);
-
-      const hpf = audioCtxVAD.createBiquadFilter();
-      hpf.type = "highpass";
-      hpf.frequency.value = 120;    // skär bort lågbas/brus
-      hpf.Q.value = 0.7;
-
-      const comp = audioCtxVAD.createDynamicsCompressor();
-      comp.threshold.value = -28;   // börja komprimera
-      comp.knee.value = 30;
-      comp.ratio.value = 3.5;
-      comp.attack.value = 0.003;
-      comp.release.value = 0.25;
-
-      const gain = audioCtxVAD.createGain();
-      gain.gain.value = 1.2;        // lite boost för tydlighet
-
-      analyser = audioCtxVAD.createAnalyser();
-      analyser.fftSize = 2048;
-      analyser.smoothingTimeConstant = 0.6;
-      micArr = new Uint8Array(analyser.fftSize);
-
-      const dest = audioCtxVAD.createMediaStreamDestination();
-
-      // routing: src → hpf → comp → gain → analyser + dest
-      src.connect(hpf);
-      hpf.connect(comp);
-      comp.connect(gain);
-      gain.connect(analyser);
-      gain.connect(dest);
-
-      recStream = dest.stream; // inspelning använder processad ström
-
+      analyser = audioCtxVAD.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.6;
+      micArr = new Uint8Array(analyser.fftSize); src.connect(analyser);
       if(!rafId) rafId = requestAnimationFrame(loop);
     }
 
@@ -609,11 +450,9 @@
       analyser=null; audioCtxVAD=null; micArr=null;
       stepQueue=[]; stepOffset=0; lastQ=null; lastA=null;
       chatHistory = [];
-      stitchBuffer=""; if(stitchTimer){ clearTimeout(stitchTimer); stitchTimer=null; }
       try{ if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; } }catch{}
       try{ if(ttsAudio){ ttsAudio.pause(); } }catch{}
       STEP_CHUNK_SIZE = 4;
-      MAX_RECORD_MS = 15000;
     }
 
     window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
@@ -623,7 +462,7 @@
     stopBtn.addEventListener('click', stopLoop);
     abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
 
-    // Debug: text till chat
+    // Debug: text till chat (oförändrat – inget filter här)
     debugBtn.addEventListener('click', async () => {
       const text = debugInput.value.trim();
       if (text) {
@@ -632,6 +471,22 @@
         debugInput.value = '';
       }
     });
+
+    // --- likelyEchoOfTTS (behåller din tidigare)
+    function likelyEchoOfTTS(text){
+      const within = Date.now() - lastTTSEnd < ECHO_SUPPRESS_MS;
+      if (!within) return false;
+      const t = normalize(text);
+      if (!t) return true;
+      if (!lastSpokenTextNorm) return false;
+      if (lastSpokenTextNorm.includes(t)) return true;
+      const ts = t.split(" ").filter(w=>w.length>=3);
+      if (!ts.length) return true;
+      const ls = new Set(lastSpokenTextNorm.split(" ").filter(w=>w.length>=3));
+      let overlap=0;
+      ts.forEach(w=>{ if(ls.has(w)) overlap++; });
+      return (overlap / ts.length) >= 0.7;
+    }
   </script>
 </body>
 </html>
