@@ -316,6 +316,10 @@ ANVÄNDARKONTEXT:
     prompt += `\n- Senaste ämnen vi pratat om: ${userSession.context.recentTopics.slice(0, 3).join(', ')}`;
   }
 
+  if (context.searchResults) {
+    prompt += `\n\nTILLGÄNGLIG KUNSKAP:\n${context.searchResults}`;
+  }
+
   prompt += `
 
 SVARSSTIL:
@@ -330,8 +334,7 @@ EXEMPEL FRASER:
 - "Låt oss ta det steg för steg tillsammans"
 - "Bra fråga! Det undrar många operatörer över"
 
-FORMAT:
-Svara alltid i JSON med denna struktur:
+VIKTIGT: Du MÅSTE svara i giltigt JSON-format med exakt denna struktur:
 {
   "spoken": "Vad du säger högt (naturligt och personligt)",
   "cards": {
@@ -348,7 +351,9 @@ Svara alltid i JSON med denna struktur:
     "experience_needed": "${personality.experienceLevel}",
     "encouragement_added": ${interaction.needsEncouragement}
   }
-}`;
+}
+
+Svara ENDAST med giltigt JSON, inget annat text.`;
 
   return prompt;
 }
