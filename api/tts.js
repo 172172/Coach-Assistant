@@ -11,9 +11,9 @@ export default async function handler(req, res) {
 
     // Neutral, tydlig leverans (inte “pepp”)
     const voice_settings = {
-      stability: 0.6,
-      similarity_boost: 0.9,
-      style: 0.2,
+      stability: 0.35,
+      similarity_boost: 0.95,
+      style: 0.8,
       use_speaker_boost: true
     };
 
