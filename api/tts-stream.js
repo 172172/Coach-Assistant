@@ -29,7 +29,7 @@ export default async function handler(req, res) {
     } = req.query || {};
 
     const apiKey = process.env.ELEVENLABS_API_KEY;
-    const voiceId = process.env.ELEVENLABS_VOICE_ID || "3mwblJqg1SFnILqt4AFC";
+    const voiceId = process.env.ELEVENLABS_VOICE_ID || "aSLKtNoVBZlxQEMsnGL2";
     if (!apiKey) return res.status(500).json({ error: "ELEVENLABS_API_KEY saknas" });
 
     const output_format = typeof format === "string" && format ? format : "mp3_44100_128";
