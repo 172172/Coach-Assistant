@@ -204,6 +204,162 @@
       if (_speakResolve) { try { _speakResolve(); } catch {} _speakResolve = null; }
       lastTTSEnd = Date.now();
     }
+    // --- ADD: Adaptiv menings-splitter för TTS (punkt/komma, fall-back på längd) ---
+function splitForTTS(text, target = 180, hardMax = 260) {
+  const parts = [];
+  const sentences = String(text || "").split(/(?<=[.!?])\s+/);
+
+  for (let s of sentences) {
+    // om väldigt lång: dela vidare på komma
+    if (s.length > hardMax) {
+      const subs = s.split(/,\s+/);
+      let buf = "";
+      for (const sub of subs) {
+        if ((buf + (buf ? ", " : "") + sub).length > target) {
+          if (buf) parts.push(buf.trim());
+          buf = sub;
+        } else {
+          buf += (buf ? ", " : "") + sub;
+        }
+      }
+      if (buf) parts.push(buf.trim());
+    } else {
+      parts.push(s.trim());
+    }
+  }
+  // Städa bort tomma
+  return parts.filter(Boolean);
+}
+
+// --- ADD: Välj TTS-parametrar efter bitens längd (latens & uttryck) ---
+function pickTTSParams(str) {
+  const n = (str || "").length;
+  if (n <= 120) return { latency: 2, stability: 0.50, similarity: 0.90, style: 0.70 };
+  if (n <= 280) return { latency: 3, stability: 0.55, similarity: 0.90, style: 0.72 };
+  return { latency: 4, stability: 0.60, similarity: 0.90, style: 0.75 };
+}
+
+// --- ADD: Spela en bit via streaming för snabb start ---
+async function speakStreamChunk(bit, params) {
+  stopTTS();
+  state='SPEAKING'; setStatus(state,'Svarar…');
+  abortBtn.style.display = 'inline-block';
+  lastSpokenText = String(bit||""); lastSpokenTextNorm = normalize(lastSpokenText);
+
+  const q = new URLSearchParams({
+    text: bit,
+    latency: String(params.latency),
+    stability: String(params.stability),
+    similarity: String(params.similarity),
+    style: String(params.style)
+  });
+
+  return new Promise(async (resolve) => {
+    try{
+      ttsAudio = new Audio();
+      ttsAudio.src = `/api/tts-stream?${q.toString()}`;
+      ttsAudio.preload = "auto"; ttsAudio.crossOrigin = "anonymous";
+
+      ttsCtx = new (window.AudioContext||window.webkitAudioContext)(); await ttsCtx.resume().catch(()=>{});
+      const srcNode = ttsCtx.createMediaElementSource(ttsAudio);
+      ttsGainNode = ttsCtx.createGain();
+      ttsGainNode.gain.value = parseFloat(document.getElementById('volumeSlider').value) || TTS_BASE_GAIN;
+      document.getElementById('volumeSlider').addEventListener('input', (e) => {
+        if (ttsGainNode) ttsGainNode.gain.value = parseFloat(e.target.value);
+      });
+      ttsAnalyser = ttsCtx.createAnalyser(); ttsAnalyser.fftSize = 1024;
+      srcNode.connect(ttsGainNode).connect(ttsAnalyser).connect(ttsCtx.destination);
+
+      ttsAudio.onended = () => { abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve(); };
+      ttsAudio.onerror = () => { abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve(); };
+
+      await ttsAudio.play();
+    }catch{
+      abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve();
+    }
+  });
+}
+
+// --- ADD: Prefetch nästa bit som färdig MP3 (backend /api/tts) ---
+async function prefetchBuffered(bit, params) {
+  const res = await fetch('/api/tts', {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json' },
+    body: JSON.stringify({
+      text: bit,
+      // skicka vidare prosodi för konsekvens
+      stability: params.stability, similarity: params.similarity, style: params.style, model: 'eleven_multilingual_v2'
+    })
+  });
+  if (!res.ok) throw new Error('prefetch failed');
+  const buf = await res.arrayBuffer();
+  const blobUrl = URL.createObjectURL(new Blob([buf], { type: 'audio/mpeg' }));
+  return blobUrl;
+}
+
+// --- ADD: Spela upp en redan buffrad bit ---
+async function speakBufferedUrl(url) {
+  stopTTS();
+  state='SPEAKING'; setStatus(state,'Svarar…');
+  abortBtn.style.display = 'inline-block';
+
+  return new Promise(async (resolve) => {
+    try{
+      ttsAudio = new Audio();
+      ttsAudio.src = url;
+      ttsAudio.preload = "auto"; ttsAudio.crossOrigin = "anonymous";
+
+      ttsCtx = new (window.AudioContext||window.webkitAudioContext)(); await ttsCtx.resume().catch(()=>{});
+      const srcNode = ttsCtx.createMediaElementSource(ttsAudio);
+      ttsGainNode = ttsCtx.createGain();
+      ttsGainNode.gain.value = parseFloat(document.getElementById('volumeSlider').value) || TTS_BASE_GAIN;
+      ttsAnalyser = ttsCtx.createAnalyser(); ttsAnalyser.fftSize = 1024;
+      srcNode.connect(ttsGainNode).connect(ttsAnalyser).connect(ttsCtx.destination);
+
+      ttsAudio.onended = () => { abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve(); };
+      ttsAudio.onerror = () => { abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve(); };
+      await ttsAudio.play();
+    }catch{
+      abortBtn.style.display='none'; lastTTSEnd = Date.now(); resolve();
+    }
+  });
+}
+
+// --- ADD: Huvudfunktion som kombinerar streaming + prefetch ---
+async function playSpeechHybrid(fullText) {
+  const bits = splitForTTS(fullText);
+  if (!bits.length) return;
+
+  // 1) Starta omedelbart med streaming av första biten
+  const p0 = pickTTSParams(bits[0]);
+  const nextPrefetch = (bits[1] ? prefetchBuffered(bits[1], pickTTSParams(bits[1])) : null);
+
+  await speakStreamChunk(bits[0], p0);
+
+  // 2) Spela resterande med “prefetch while playing”
+  let i = 1;
+  let nextUrl = nextPrefetch ? await nextPrefetch.catch(()=>null) : null;
+
+  while (i < bits.length) {
+    const thisBit = bits[i];
+    const params = pickTTSParams(thisBit);
+
+    // om vi inte hann prefetcha: gör det nu
+    if (!nextUrl) nextUrl = await prefetchBuffered(thisBit, params).catch(()=>null);
+
+    if (nextUrl) {
+      // medan denna spelas, börja prefetch av nästa (i+1)
+      const upcoming = (i+1 < bits.length) ? prefetchBuffered(bits[i+1], pickTTSParams(bits[i+1])) : null;
+      await speakBufferedUrl(nextUrl);
+      nextUrl = upcoming ? await upcoming.catch(()=>null) : null;
+    } else {
+      // fallback: streama
+      await speakStreamChunk(thisBit, params);
+    }
+    i++;
+  }
+}
+
     function speak(text){
       return new Promise(async (resolve)=>{
         stopTTS(); state='SPEAKING'; setStatus(state,'Svarar… (säg "nästa" för fler steg)');
