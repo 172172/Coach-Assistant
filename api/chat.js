@@ -317,6 +317,7 @@ if (!out.spoken || out.spoken.trim().length < 2) {
     : `Jag hittar inget inlagt för ${label}. Vill du att vi börjar logga nyheter/överlämning här?`;
 }
 
+// --- Failsafe: steps ENDAST från NEWS ---
 if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
   const fmtNice = (d) =>
     new Date(d).toLocaleString("sv-SE", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
@@ -327,33 +328,24 @@ if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
     return t.length > n ? t.slice(0, n - 1) + "…" : t;
   };
 
-  // Ta sista segmentet i t.ex. "B/Tapp" => "TAPP" (mer “maskin/område”-känsla)
+  // Ta sista segmentet i t.ex. "B/Tapp" => "TAPP"
   const areaOnly = (s) => {
     if (!s) return null;
     const last = String(s).split(/[\/>]/).pop().trim();
     return last.toUpperCase();
   };
 
-  const ns = (news || []).slice(0, 4).map((n) => {
-    const area = areaOnly(n.area) || areaOnly(n.section) || "OMRÅDE OKÄNT";
+  const ns = (news || []).slice(0, 6).map((n) => {
+    const area = areaOnly(n.area) || areaOnly(n.section) || "OMRÅDE";
     const date = fmtNice(n.news_at);
     const note = short(n.title ? `${n.title} – ${n.body || ""}` : (n.body || n.title || ""));
-    // Ex: "TAPPEN. 10 aug 09:24. Problem – Allt gick åt skogen…"
+    // Ex: "TAPP. 10 aug 09:24. Problem – bytte givare…"
     return `${area}. ${date}. ${note}`;
   });
 
-  const is = (incidents || []).slice(0, 2).map((x) => {
-    const area = areaOnly(x.area) || "OMRÅDE OKÄNT";
-    const date = fmtNice(x.reported_at);
-    const sev = String(x.severity || "").toUpperCase(); // valfritt prefix
-    const note = short(x.title ? `${x.title} – ${x.problem || ""}` : (x.problem || x.title || ""));
-    // Ex: "KISTERS. 10 aug 09:07. HIGH. Motorfel – bytte givare…"
-    return `${area}. ${date}. ${sev ? sev + ". " : ""}${note}`;
-  });
-
-  const merged = [...ns, ...is].filter(Boolean).slice(0, 6);
-  if (merged.length) out.cards.steps = merged;
+  if (ns.length) out.cards.steps = ns;
 }
+
 
 // --- TTS: tvinga rösten att läsa sammanfattningen, inte stegen ---
 out.meta = Object.assign({}, out.meta, {
