@@ -479,6 +479,21 @@ async function callLLM(system, user, temp = 0.85, maxTokens = 1600, history = []
   }
 }
 
+function safeExtractJson(raw = "") {
+  if (!raw || typeof raw !== "string") return null;
+  // Ta bort codefence
+  let txt = raw.trim();
+  txt = txt.replace(/^```(?:json)?/i, "").replace(/```$/,"").trim();
+  // Direkt parse
+  try { return JSON.parse(txt); } catch {}
+  // Försök hitta första {...}
+  const m = txt.match(/\{[\s\S]*\}$/);
+  if (m) {
+    try { return JSON.parse(m[0]); } catch {}
+  }
+  return null;
+}
+
 /* ================= Gap-drafts (valfritt) ================= */
 async function createGapDraft({ userId, question, coverage, matchedHeadings, scores, personaState = null }) {
   try {
@@ -1001,7 +1016,10 @@ Returnera JSON.`;
     return finalize(out);
 
   } catch (err) {
-    console.error("chat.js internal error:", err);
-    return res.status(500).json({ error: "Serverfel i chat.js", details: err.message || String(err) });
+    console.error("chat handler error:", err);
+    return res.status(500).json({
+      error: "chat_internal_error",
+      message: err?.message || String(err)
+    });
   }
 }
