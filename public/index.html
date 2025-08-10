@@ -113,7 +113,7 @@
     ];
 
     // Hälsningar vi VILL TILLÅTA även om de är korta
-    const GREETINGS_OK = /^(hej( hej)?|tja|tjena|hall[aå]|god morgon|god kväll)$/i;
+    const GREETING_OK = /^(hej( hej)?|tja|tjena|hall[aå]|god morgon|god kväll)$/i;
 
     const STEP_COMMANDS = /(nästa|fortsätt|mer|continue|next)/i;
 
@@ -193,7 +193,7 @@
       rafId = requestAnimationFrame(loop);
     }
 
-    // ---------- TTS (stream) ----------
+    // ---------- TTS ----------
     let _speakResolve = null;
     function stopTTS(){
       try { if (ttsAudio) { ttsAudio.pause(); ttsAudio.src = ""; ttsAudio.load(); } } catch {}
@@ -241,6 +241,7 @@
         }
       });
     }
+    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
 
     // ---------- Steps reading ----------
     function resetSteps(steps){
@@ -312,22 +313,10 @@
 
         lastQ = text; lastA = r;
 
-        // KRITISK FIX: Kolla om backend säger att bara läsa spoken
-        const shouldSkipSteps = r.meta?.tts?.skip_steps || 
-                               r.meta?.tts?.read_only_spoken || 
-                               r.meta?.speech_source === "status_summary";
-        
         const steps = Array.isArray(r.cards?.steps) ? r.cards.steps : [];
         resetSteps(steps);
-        
-        // Läs alltid spoken-delen först
         await speak(r.spoken || 'Okej.');
-        
-        // Läs steps ENDAST om backend inte säger att skippa dem
-        if (steps.length && !shouldSkipSteps) {
-          await speakStepsChunk();
-        }
-
+        if (steps.length) await speakStepsChunk();
       }catch(err){
         output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI. (${err?.message||'okänt fel'})</div>`);
         if(running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
@@ -499,26 +488,25 @@
       ts.forEach(w=>{ if(ls.has(w)) overlap++; });
       return (overlap / ts.length) >= 0.7;
     }
-
     const reportBtn = document.getElementById('reportBtn');
-    reportBtn.addEventListener('click', () => {
-      // Se till att userId finns innan vi lämnar sidan (report.html läser från localStorage)
-      const uid = localStorage.getItem('userId') || (() => {
-        const x = 'u_' + Math.random().toString(36).slice(2);
-        localStorage.setItem('userId', x);
-        return x;
-      })();
+reportBtn.addEventListener('click', () => {
+  // Se till att userId finns innan vi lämnar sidan (report.html läser från localStorage)
+  const uid = localStorage.getItem('userId') || (() => {
+    const x = 'u_' + Math.random().toString(36).slice(2);
+    localStorage.setItem('userId', x);
+    return x;
+  })();
 
-      // Avsluta loop/tts snyggt innan vi navigerar
-      try { stopTTS(); } catch {}
-      try { stopLoop(); } catch {}
+  // Avsluta loop/tts snyggt innan vi navigerar
+  try { stopTTS(); } catch {}
+  try { stopLoop(); } catch {}
 
-      // Navigera till rapport-sidan (skickar även med uid som query om du vill använda den där)
-      const target = new URL('https://coach-assistant.vercel.app/report.html', location.href);
-      target.searchParams.set('from', 'voice');
-      target.searchParams.set('uid', uid);
-      location.href = target.toString();
-    });
+  // Navigera till rapport-sidan (skickar även med uid som query om du vill använda den där)
+  const target = new URL('https://coach-assistant.vercel.app/report.html', location.href);
+  target.searchParams.set('from', 'voice');
+  target.searchParams.set('uid', uid);
+  location.href = target.toString();
+});
 
   </script>
 </body>
