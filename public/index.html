@@ -193,7 +193,7 @@
       rafId = requestAnimationFrame(loop);
     }
 
-    // ---------- TTS ----------
+    // ---------- TTS (stream) ----------
     let _speakResolve = null;
     function stopTTS(){
       try { if (ttsAudio) { ttsAudio.pause(); ttsAudio.src = ""; ttsAudio.load(); } } catch {}
@@ -241,7 +241,6 @@
         }
       });
     }
-    abortBtn.addEventListener('click', ()=>{ if (state==='SPEAKING'){ stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
 
     // ---------- Steps reading ----------
     function resetSteps(steps){
@@ -313,10 +312,19 @@
 
         lastQ = text; lastA = r;
 
+        // FÖRBÄTTRING: Respektera TTS-flaggor från backend
+        const shouldReadSteps = !r.meta?.tts?.skip_steps && !r.meta?.tts?.read_only_spoken;
+        
         const steps = Array.isArray(r.cards?.steps) ? r.cards.steps : [];
         resetSteps(steps);
+        
+        // Läs bara spoken-delen
         await speak(r.spoken || 'Okej.');
-        if (steps.length) await speakStepsChunk();
+        
+        // Läs steps endast om backend inte säger att skippa dem
+        if (steps.length && shouldReadSteps) {
+          await speakStepsChunk();
+        }
       }catch(err){
         output.insertAdjacentHTML('beforeend', `<div class="pill">Kunde inte få svar från AI. (${err?.message||'okänt fel'})</div>`);
         if(running) setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS);
