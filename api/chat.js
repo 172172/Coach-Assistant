@@ -273,87 +273,91 @@ async function buildStatusReply({ news = [], label = "senaste veckan", history =
     tags: Array.isArray(n.tags) ? n.tags : []
   }));
 
-  // System-prompt som ENDAST omformulerar och inkluderar område/skift i spoken-text
+  // Förbättrad system-prompt för mer detaljerat berättande som en kollega
   const system = `
-Du är en erfaren operatör som berättar för kollegan vad som hänt ${label}.
+Du är en erfaren operatör som berättar för en kollega vad som hänt ${label}. Prata som en kompis på golvet:
 
-VIKTIGT: Du får ENDAST omformulera språket i den exakta informationen som finns. Lägg ALDRIG till detaljer som inte finns i rådatan.
+STIL & TON:
+- Vardagligt svenskt språk, som mellan kollegor
+- Använd "vi", "det", "grabben/tjejen" etc naturligt
+- Berätta UTFÖRLIGT och SPECIFIKT vad som hänt - ge detaljer som påverkar jobbet
+- Gör det levande och engagerande, men informativt
+- Nämn konkreta händelser, inte bara allmänna intryck
+- Som att du överlämnar till nästa skift
 
-OMFORMULERING AV SPRÅK:
-- "allt gick åt skogen" → "det blev problem"
-- "annat skit" → "andra komponenter"  
-- "krånglade" → "hade problem"
-- "strulade" → "fungerade inte"
-
-STIL:
-- Vardagligt svenskt språk, men professionellt
-- Använd "vi", "det" 
-- Omformulera slang till bättre språk
-- I spoken-texten: nämn ALLTID vilket område och skift (om det finns)
-- Berätta ENDAST vad som faktiskt står i rådatan
+INNEHÅLL:
+- Börja med en övergripande känsla/läge
+- Gå sedan in på specifika händelser per område
+- Nämn alltid VILKET område/skift det gällde
+- Inkludera tekniska detaljer som är relevanta
+- Prioritera allt som påverkar drift/produktion/kvalitet
 
 STRUKTUR:
-- spoken: Sammanfatta händelserna med omformulerat språk + inkludera område och skift
-- steps: Lista händelserna med omformulerat språk
+- spoken: 4-8 meningar som berättar vad som FAKTISKT hänt med konkreta detaljer
+- steps: Alla viktiga händelser som punkter: "OMRÅDE (SKIFT): Detaljerad beskrivning"
 
-EXEMPEL:
-Rådata: "Tapp, Skift B: Allt gick åt skogen, vi fick byta givare och annat skit"
-Omformat spoken: "Det blev problem på Tapp under skift B när vi fick byta givare och andra komponenter"
+EXEMPEL PÅ BRA TON:
+- "Vi hade lite trubbel på Tapp när formatbytet krånglade efter lunch..."
+- "Underhållsteamet bytte den där sensorn på OCME som strulade igår morgon..."  
+- "Dagskiftet rapporterade stopp på Jones - gejdrarna behövde justeras igen..."
+- "Det blev lite rörigt när CIP-cykeln inte ville starta på Coolpack..."
 
-Returnera strikt JSON. Hitta ALDRIG på information som inte finns i rådatan.`;
+Var KONKRET och DETALJERAD om vad som hänt. Operatörerna vill veta exakt vad som skett. Returnera strikt JSON.`;
 
   const user = `
-Omformulera språket i denna rådata från operatörer ${label}:
+Berätta utförligt som en kollega vad som hänt ${label}. Gå in på detaljer - vad hände exakt?
 
-RÅDATA (${newsData.length} st):
-${newsData.map(n => `${n.when} | ${n.area}${n.shift ? ` (Skift ${n.shift})` : ""} | ${n.title || "Uppdatering"}: ${n.body}`).join("\n")}
+HÄNDELSER (${newsData.length} st):
+${newsData.map(n => `
+📅 ${n.when} | 🏭 ${n.area}${n.shift ? ` (Skift ${n.shift})` : ""}
+📝 ${n.title || "Uppdatering"}: ${n.body}
+${n.tags.length ? `🏷️ Taggar: ${n.tags.join(", ")}` : ""}
+`).join("\n---\n")}
 
-Omformulera ENDAST språket - lägg inte till information som inte finns i rådatan. I spoken-texten ska du alltid nämna vilket område och skift händelsen inträffade på.`;
+Fokus: Berätta som en kollega som överlämnar till nästa skift - vad har hänt och vad behöver vi veta?`;
 
-  let out = await callLLM(system, user, 0.2, 1000, history); // Mycket låg temp för att undvika fantasi
+  let out = await callLLM(system, user, 0.3, 1200, history); // Lägre temp för faktafokus, mer tokens för detaljer
   out = normalizeKeys(out);
 
-  // Failsafe som också endast omformulerar och inkluderar område/skift
-  if (!out.spoken || out.spoken.trim().length < 10) {
+  // Förbättrad failsafe med mer detaljerat vardagsspråk
+  if (!out.spoken || out.spoken.trim().length < 30) {
     if (newsData.length === 1) {
       const item = newsData[0];
-      // Enkel omformulering utan att lägga till information
-      let body = item.body || item.title || "";
-      body = body.replace(/allt gick åt skogen/gi, "det blev problem")
-                 .replace(/annat skit/gi, "andra komponenter")  
-                 .replace(/krånglade/gi, "hade problem")
-                 .replace(/strulade/gi, "fungerade inte");
-      
-      // Inkludera område och skift i spoken-text
-      const locationInfo = `${item.area}${item.shift ? ` under skift ${item.shift}` : ""}`;
-      out.spoken = `${label}: Det hände på ${locationInfo} - ${body}.`;
+      const time = item.when.includes('idag') ? 'idag' : item.when.split(' ')[0];
+      out.spoken = `En grej som hände ${time}: Vi hade ${item.body || item.title} på ${item.area}${item.shift ? ` under skift ${item.shift}` : ""}. ${item.tags.length ? `Handlade om ${item.tags.slice(0,2).join(" och ")}.` : ""}`;
     } else if (newsData.length > 1) {
       const areas = [...new Set(newsData.map(n => n.area))];
-      const shifts = [...new Set(newsData.map(n => n.shift).filter(Boolean))];
-      const locationInfo = areas.slice(0,2).join(" och ");
-      const shiftInfo = shifts.length ? ` (mest ${shifts.join(" och ")})` : "";
-      out.spoken = `${newsData.length} händelser ${label} på ${locationInfo}${shiftInfo}.`;
+      const problems = newsData.filter(n => n.tags.some(tag => /problem|stopp|fel|byte/.test(tag.toLowerCase())));
+      const maintenance = newsData.filter(n => n.tags.some(tag => /underhåll|byte|service/.test(tag.toLowerCase())));
+      
+      let details = [];
+      if (problems.length) details.push(`${problems.length} problem/stopp`);
+      if (maintenance.length) details.push(`${maintenance.length} underhållsgrejer`);
+      
+      out.spoken = `${newsData.length} händelser ${label}, mest aktivitet på ${areas.slice(0,2).join(" och ")}. ` +
+                   `${details.length ? `Hade ${details.join(" och ")} att hålla koll på. ` : ""}` +
+                   `${newsData[0].body ? `Senaste var: ${newsData[0].body.split('.')[0]}...` : "Blandad körning helt enkelt."}`;
     }
   }
 
-  // Steps med endast omformulerat språk från rådata
+  // Förbättra steps med mer detaljerade beskrivningar
   if (!Array.isArray(out.cards.steps) || out.cards.steps.length === 0) {
     const steps = [];
     
     newsData.forEach(news => {
       const area = (news.area || "").split('/').pop() || news.area || "Okänt";
-      const time = news.when.split(' ')[0];
+      const time = news.when.split(' ')[0]; // Bara datum
       const shift = news.shift ? ` (Skift ${news.shift})` : "";
-      let content = news.body || news.title || "Uppdatering";
+      const title = news.title ? `${news.title}: ` : "";
+      const content = news.body || "Uppdatering";
+      const tags = news.tags.length ? ` [${news.tags.join(", ")}]` : "";
       
-      // Omformulera endast språket, inte innehållet
-      content = content.replace(/allt gick åt skogen/gi, "det blev problem")
-                      .replace(/annat skit/gi, "andra komponenter")
-                      .replace(/krånglade/gi, "hade problem") 
-                      .replace(/strulade/gi, "fungerade inte");
+      // Behåll fullständig information men gör den läsbar
+      const fullDescription = `${title}${content}${tags}`;
+      const shortDescription = fullDescription.length > 100 ? 
+        fullDescription.slice(0,95) + "..." : fullDescription;
       
-      const shortContent = content.length > 80 ? content.slice(0,75) + "..." : content;
-      steps.push(`${area.toUpperCase()}${shift}: ${time} - ${shortContent}`);
+      steps.push(`${area.toUpperCase()}${shift}: ${time} - ${shortDescription}`);
     });
 
     if (steps.length > 0) {
@@ -361,7 +365,7 @@ Omformulera ENDAST språket - lägg inte till information som inte finns i råda
     }
   }
 
-  // TTS för BARA spoken text - inte steps
+  // Lägg till metadata för TTS - bara spoken, inte steps
   out.meta = Object.assign({}, out.meta, {
     speech: out.spoken,
     speech_source: "status_summary", 
@@ -369,16 +373,16 @@ Omformulera ENDAST språket - lägg inte till information som inte finns i råda
       text: out.spoken, 
       priority: "spoken", 
       allow_fallback: false,
-      read_only_spoken: true,  // Explicit flagga för att bara läsa spoken
-      skip_steps: true,        // Skippa steps specifikt
-      skip_cards: true         // Skippa hela cards-sektionen
+      read_only_spoken: true,
+      skip_steps: true,
+      skip_cards: true
     }
   });
 
   out.cards.coverage = 0;
   out.cards.matched_headings = ["line_news"];
   out.cards.summary = out.cards.summary || `Läget ${label}`;
-  out.follow_up = out.follow_up || "Vill du höra mer om något specifikt?";
+  out.follow_up = out.follow_up || "Vill du höra mer om något specifikt område?";
 
   return out;
 }
