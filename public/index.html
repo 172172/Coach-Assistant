@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="sv">
 <head>
@@ -917,7 +916,7 @@ function setHudSpeech(t){
     output.insertAdjacentHTML('beforeend', "<div class='pill'>Mikrofon kunde inte startas (behörighet eller HTTPS?).</div>");
     running = false; 
     startBtn.style.display = 'inline-block'; 
-    stopBtn.style.display  = 'none';
+    stopBtn.style.display='none';
     document.body.classList.remove('awake'); // reset om boot misslyckas
   }
 }
@@ -953,6 +952,25 @@ function setHudSpeech(t){
         output.insertAdjacentHTML('beforeend', `<div class="pill"><strong>Du skrev (debug):</strong> ${text}</div>`);
         await askAssistant(text);
         debugInput.value = '';
+      }
+    });
+
+    // ADD: Enter-tangent för debug input
+    debugInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        debugBtn.click();
+      }
+    });
+
+    // MODIFY: Uppdatera mellanslag-hanteraren så den inte påverkar debug input
+    window.addEventListener('keydown',(e)=>{ 
+      // Kontrollera att vi inte är i debug input-fältet
+      if(e.key===' ' && state==='SPEAKING' && document.activeElement !== debugInput){ 
+        e.preventDefault(); 
+        stopTTS(); 
+        abortBtn.style.display='none'; 
+        setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); 
       }
     });
 
