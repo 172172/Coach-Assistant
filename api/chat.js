@@ -297,6 +297,7 @@ STIL & TON:
 VIKTIGT:
 - Använd EXAKTA veckodagar från datumen - inte påhittade dagar
 - könsneutralt, sakligt, i tredje person
+- Säg aldrig "jag" när du berättar om news
 - När du nämner "tisdag" eller liknande, kontrollera att det stämmer med när-fältet
 
 INNEHÅLL:
