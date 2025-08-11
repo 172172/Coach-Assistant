@@ -938,8 +938,11 @@ function setHudSpeech(t){
       STEP_CHUNK_SIZE = 4;
     }
 
-    window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
-    window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') stopLoop(); });
+    // TA BORT DENNA RAD HELT:
+    // window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
+    
+    // TA BORT DENNA RAD OCKSÅ:
+    // window.addEventListener('keydown', (e)=>{ if(e.key==='Escape') stopLoop(); });
 
     startBtn.addEventListener('click', startLoop);
     stopBtn.addEventListener('click', stopLoop);
@@ -963,19 +966,9 @@ function setHudSpeech(t){
       }
     });
 
-    // MODIFY: Byt från mellanslag till Escape för att avbryta TTS
-    window.addEventListener('keydown',(e)=>{ 
-      if(e.key==='Escape' && state==='SPEAKING'){ 
-        e.preventDefault(); 
-        stopTTS(); 
-        abortBtn.style.display='none'; 
-        setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); 
-      }
-    });
-
-    // Ta bort den gamla mellanslag-hanteraren
+    // TA BORT DETTA BLOCK OCKSÅ:
     // window.addEventListener('keydown',(e)=>{ 
-    //   if(e.key===' ' && state==='SPEAKING' && document.activeElement !== debugInput){ 
+    //   if(e.key==='Escape' && state==='SPEAKING'){ 
     //     e.preventDefault(); 
     //     stopTTS(); 
     //     abortBtn.style.display='none'; 
@@ -983,10 +976,7 @@ function setHudSpeech(t){
     //   }
     // });
 
-    // Ta bort den gamla space-hanteraren helt
-    // window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
-
-    // Konsolidera Escape-hantering till EN funktion
+    // Konsolidera Escape-hantering till EN funktion (BEHÅLL BARA DENNA)
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         if (state === 'SPEAKING') {
