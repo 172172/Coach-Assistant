@@ -963,16 +963,25 @@ function setHudSpeech(t){
       }
     });
 
-    // MODIFY: Uppdatera mellanslag-hanteraren så den inte påverkar debug input
+    // MODIFY: Byt från mellanslag till Escape för att avbryta TTS
     window.addEventListener('keydown',(e)=>{ 
-      // Kontrollera att vi inte är i debug input-fältet
-      if(e.key===' ' && state==='SPEAKING' && document.activeElement !== debugInput){ 
+      if(e.key==='Escape' && state==='SPEAKING'){ 
         e.preventDefault(); 
         stopTTS(); 
         abortBtn.style.display='none'; 
         setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); 
       }
     });
+
+    // Ta bort den gamla mellanslag-hanteraren
+    // window.addEventListener('keydown',(e)=>{ 
+    //   if(e.key===' ' && state==='SPEAKING' && document.activeElement !== debugInput){ 
+    //     e.preventDefault(); 
+    //     stopTTS(); 
+    //     abortBtn.style.display='none'; 
+    //     setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); 
+    //   }
+    // });
 
     // --- likelyEchoOfTTS (behåller din tidigare)
     function likelyEchoOfTTS(text){
