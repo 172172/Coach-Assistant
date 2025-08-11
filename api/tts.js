@@ -6,7 +6,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No text provided" });
     }
 
-    const voiceId = "aSLKtNoVBZlxQEMsnGL2"; // din svenska röst
+    const voiceId = "3mwblJqg1SFnILqt4AFC"; // din svenska röst
     const apiKey = process.env.ELEVENLABS_API_KEY;
 
     // Neutral, tydlig leverans (inte “pepp”)
