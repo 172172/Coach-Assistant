@@ -983,6 +983,25 @@ function setHudSpeech(t){
     //   }
     // });
 
+    // Ta bort den gamla space-hanteraren helt
+    // window.addEventListener('keydown',(e)=>{ if(e.key===' ' && state==='SPEAKING'){ e.preventDefault(); stopTTS(); abortBtn.style.display='none'; setTimeout(()=>startListening(), LISTEN_DELAY_AFTER_TTS); }});
+
+    // Konsolidera Escape-hantering till EN funktion
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        if (state === 'SPEAKING') {
+          // Avbryt TTS om den pratar
+          e.preventDefault(); 
+          stopTTS(); 
+          abortBtn.style.display='none'; 
+          setTimeout(() => startListening(), LISTEN_DELAY_AFTER_TTS);
+        } else {
+          // Stoppa hela loopen annars
+          stopLoop();
+        }
+      }
+    });
+
     // --- likelyEchoOfTTS (behåller din tidigare)
     function likelyEchoOfTTS(text){
       const within = Date.now() - lastTTSEnd < ECHO_SUPPRESS_MS;
