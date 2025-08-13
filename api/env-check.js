@@ -1,4 +1,4 @@
-export default async function handler(req, res) {
+ export default async function handler(req, res) {
   const E = process.env;
   const mask = v => (v ? v.slice(0, 3) + "…"+ v.slice(-3) : null);
   return res.status(200).json({
