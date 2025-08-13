@@ -124,7 +124,13 @@
     };
 
     // ========= Realtime state =========
-    let rt = { pc:null, dc:null, mic:null, remoteAudio:null, connected:false, conversation_id:null, _msgCount:0 };
+    let rt = {
+      pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
+      conversation_id:null, _msgCount:0,
+      _ragBusy:false,            // lås: bara en RAG per tur
+      _lastQuery:"",             // dedupe på transkript
+      _lastToolCallId:null
+    };
     const toolCalls = new Map(); // tool_call_id -> { name, argsText }
 
     // mic visualizer (simple)
@@ -197,12 +203,11 @@
         // 4) Data channel
         rt.dc = rt.pc.createDataChannel('oai-events');
         rt.dc.onopen = () => {
-          // Skicka session settings inkl. minnesinjektion och tools
           const sessUpdate = {
             type: 'session.update',
             session: {
               instructions: `Du är Coach Assistant för Linje 65.
-Svara kort och stegvis på svenska.
+Svara kort (max 2 meningar) och stegvis på svenska.
 INNAN du svarar: kalla ALLTID funktionen search_manual med användarens senaste transkriberade text.
 Om manual-sök ger noll träffar, säg att du saknar täckning och föreslå nästa trygga steg.
 
@@ -219,7 +224,7 @@ ${memoryBootstrap}`,
                     type: 'object',
                     properties: {
                       query: { type: 'string' },
-                      k: { type: 'integer', default: 6 },
+                      k: { type: 'integer', default: 5 },
                       minSim: { type: 'number', default: 0.6 }
                     },
                     required: ['query']
@@ -275,7 +280,11 @@ ${memoryBootstrap}`,
         rt.mic?.getTracks()?.forEach(t => t.stop());
         micAnalyser = null;
       } catch {}
-      rt = { pc:null, dc:null, mic:null, remoteAudio:null, connected:false, conversation_id:rt.conversation_id, _msgCount:rt._msgCount };
+      rt = {
+        pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
+        conversation_id:rt.conversation_id, _msgCount:rt._msgCount,
+        _ragBusy:false, _lastQuery:"", _lastToolCallId:null
+      };
       $('#rtBtn').style.display = 'inline-block';
       $('#rtHangup').style.display = 'none';
       $('#rtStatus').textContent = 'Inte ansluten';
@@ -284,9 +293,8 @@ ${memoryBootstrap}`,
 
     // ========= Realtime event handler =========
     function isTranscriptFinalType(t) {
-      if (!t) return false;
-      // Fånga både .done och .completed och olika prefix
-      return /transcript\.(done|completed)$/.test(t) || t.endsWith('input_text.done') || t.endsWith('input.text.done');
+      // Smalare matchning för att undvika dubletter
+      return t === 'input_audio_buffer.transcript.completed' || t === 'input_text.completed';
     }
 
     function handleRealtimeMessage(msg) {
@@ -299,29 +307,38 @@ ${memoryBootstrap}`,
         return;
       }
 
-      // 1) Tool call completed → execute tool
+      // 1) Tool call completed → execute tool (bara om vi inte redan kör en RAG)
       if (msg.type === 'response.function_call.completed') {
         const id = msg.id || msg.tool_call_id || 'unknown';
         const tc = toolCalls.get(id);
         if (!tc) return;
-        if (tc.name === 'search_manual') return runToolSearchManual(tc);
+        if (tc.name === 'search_manual') {
+          if (rt._ragBusy) return;           // undvik dubbelkörning
+          rt._ragBusy = true;
+          rt._lastToolCallId = id;
+          return runToolSearchManual(tc).finally(()=>{}); // låset släpps på output_done
+        }
         if (tc.name === 'save_memory') return runToolSaveMemory(tc);
         return;
       }
 
-      // 2) User transcript final — FALLBACK: kör manual-sök direkt
+      // 2) User transcript (final) — FALLBACK: kör manual-sök EN gång per tur
       if (isTranscriptFinalType(msg.type)) {
-        const text = msg.transcript || msg.text || '';
-        if (text?.trim()) {
+        const text = (msg.transcript || msg.text || '').trim();
+        if (text) {
           append(bubble(text, 'user'));
           logMsg('user', text, 'voice', msg);
-          // Kör RAG direkt för röst så vi alltid grundar i manualen
-          runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 6, minSim: 0.6 }) });
+
+          if (!rt._ragBusy && text !== rt._lastQuery) {
+            rt._ragBusy = true;
+            rt._lastQuery = text;
+            runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 5, minSim: 0.6 }) }).finally(()=>{});
+          }
         }
         return;
       }
 
-      // 3) Assistant final text
+      // 3) Assistant final text → släpp låset
       if (msg.type === 'response.output_text.done') {
         const text = msg.output_text || msg.text || '';
         if (text?.trim()) {
@@ -333,6 +350,8 @@ ${memoryBootstrap}`,
             append(pill('Hämtat från:')); const d = document.createElement('div'); d.className='src'; d.innerHTML = list.replaceAll('\n','<br>'); append(d);
           }
         }
+        // släpp RAG-låset för nästa tur
+        rt._ragBusy = false;
         return;
       }
     }
@@ -342,7 +361,7 @@ ${memoryBootstrap}`,
 
     async function runToolSearchManual(tc) {
       const args = parseArgsSafe(tc.argsText);
-      const body = { query: args.query, topK: args.k, minSim: args.minSim };
+      const body = { query: args.query, topK: args.k ?? 5, minSim: args.minSim ?? 0.6 };
       try {
         const data = await fetchJSON('/api/search-manual', {
           method: 'POST',
@@ -352,13 +371,20 @@ ${memoryBootstrap}`,
         const sourcesList = (data.snippets || []).map((s,i) =>
           `[#${i+1} | ${s.title || 'manual'} • idx:${s.idx} • score:${(s.score??0).toFixed(2)}]`
         ).join('\n');
-        const toolText = `TOOL_OUTPUT_START\n${data.context || 'INGEN_TRÄFF'}\nTOOL_OUTPUT_SOURCES\n${sourcesList || 'inga källor'}\nTOOL_OUTPUT_END`;
-        // Återkoppla till modellen som nytt svar
+
+        const toolText = `TOOL_OUTPUT_START
+${data.context || 'INGEN_TRÄFF'}
+TOOL_OUTPUT_SOURCES
+${sourcesList || 'inga källor'}
+TOOL_OUTPUT_END`;
+
+        // Skicka sammanhållet svar (kort!)
         rt.dc?.send(JSON.stringify({
           type: 'response.create',
           response: {
             modalities: ['audio','text'],
-            instructions: `Svara ENBART baserat på TOOL_OUTPUT nedan. Om 'INGEN_TRÄFF' förekommer: säg att du saknar säkra uppgifter och föreslå ett tryggt nästa steg.
+            instructions: `Svara ENBART baserat på TOOL_OUTPUT nedan. Var kort (max 2 meningar).
+Om 'INGEN_TRÄFF' förekommer: säg att du saknar säkra uppgifter och föreslå ett tryggt nästa steg.
 Avsluta med "Hämtat från:" följt av raderna under TOOL_OUTPUT_SOURCES.
 TOOL_OUTPUT:
 ${toolText}`
@@ -367,6 +393,8 @@ ${toolText}`
       } catch (err) {
         console.error('search-manual error', err);
         rt.dc?.send(JSON.stringify({ type: 'response.create', response: { modalities:['audio','text'], instructions: 'Kunde inte nå manual-sök. Säg detta kort och föreslå att försöka igen.' } }));
+        // Släpp låset så användaren kan försöka igen
+        rt._ragBusy = false;
       }
     }
 
@@ -394,10 +422,13 @@ ${toolText}`
     }
     function sendTextToRealtime(text) {
       if (!rt?.dc || rt.dc.readyState !== 'open') { append(pill('Inte ansluten.')); return; }
-      // Skicka bara in texten till sessionen (för turn detection / logging)
-      rt.dc.send(JSON.stringify({ type: 'input_text', text }));
-      // Kör vår RAG direkt så vi alltid får manual-baserat svar
-      runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 6, minSim: 0.6 }) });
+      rt.dc.send(JSON.stringify({ type: 'input_text', text }));  // skickas för VAD/turn mgmt
+      // RAG endast om inte låst och inte duplikat
+      if (!rt._ragBusy && text !== rt._lastQuery) {
+        rt._ragBusy = true;
+        rt._lastQuery = text;
+        runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 5, minSim: 0.6 }) }).finally(()=>{});
+      }
     }
 
     // ========= Manual-test UI (direkt mot /api/search-manual) =========
