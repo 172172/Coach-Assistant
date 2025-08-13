@@ -86,6 +86,17 @@
     const $ = sel => document.querySelector(sel);
     const $$ = sel => Array.from(document.querySelectorAll(sel));
 
+    // ========= Robust fetch -> JSON (för att slippa "Unexpected token …") =========
+    async function fetchJSON(url, opts) {
+      const r = await fetch(url, opts);
+      const text = await r.text();
+      let json;
+      try { json = JSON.parse(text); }
+      catch { throw new Error(`${r.status} ${r.statusText}: ${text.slice(0,200)}`); }
+      if (!r.ok) throw new Error(json?.error || json?.message || `${r.status} ${r.statusText}`);
+      return json;
+    }
+
     function pill(text) { const d = document.createElement('div'); d.className = 'pill'; d.textContent = text; return d; }
     function bubble(text, role='assistant') {
       const d = document.createElement('div'); d.className = 'bubble ' + role; d.textContent = text; return d;
@@ -155,10 +166,10 @@
         setupMicViz(rt.mic);
 
         // 1) Init/restore conversation & memory
-        const { conversation_id, memoryBootstrap } = await fetch('/api/memory-init', {
+        const { conversation_id, memoryBootstrap } = await fetchJSON('/api/memory-init', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userId: localStorage.getItem('operator_id') || 'kevin' })
-        }).then(r => r.json());
+        });
         rt.conversation_id = conversation_id;
         $('#memStatus').textContent = 'Minne: laddat';
 
@@ -216,7 +227,7 @@
         };
 
         // 5) Token + offer/answer
-        const { token, model } = await fetch('/api/rt-token').then(r => r.json());
+        const { token, model } = await fetchJSON('/api/rt-token');
         const offer = await rt.pc.createOffer();
         await rt.pc.setLocalDescription(offer);
         const sdpAnswer = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
@@ -232,6 +243,7 @@
       } catch (e) {
         console.error(e);
         $('#rtStatus').textContent = `Realtime misslyckades: ${e?.message || e}`;
+        append(pill('Fel vid anslutning: ' + (e?.message || e)));
       }
     }
 
@@ -309,7 +321,11 @@
       const args = parseArgsSafe(tc.argsText);
       const body = { query: args.query, topK: args.k, minSim: args.minSim };
       try {
-        const data = await fetch('/api/search-manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+        const data = await fetchJSON('/api/search-manual', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
         const sourcesList = (data.snippets || []).map((s,i) => `[#${i+1} | ${s.section || 'sektion'} | ${s.source || 'manual'} | sim:${s.similarity}]`).join('\n');
         const toolText = `TOOL_OUTPUT_START\n${data.context || 'INGEN_TRÄFF'}\nTOOL_OUTPUT_SOURCES\n${sourcesList || 'inga källor'}\nTOOL_OUTPUT_END`;
         // Återkoppla till modellen som nytt svar
@@ -317,7 +333,7 @@
           type: 'response.create',
           response: {
             modalities: ['audio','text'],
-            instructions: `Svara ENBART baserat på TOOL_OUTPUT nedan. Om 'INGEN_TRÄFF' förekommer: säg att du saknar säkra uppgifter.\nAvsluta med \"Hämtat från:\" följt av raderna under TOOL_OUTPUT_SOURCES.\nTOOL_OUTPUT:\n${toolText}`
+            instructions: `Svara ENBART baserat på TOOL_OUTPUT nedan. Om 'INGEN_TRÄFF' förekommer: säg att du saknar säkra uppgifter.\nAvsluta med "Hämtat från:" följt av raderna under TOOL_OUTPUT_SOURCES.\nTOOL_OUTPUT:\n${toolText}`
           }
         }));
       } catch (err) {
@@ -328,7 +344,11 @@
     async function runToolSaveMemory(tc) {
       const args = parseArgsSafe(tc.argsText);
       try {
-        await fetch('/api/save-memory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: localStorage.getItem('operator_id') || 'kevin', key: args.key, value: args.value }) });
+        await fetch('/api/save-memory', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: localStorage.getItem('operator_id') || 'kevin', key: args.key, value: args.value })
+        });
         rt.dc?.send(JSON.stringify({ type:'response.create', response:{ modalities:['audio','text'], instructions:`Noterat. Jag sparade minnet: ${args.key} = ${args.value}.` } }));
       } catch (e) {
         rt.dc?.send(JSON.stringify({ type:'response.create', response:{ modalities:['audio','text'], instructions:`Jag kunde inte spara minnet just nu.` } }));
