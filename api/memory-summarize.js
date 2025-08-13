@@ -1,4 +1,3 @@
-// /api/memory-summarize.js
 import { q, getSupa } from "./db.js";
 export const config = { api: { bodyParser: true } };
 
@@ -12,8 +11,7 @@ export default async function handler(req, res) {
     if (!conversation_id) return res.status(400).json({ error: "Missing conversation_id" });
 
     const supa = await getSupa();
-    let summaryBefore = "";
-    let history = "";
+    let summaryBefore = "", history = "";
 
     if (supa) {
       const [{ data: conv }, { data: msgs }] = await Promise.all([
@@ -23,9 +21,13 @@ export default async function handler(req, res) {
       summaryBefore = conv?.summary || "";
       history = (msgs || []).map(m => `${m.role.toUpperCase()}: ${m.content || ""}`).join("\n");
     } else {
-      const conv = await q(`select id, summary from conversations where id = $1`, [conversation_id]);
+      const conv = await q(`select id, summary from public.conversations where id = $1`, [conversation_id]);
       const msgs = await q(
-        `select role, content, created_at from messages where conversation_id = $1 order by created_at asc limit 40`,
+        `select role, content, created_at
+           from public.messages
+          where conversation_id = $1
+          order by created_at asc
+          limit 40`,
         [conversation_id]
       );
       summaryBefore = conv.rows[0]?.summary || "";
@@ -57,7 +59,7 @@ ${history}
       if (error) throw error;
       return res.status(200).json({ ok: true, summary: newSummary, mode: "supabase" });
     } else {
-      await q(`update conversations set summary = $1 where id = $2`, [newSummary, conversation_id]);
+      await q(`update public.conversations set summary = $1 where id = $2`, [newSummary, conversation_id]);
       return res.status(200).json({ ok: true, summary: newSummary, mode: "pg" });
     }
   } catch (e) {
