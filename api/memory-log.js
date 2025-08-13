@@ -1,4 +1,3 @@
-// /api/memory-log.js
 import { q, getSupa } from "./db.js";
 export const config = { api: { bodyParser: true } };
 
@@ -18,7 +17,7 @@ export default async function handler(req, res) {
     }
 
     await q(
-      `insert into messages (conversation_id, role, content, modality, payload)
+      `insert into public.messages (conversation_id, role, content, modality, payload)
        values ($1, $2, $3, $4, $5::jsonb)`,
       [conversation_id, role, content ?? "", modality, payload ? JSON.stringify(payload) : null]
     );
