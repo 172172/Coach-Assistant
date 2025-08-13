@@ -1,4 +1,4 @@
-import { q, getSupa } from "./db.js";
+ import { q, getSupa } from "./db.js";
 export const config = { api: { bodyParser: true } };
 
 const OPENAI_URL = "https://api.openai.com/v1/embeddings";
