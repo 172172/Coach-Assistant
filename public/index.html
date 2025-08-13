@@ -95,7 +95,7 @@
     const $ = sel => document.querySelector(sel);
     const $$ = sel => Array.from(document.querySelectorAll(sel));
 
-    // ========= Robust fetch -> JSON (för att slippa "Unexpected token …") =========
+    // ========= Robust fetch -> JSON =========
     async function fetchJSON(url, opts) {
       const r = await fetch(url, opts);
       const text = await r.text();
@@ -140,7 +140,6 @@
         const bar = $('#micBar');
         (function loop(){
           if (!micAnalyser) return; micAnalyser.getByteTimeDomainData(micData);
-          // peak amplitude 0..1
           let peak = 0; for (let i=0;i<micData.length;i++){ const v = Math.abs(micData[i]-128)/128; if (v>peak) peak=v; }
           bar.style.width = Math.min(98, (peak*100*1.6)+6) + '%';
           requestAnimationFrame(loop);
@@ -202,8 +201,15 @@
           const sessUpdate = {
             type: 'session.update',
             session: {
-              instructions: `Du är Coach Assistant för Linje 65.\nSvara kort och stegvis på svenska. Om manualen saknar täckning: säg det tydligt och föreslå nästa trygga steg.\n\n[Minne & senaste växlingar]\n${memoryBootstrap}`,
+              instructions: `Du är Coach Assistant för Linje 65.
+Svara kort och stegvis på svenska.
+INNAN du svarar: kalla ALLTID funktionen search_manual med användarens senaste transkriberade text.
+Om manual-sök ger noll träffar, säg att du saknar täckning och föreslå nästa trygga steg.
+
+[Minne & senaste växlingar]
+${memoryBootstrap}`,
               turn_detection: { type: 'server_vad' },
+              tool_choice: { type: 'auto' }, // <- tvinga modellen att använda verktyg vid behov
               tools: [
                 {
                   type: 'function',
@@ -297,12 +303,15 @@
         return;
       }
 
-      // 2) User transcript (final)
+      // 2) User transcript (final) — FALLBACK: kör manual-sök direkt
       if (msg.type && /input.*transcript\.done/.test(msg.type)) {
         const text = msg.transcript || msg.text || '';
         if (text?.trim()) {
           append(bubble(text, 'user'));
           logMsg('user', text, 'voice', msg);
+
+          // Fallback så röst alltid får RAG-svar
+          runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 6, minSim: 0.6 }) });
         }
         return;
       }
@@ -313,7 +322,6 @@
         if (text?.trim()) {
           append(bubble(text, 'assistant'));
           logMsg('assistant', text, 'voice', msg);
-          // Visa källor om de nämns
           const idx = text.indexOf('Hämtat från:');
           if (idx !== -1) {
             const list = text.slice(idx + 'Hämtat från:'.length).trim();
@@ -345,7 +353,10 @@
           type: 'response.create',
           response: {
             modalities: ['audio','text'],
-            instructions: `Svara ENBART baserat på TOOL_OUTPUT nedan. Om 'INGEN_TRÄFF' förekommer: säg att du saknar säkra uppgifter.\nAvsluta med "Hämtat från:" följt av raderna under TOOL_OUTPUT_SOURCES.\nTOOL_OUTPUT:\n${toolText}`
+            instructions: `Svara ENBART baserat på TOOL_OUTPUT nedan. Om 'INGEN_TRÄFF' förekommer: säg att du saknar säkra uppgifter och föreslå ett tryggt nästa steg.
+Avsluta med "Hämtat från:" följt av raderna under TOOL_OUTPUT_SOURCES.
+TOOL_OUTPUT:
+${toolText}`
           }
         }));
       } catch (err) {
@@ -373,12 +384,15 @@
     $('#quickText').addEventListener('keydown', e => { if (e.key==='Enter') sendQuickText(); });
     function sendQuickText(){
       const t = $('#quickText').value.trim(); if (!t) return;
-      $('#quickText').value=''; sendTextToRealtime(t); append(bubble('➤ ' + t, 'user'));
+      $('#quickText').value=''; append(bubble('➤ ' + t, 'user'));
+      sendTextToRealtime(t);
     }
     function sendTextToRealtime(text) {
       if (!rt?.dc || rt.dc.readyState !== 'open') { append(pill('Inte ansluten.')); return; }
+      // Skicka bara in texten till sessionen (för logik/turn detection)
       rt.dc.send(JSON.stringify({ type: 'input_text', text }));
-      rt.dc.send(JSON.stringify({ type: 'response.create', response: { modalities: ['audio','text'] } }));
+      // Kör vår RAG direkt så vi alltid får manual-baserat svar
+      runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 6, minSim: 0.6 }) });
     }
 
     // ========= Manual-test UI (direkt mot /api/search-manual) =========
