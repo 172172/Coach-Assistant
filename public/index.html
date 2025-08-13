@@ -209,7 +209,7 @@ Om manual-sök ger noll träffar, säg att du saknar täckning och föreslå nä
 [Minne & senaste växlingar]
 ${memoryBootstrap}`,
               turn_detection: { type: 'server_vad' },
-              tool_choice: { type: 'auto' }, // <- tvinga modellen att använda verktyg vid behov
+              tool_choice: { type: 'auto' },
               tools: [
                 {
                   type: 'function',
@@ -243,7 +243,7 @@ ${memoryBootstrap}`,
         };
 
         rt.dc.onmessage = (e) => {
-          try { handleRealtimeMessage(JSON.parse(e.data)); } catch(err) { /* non-json events ignored */ }
+          try { handleRealtimeMessage(JSON.parse(e.data)); } catch(err) { /* ignore non-JSON */ }
         };
 
         // 5) Token + offer/answer
@@ -283,6 +283,12 @@ ${memoryBootstrap}`,
     }
 
     // ========= Realtime event handler =========
+    function isTranscriptFinalType(t) {
+      if (!t) return false;
+      // Fånga både .done och .completed och olika prefix
+      return /transcript\.(done|completed)$/.test(t) || t.endsWith('input_text.done') || t.endsWith('input.text.done');
+    }
+
     function handleRealtimeMessage(msg) {
       // 0) Tool arg deltas
       if (msg.type === 'response.function_call_arguments.delta') {
@@ -303,14 +309,13 @@ ${memoryBootstrap}`,
         return;
       }
 
-      // 2) User transcript (final) — FALLBACK: kör manual-sök direkt
-      if (msg.type && /input.*transcript\.done/.test(msg.type)) {
+      // 2) User transcript final — FALLBACK: kör manual-sök direkt
+      if (isTranscriptFinalType(msg.type)) {
         const text = msg.transcript || msg.text || '';
         if (text?.trim()) {
           append(bubble(text, 'user'));
           logMsg('user', text, 'voice', msg);
-
-          // Fallback så röst alltid får RAG-svar
+          // Kör RAG direkt för röst så vi alltid grundar i manualen
           runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 6, minSim: 0.6 }) });
         }
         return;
@@ -389,7 +394,7 @@ ${toolText}`
     }
     function sendTextToRealtime(text) {
       if (!rt?.dc || rt.dc.readyState !== 'open') { append(pill('Inte ansluten.')); return; }
-      // Skicka bara in texten till sessionen (för logik/turn detection)
+      // Skicka bara in texten till sessionen (för turn detection / logging)
       rt.dc.send(JSON.stringify({ type: 'input_text', text }));
       // Kör vår RAG direkt så vi alltid får manual-baserat svar
       runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 6, minSim: 0.6 }) });
