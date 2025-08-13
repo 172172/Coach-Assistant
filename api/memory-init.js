@@ -1,4 +1,3 @@
-// /api/memory-init.js
 import { q, getSupa } from "./db.js";
 export const config = { api: { bodyParser: true } };
 
@@ -8,7 +7,6 @@ export default async function handler(req, res) {
     const supa = await getSupa();
 
     if (supa) {
-      // Supabase-vägen
       const { data: recent, error: rerr } = await supa
         .from("conversations").select("*")
         .eq("user_id", userId).eq("status", "active")
@@ -38,11 +36,10 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, conversation_id: conv.id, memoryBootstrap, mode: "supabase" });
     }
 
-    // PG-fallback
     const ORDER_COL = "coalesce(started_at, created_at, now())";
     const recent = await q(
       `select *, ${ORDER_COL} as started_at_fallback
-         from conversations
+         from public.conversations
         where user_id = $1 and status = 'active'
         order by ${ORDER_COL} desc
         limit 1`, [userId]
@@ -55,7 +52,7 @@ export default async function handler(req, res) {
     }
     if (!conv) {
       const ins = await q(
-        `insert into conversations (user_id, title)
+        `insert into public.conversations (user_id, title)
          values ($1, 'Linje65 – Realtime')
          returning *`, [userId]
       );
@@ -63,7 +60,7 @@ export default async function handler(req, res) {
     }
     const msgs = await q(
       `select role, content, modality, created_at
-         from messages
+         from public.messages
         where conversation_id = $1
         order by created_at desc
         limit 16`, [conv.id]
