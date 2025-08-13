@@ -1,4 +1,3 @@
-// /api/search-manual.js
 import { q, getSupa } from "./db.js";
 export const config = { api: { bodyParser: true } };
 
@@ -26,53 +25,36 @@ export default async function handler(req, res) {
     const k = Number(topK ?? process.env.RAG_TOP_K ?? 6);
     let min = Number(minSim ?? process.env.RAG_MIN_SIMILARITY ?? 0.6);
 
-    // ====== 1) SUPABASE-RPC-VÄGEN (om SUPABASE_* finns) ======
+    // SUPABASE-vägen (om RPC finns)
     const supa = await getSupa();
     if (supa) {
-      async function tryModel(model) {
-        const emb = await embed(query, model);
-        const { data, error } = await supa.rpc("match_manual_chunks", {
-          query_embedding: emb,
-          match_count: k,
-          min_similarity: min
-        });
-        if (error) {
-          // Dimension mismatch → prova andra modellen
-          if (/dimension|mismatch|vector/i.test(error.message || "")) return { rows: null, dimsMismatch: true };
-          throw error;
-        }
-        return { rows: data || [] };
+      let modelUsed = MODEL_3072, emb = await embed(query, MODEL_3072);
+      let { data, error } = await supa.rpc("match_manual_chunks", {
+        query_embedding: emb, match_count: k, min_similarity: min
+      });
+      if (error && /dimension|mismatch|vector/i.test(error.message || "")) {
+        modelUsed = MODEL_1536;
+        emb = await embed(query, MODEL_1536);
+        ({ data, error } = await supa.rpc("match_manual_chunks", {
+          query_embedding: emb, match_count: k, min_similarity: min
+        }));
       }
-
-      let out = await tryModel(MODEL_3072);
-      let modelUsed = MODEL_3072;
-      if (out.dimsMismatch) { out = await tryModel(MODEL_1536); modelUsed = MODEL_1536; }
-
-      // mjuk retry om 0 träffar
-      if ((out.rows || []).length === 0 && min > 0.45) {
-        min = 0.45;
-        const retry = await supa.rpc("match_manual_chunks", {
-          query_embedding: await embed(query, modelUsed),
-          match_count: k,
-          min_similarity: min
-        });
-        out.rows = retry.data || [];
+      if (error) throw error;
+      if ((!data || !data.length) && min > 0.45) {
+        ({ data } = await supa.rpc("match_manual_chunks", {
+          query_embedding: emb, match_count: k, min_similarity: 0.45
+        }));
       }
-
-      const snippets = (out.rows || []).map(r => ({
+      const snippets = (data || []).map(r => ({
         id: r.id, manual_id: r.manual_id, section: r.section,
         content: r.content, similarity: Number((r.similarity ?? 0).toFixed(3)), source: r.source
       }));
-      const context = snippets.map((r, i) =>
-        `[#${i+1} | ${r.section || 'sektion'} | ${r.source || 'manual'} | sim:${r.similarity}]\n${r.content}`
-      ).join("\n\n---\n\n");
-
+      const context = snippets.map((r, i) => `[#${i+1} | ${r.section || 'sektion'} | ${r.source || 'manual'} | sim:${r.similarity}]\n${r.content}`).join("\n\n---\n\n");
       return res.status(200).json({ ok: true, count: snippets.length, snippets, context, mode: "supabase", modelUsed });
     }
 
-    // ====== 2) PG-VÄGEN (om PG* finns) ======
-    // Hämta dimensionen från kolumnen (kräver att embedding-kolumnen heter 'embedding')
-    const d = await q("select vector_dims(embedding) as dim from manual_chunks limit 1");
+    // PG-vägen (schema-kvalificerad)
+    const d = await q("select vector_dims(embedding) as dim from public.manual_chunks limit 1");
     const dims = d.rows?.[0]?.dim;
     const model = (dims === 3072) ? MODEL_3072 : MODEL_1536;
     const emb = await embed(query, model);
@@ -81,19 +63,18 @@ export default async function handler(req, res) {
     const rows1 = await q(
       `select id, manual_id, section, content, source,
               1 - (embedding <=> $1::vector) as similarity
-         from manual_chunks
+         from public.manual_chunks
         where 1 - (embedding <=> $1::vector) >= $3
         order by embedding <=> $1::vector
         limit $2`,
       [vec, k, min]
     );
     let rows = rows1.rows || [];
-
     if (rows.length === 0 && min > 0.45) {
       const rows2 = await q(
         `select id, manual_id, section, content, source,
                 1 - (embedding <=> $1::vector) as similarity
-           from manual_chunks
+           from public.manual_chunks
           order by embedding <=> $1::vector
           limit $2`,
         [vec, k]
@@ -105,10 +86,7 @@ export default async function handler(req, res) {
       id: r.id, manual_id: r.manual_id, section: r.section,
       content: r.content, similarity: Number((r.similarity ?? 0).toFixed(3)), source: r.source
     }));
-    const context = snippets.map((r, i) =>
-      `[#${i+1} | ${r.section || 'sektion'} | ${r.source || 'manual'} | sim:${r.similarity}]\n${r.content}`
-    ).join("\n\n---\n\n");
-
+    const context = snippets.map((r, i) => `[#${i+1} | ${r.section || 'sektion'} | ${r.source || 'manual'} | sim:${r.similarity}]\n${r.content}`).join("\n\n---\n\n");
     res.status(200).json({ ok: true, count: snippets.length, snippets, context, mode: "pg", modelUsed: model, dims });
   } catch (e) {
     res.status(500).json({ ok: false, error: e?.message || String(e) });
