@@ -1,20 +1,18 @@
 // /api/memory-log.js
-import { createClient } from '@supabase/supabase-js';
-
+import { q } from "./db.js";
 export const config = { api: { bodyParser: true } };
 
-const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { persistSession: false }
-});
-
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Only POST' });
+  if (req.method !== "POST") return res.status(405).json({ error: "Only POST" });
   try {
-    const { conversation_id, role, content, modality = 'voice', payload = null } = req.body || {};
-    if (!conversation_id || !role) return res.status(400).json({ error: 'Missing conversation_id/role' });
+    const { conversation_id, role, content, modality = "voice", payload = null } = req.body || {};
+    if (!conversation_id || !role) return res.status(400).json({ error: "Missing conversation_id/role" });
 
-    const { error } = await supa.from('messages').insert({ conversation_id, role, content, modality, payload });
-    if (error) throw error;
+    await q(
+      `insert into messages (conversation_id, role, content, modality, payload)
+       values ($1, $2, $3, $4, $5::jsonb)`,
+      [conversation_id, role, content ?? "", modality, payload ? JSON.stringify(payload) : null]
+    );
 
     res.status(200).json({ ok: true });
   } catch (e) {
