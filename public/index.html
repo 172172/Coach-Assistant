@@ -269,6 +269,8 @@ body.immersive #vizWrap canvas{
     <button id="abortTTSBtn" class="ghost" style="display:none">⏸️ Avbryt tal</button>
     <button id="reportBtn" class="ghost">📝 Rapportera problem</button>
   </div>
+  <div id="rtStatus" class="pill">Inte ansluten</div>
+
 
   <div style="margin-top:1rem">
     <label for="volumeSlider" class="muted">Volym:</label>
@@ -1076,6 +1078,106 @@ function triggerBootFX() {
   // auto-hide overlay efter 1.2s
   setTimeout(()=> fx.classList.remove('active'), 1200);
 }
+    // === Realtime WebRTC (ChatGPT-like voice) ===
+let rt = { pc:null, dc:null, mic:null, remoteAudio:null, connected:false };
+
+document.getElementById('rtBtn').addEventListener('click', connectRealtime);
+document.getElementById('rtHangup').addEventListener('click', hangupRealtime);
+
+async function connectRealtime() {
+  const status = (t) => document.getElementById('rtStatus').textContent = t;
+
+  try {
+    // 1) Mic
+    rt.mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // 2) Peer connection
+    rt.pc = new RTCPeerConnection();
+
+    // 3) Skicka mic till modellen
+    rt.mic.getTracks().forEach(t => rt.pc.addTrack(t, rt.mic));
+
+    // 4) Ta emot modellens ljud och spela automatiskt
+    rt.remoteAudio = new Audio();
+    rt.remoteAudio.autoplay = true;
+    rt.remoteAudio.playsInline = true;
+    rt.remoteAudio.muted = false;
+    rt.pc.ontrack = (e) => { rt.remoteAudio.srcObject = e.streams[0]; };
+
+    // 5) Data channel för Realtime-events (text, live-status mm)
+    rt.dc = rt.pc.createDataChannel('oai-events');
+    rt.dc.onopen = () => {
+      // Direkt efter anslutning kan vi uppdatera sessionens settings (instruktioner m.m.)
+      // Detta kan du ändra när som helst under samtalet.
+      const sessUpdate = {
+        type: 'session.update',
+        session: {
+          // Sätter svensk ton & turn-taking server-side
+          instructions: 'Du är Coach Assistant för Linje 65. Svara kort, på svenska, med tydliga steg.',
+          turn_detection: { type: 'server_vad' }
+        }
+      };
+      rt.dc.send(JSON.stringify(sessUpdate));
+    };
+    rt.dc.onmessage = (e) => {
+      // Här kan du läsa textdelar medan de kommer (om du vill visa text live i UI)
+      // Exempel på intressanta typer: 'response.output_text.delta', 'response.completed'
+      // console.log('RT event:', e.data);
+    };
+
+    // 6) Hämta ephemeralt token från din server
+    const { token, model } = await fetch('/api/rt-token').then(r => r.json());
+
+    // 7) Skapa offer och POST:a SDP till OpenAI Realtime → få answer SD P tillbaka
+    const offer = await rt.pc.createOffer();
+    await rt.pc.setLocalDescription(offer);
+
+    const sdpAnswer = await fetch(
+      `https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/sdp'
+        },
+        body: offer.sdp
+      }
+    ).then(r => r.text());
+
+    await rt.pc.setRemoteDescription({ type: 'answer', sdp: sdpAnswer });
+
+    // 8) UI state
+    rt.connected = true;
+    document.getElementById('rtBtn').style.display = 'none';
+    document.getElementById('rtHangup').style.display = 'inline-block';
+    status('Realtime ansluten – prata när som helst!');
+  } catch (e) {
+    console.error(e);
+    document.getElementById('rtStatus').textContent = `Realtime misslyckades: ${e?.message || e}`;
+  }
+}
+
+async function hangupRealtime() {
+  try {
+    rt.dc?.close();
+    rt.pc?.getSenders()?.forEach(s => s.track?.stop());
+    rt.pc?.close();
+    rt.mic?.getTracks()?.forEach(t => t.stop());
+  } catch {}
+  rt = { pc:null, dc:null, mic:null, remoteAudio:null, connected:false };
+  document.getElementById('rtBtn').style.display = 'inline-block';
+  document.getElementById('rtHangup').style.display = 'none';
+  document.getElementById('rtStatus').textContent = 'Inte ansluten';
+}
+
+// (Valfritt) Skicka text till modellen under samtalet (t.ex. från ett inputfält)
+function sendTextToRealtime(text) {
+  if (!rt?.dc || rt.dc.readyState !== 'open') return;
+  // 1) Lägg in text som input
+  rt.dc.send(JSON.stringify({ type: 'input_text', text }));
+  // 2) Be modellen skapa ett svar (text eller tal)
+  rt.dc.send(JSON.stringify({ type: 'response.create', response: { modalities: ['audio','text'] }}));
+}
+
 
   </script>
 
