@@ -1,37 +1,26 @@
-// /api/search-manual.js
 import { q } from "./db.js";
 import fetch from "node-fetch";
+export const config = { api: { bodyParser: true } }; // Node, inte Edge
 
-export const config = { api: { bodyParser: true } }; // säkerställ Node, inte Edge
+const MODEL = "text-embedding-3-large";
 
-const OPENAI_URL = "https://api.openai.com/v1/embeddings";
-const MODEL = "text-embedding-3-large"; // måste matcha vektor-dimensionen i tabellen
-
-function toPgVectorString(arr) {
-  return "[" + arr.map(v => (typeof v === "number" ? v : Number(v) || 0)).join(",") + "]";
-}
+const toPgVector = a => "[" + a.map(n => (typeof n === "number" ? n : Number(n)||0)).join(",") + "]";
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ ok:false, error: "POST only" });
+  if (req.method !== "POST") return res.status(405).json({ ok:false, error:"POST only" });
   try {
     const { query } = req.body || {};
-    if (!query?.trim()) return res.status(400).json({ ok:false, error: "Missing query" });
+    if (!query?.trim()) return res.status(400).json({ ok:false, error:"Missing query" });
 
-    // 1) Hämta embedding för frågan
-    const embRes = await fetch(OPENAI_URL, {
+    const embRes = await fetch("https://api.openai.com/v1/embeddings", {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
+      headers: { "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type":"application/json" },
       body: JSON.stringify({ model: MODEL, input: query })
     });
-    if (!embRes.ok) return res.status(500).json({ ok:false, error: `Embeddings API failed: ${await embRes.text()}` });
+    if (!embRes.ok) return res.status(500).json({ ok:false, error:`Embeddings API: ${await embRes.text()}` });
     const vec = (await embRes.json())?.data?.[0]?.embedding;
-    if (!Array.isArray(vec)) return res.status(500).json({ ok:false, error: "No embedding returned" });
-    const qvec = toPgVectorString(vec);
+    if (!Array.isArray(vec)) return res.status(500).json({ ok:false, error:"No embedding" });
 
-    // 2) Vektor-sök i aktiva dokument
     const sql = `
       with params as (select $1::vector as qvec)
       select c.doc_id, d.title, c.idx, c.heading, c.chunk,
@@ -43,16 +32,12 @@ export default async function handler(req, res) {
       order by c.embedding <=> p.qvec
       limit 8
     `;
-    const r = await q(sql, [qvec]);
-
+    const r = await q(sql, [toPgVector(vec)]);
     const snippets = r.rows.map(x => ({
       doc_id: x.doc_id, title: x.title, idx: x.idx, heading: x.heading,
       score: Number((x.score ?? 0).toFixed(4)), text: x.chunk
     }));
-    const context = snippets.map(s => s.text).join("\n---\n");
-
-    return res.status(200).json({ ok: true, count: snippets.length, snippets, context });
-  } catch (e) {
-    return res.status(500).json({ ok:false, error: e.message });
-  }
+    res.status(200).json({ ok:true, count:snippets.length, snippets,
+      context: snippets.map(s=>s.text).join("\n---\n") });
+  } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 }
