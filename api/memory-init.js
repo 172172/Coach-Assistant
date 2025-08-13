@@ -1,55 +1,62 @@
-import { supa as _supa } from './db.js';
+// /api/memory-init.js
+import { q } from "./db.js";
 
-export const config2 = { api: { bodyParser: true } };
+export const config = { api: { bodyParser: true } };
 
-export async function handler2(req, res) {
+export default async function handler(req, res) {
   try {
-    const { userId = 'kevin', reviveMinutes = 90 } = req.body || {};
+    const { userId = "kevin", reviveMinutes = 90 } = req.body || {};
 
-    // 1) Leta aktiv conv
-    let conv = null;
-    const { data: recent, error: rerr } = await _supa
-      .from('conversations')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('status', 'active')
-      .order('started_at', { ascending: false })
-      .limit(1);
-    if (rerr) throw rerr;
-
-    if (recent?.length) {
-      const last = recent[0];
-      const ageMin = (Date.now() - new Date(last.started_at).getTime()) / 60000;
-      conv = (ageMin <= reviveMinutes) ? last : null;
+    // hämta senaste aktiva conv
+    const recent = await q(
+      `select * from conversations
+        where user_id = $1 and status = 'active'
+        order by started_at desc
+        limit 1`,
+      [userId]
+    );
+    let conv = recent.rows[0] || null;
+    if (conv) {
+      const ageMin = (Date.now() - new Date(conv.started_at).getTime()) / 60000;
+      if (ageMin > reviveMinutes) conv = null;
     }
 
+    // skapa ny om ingen nylig aktiv
     if (!conv) {
-      const { data: created, error: cerr } = await _supa
-        .from('conversations')
-        .insert({ user_id: userId, title: 'Linje65 – Realtime' })
-        .select().single();
-      if (cerr) throw cerr;
-      conv = created;
+      const ins = await q(
+        `insert into conversations (user_id, title)
+         values ($1, 'Linje65 – Realtime')
+         returning *`,
+        [userId]
+      );
+      conv = ins.rows[0];
     }
 
-    // 2) Plocka summary + senaste 16 meddelanden
-    const { data: msgs, error: merr } = await _supa
-      .from('messages')
-      .select('role, content, modality, created_at')
-      .eq('conversation_id', conv.id)
-      .order('created_at', { ascending: false })
-      .limit(16);
-    if (merr) throw merr;
+    // senaste 16 meddelanden för bootstrap
+    const msgs = await q(
+      `select role, content, modality, created_at
+         from messages
+        where conversation_id = $1
+        order by created_at desc
+        limit 16`,
+      [conv.id]
+    );
 
-    const recentPairs = (msgs || []).reverse().map(m => `${m.role.toUpperCase()}: ${m.content || ''}`).join('\n');
+    const recentPairs = msgs.rows
+      .reverse()
+      .map(m => `${m.role.toUpperCase()}: ${m.content || ""}`)
+      .join("\n");
 
-    const memoryBootstrap = `\n[Sammanfattning hittills]\n${conv.summary || '(tom)'}\n\n[Senaste växlingar]\n${recentPairs || '(inga)'}\n`;
+    const memoryBootstrap = `
+[Sammanfattning hittills]
+${conv.summary || "(tom)"}
+
+[Senaste växlingar]
+${recentPairs || "(inga)"}
+`;
 
     res.status(200).json({ ok: true, conversation_id: conv.id, memoryBootstrap });
   } catch (e) {
     res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 }
-
-// Exportera som default för Vercel route:
-export { handler2 as default };
