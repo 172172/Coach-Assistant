@@ -2,11 +2,11 @@
   "name": "coach-assistant",
   "version": "1.0.0",
   "type": "module",
+  "engines": { "node": "20.x" },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.1",
     "pg": "^8.11.5",
-    "node-fetch": "^2.6.7",
+    "node-fetch": "^3.3.2",
     "form-data": "^4.0.0",
-    "formidable": "3.5.0"
+    "formidable": "^3.8.0"
   }
 }
