@@ -38,6 +38,7 @@
     .bubble { background:#0f1722; border:1px solid #213145; border-radius:16px; padding:12px 14px; white-space: pre-wrap; line-height: 1.45; }
     .bubble.user { background:#0f1a27; border-color:#24415a; }
     .bubble.assistant { background:#0f1823; border-color:#2c3f57; }
+    .bubble.error { background:#1b0f12; border-color:#4a1f2a; }
     .tag { font-size: 11px; opacity:.8; }
     .status { margin-left: 8px; }
     .vis { height: 10px; background: #0e1420; border-radius: 9999px; overflow: hidden; border:1px solid #213145; }
@@ -68,10 +69,18 @@
         <div id="memStatus" class="pill">Minne: —</div>
         <div class="vis" style="flex:1 1 220px; min-width:220px"><b id="micBar"></b></div>
       </div>
+
       <div class="row" style="margin-top:10px">
         <input id="quickText" type="search" placeholder="Skicka text till assistenten (enter)" style="flex:1" />
         <button class="ghost" id="sendTextBtn">Skicka</button>
       </div>
+
+      <!-- Manuell felsökning av RAG utan Realtime -->
+      <div class="row" style="margin-top:10px">
+        <input id="manualQuery" type="search" placeholder="Testa manual-sök (t.ex. 'sortbyte i tappen')" style="flex:1" />
+        <button class="ghost" id="manualBtn">Testa manual</button>
+      </div>
+
       <div id="output"></div>
     </div>
 
@@ -93,13 +102,16 @@
       let json;
       try { json = JSON.parse(text); }
       catch { throw new Error(`${r.status} ${r.statusText}: ${text.slice(0,200)}`); }
-      if (!r.ok) throw new Error(json?.error || json?.message || `${r.status} ${r.statusText}`);
+      if (!r.ok || json?.ok === false) throw new Error(json?.error || json?.message || `${r.status} ${r.statusText}`);
       return json;
     }
 
     function pill(text) { const d = document.createElement('div'); d.className = 'pill'; d.textContent = text; return d; }
     function bubble(text, role='assistant') {
       const d = document.createElement('div'); d.className = 'bubble ' + role; d.textContent = text; return d;
+    }
+    function errorBubble(text) {
+      const d = document.createElement('div'); d.className = 'bubble error'; d.textContent = text; return d;
     }
     function append(el) { $('#output').appendChild(el); el.scrollIntoView({behavior:'smooth', block:'end'}); }
 
@@ -166,10 +178,12 @@
         setupMicViz(rt.mic);
 
         // 1) Init/restore conversation & memory
-        const { conversation_id, memoryBootstrap } = await fetchJSON('/api/memory-init', {
+        const memInit = await fetchJSON('/api/memory-init', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userId: localStorage.getItem('operator_id') || 'kevin' })
         });
+        const conversation_id = memInit.conversation_id;
+        const memoryBootstrap = memInit.memoryBootstrap || '';
         rt.conversation_id = conversation_id;
         $('#memStatus').textContent = 'Minne: laddat';
 
@@ -243,7 +257,7 @@
       } catch (e) {
         console.error(e);
         $('#rtStatus').textContent = `Realtime misslyckades: ${e?.message || e}`;
-        append(pill('Fel vid anslutning: ' + (e?.message || e)));
+        append(errorBubble('Fel vid anslutning: ' + (e?.message || e)));
       }
     }
 
@@ -293,11 +307,7 @@
         return;
       }
 
-      // 3) Assistant text chunks & final
-      if (msg.type === 'response.output_text.delta') {
-        // (valfritt) streama text till en aktuell bubbla – enklare: ignorera, vi loggar på done
-        return;
-      }
+      // 3) Assistant final text
       if (msg.type === 'response.output_text.done') {
         const text = msg.output_text || msg.text || '';
         if (text?.trim()) {
@@ -326,7 +336,9 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
         });
-        const sourcesList = (data.snippets || []).map((s,i) => `[#${i+1} | ${s.section || 'sektion'} | ${s.source || 'manual'} | sim:${s.similarity}]`).join('\n');
+        const sourcesList = (data.snippets || []).map((s,i) =>
+          `[#${i+1} | ${s.title || 'manual'} • idx:${s.idx} • score:${(s.score??0).toFixed(2)}]`
+        ).join('\n');
         const toolText = `TOOL_OUTPUT_START\n${data.context || 'INGEN_TRÄFF'}\nTOOL_OUTPUT_SOURCES\n${sourcesList || 'inga källor'}\nTOOL_OUTPUT_END`;
         // Återkoppla till modellen som nytt svar
         rt.dc?.send(JSON.stringify({
@@ -337,6 +349,7 @@
           }
         }));
       } catch (err) {
+        console.error('search-manual error', err);
         rt.dc?.send(JSON.stringify({ type: 'response.create', response: { modalities:['audio','text'], instructions: 'Kunde inte nå manual-sök. Säg detta kort och föreslå att försöka igen.' } }));
       }
     }
@@ -356,12 +369,39 @@
     }
 
     // ========= Send text manually =========
-    $('#sendTextBtn').onclick = sendQuickText; $('#quickText').addEventListener('keydown', e => { if (e.key==='Enter') sendQuickText(); });
-    function sendQuickText(){ const t = $('#quickText').value.trim(); if (!t) return; $('#quickText').value=''; sendTextToRealtime(t); append(bubble('➤ ' + t, 'user')); }
+    $('#sendTextBtn').onclick = sendQuickText;
+    $('#quickText').addEventListener('keydown', e => { if (e.key==='Enter') sendQuickText(); });
+    function sendQuickText(){
+      const t = $('#quickText').value.trim(); if (!t) return;
+      $('#quickText').value=''; sendTextToRealtime(t); append(bubble('➤ ' + t, 'user'));
+    }
     function sendTextToRealtime(text) {
       if (!rt?.dc || rt.dc.readyState !== 'open') { append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({ type: 'input_text', text }));
       rt.dc.send(JSON.stringify({ type: 'response.create', response: { modalities: ['audio','text'] } }));
+    }
+
+    // ========= Manual-test UI (direkt mot /api/search-manual) =========
+    $('#manualBtn').addEventListener('click', testManualSearch);
+    $('#manualQuery').addEventListener('keydown', e => { if (e.key==='Enter') testManualSearch(); });
+    async function testManualSearch() {
+      const q = $('#manualQuery').value.trim();
+      if (!q) { append(pill('Skriv en fråga för manualen.')); return; }
+      append(bubble('🔎 Manual: ' + q, 'user'));
+      try {
+        const data = await fetchJSON('/api/search-manual', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ query: q })
+        });
+        if (!data.count) {
+          append(bubble('Inga träffar i manualen.', 'assistant'));
+          return;
+        }
+        const lines = data.snippets.map((s,i)=> `#${i+1} • ${s.title || 'manual'} • idx:${s.idx} • score:${(s.score??0).toFixed(2)}\n${s.text}`).join('\n---\n');
+        append(bubble(lines, 'assistant'));
+      } catch (e) {
+        append(errorBubble('Manual-sök fel: ' + e.message));
+      }
     }
   </script>
 </body>
