@@ -9,7 +9,35 @@ export default async function handler(req, res) {
 Du är Coach Assistant för Linje 65. Svara kort, tydligt och på svenska.
 Använd punktlistor för arbetssteg. Om manualtäckning saknas: säg det är osäkert
 och be om förtydligande. Förebygg faror och slöseri.
+
+För frågor om Linje 65, manualer, procedurer eller tekniska detaljer: Använd alltid verktyget "search_manual" för att hämta relevant information från manualen innan du svarar. Basera ditt svar enbart på resultaten från verktyget – hitta inte på information.
 `;
+
+    const tools = [
+      {
+        type: 'function',
+        name: 'search_manual',
+        description: 'Sök i Linje 65-manualen efter relevant information. Använd detta för alla frågor som rör manualer, procedurer eller tekniska detaljer.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Sökfrågan på svenska, baserat på användarens fråga.'
+            },
+            k: {
+              type: 'integer',
+              description: 'Antal resultat att hämta (default 5).'
+            },
+            minSim: {
+              type: 'number',
+              description: 'Minsta likhetspoäng (default 0).'
+            }
+          },
+          required: ['query']
+        }
+      }
+    ];
 
     const r = await fetch('https://api.openai.com/v1/realtime/sessions', {
       method: 'POST',
@@ -21,7 +49,8 @@ och be om förtydligande. Förebygg faror och slöseri.
         model,
         voice: 'verse',                 // röst; byt vid behov
         modalities: ['audio', 'text'],  // tal in/ut + text
-        instructions,                   // Linje 65-kontekst
+        instructions,                   // Uppdaterade instructions
+        tools,                          // Lägg till tools här
         // turn_detection kan även styras efter anslutning via session.update (klienten)
       })
     });
