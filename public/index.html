@@ -32,7 +32,7 @@
     .muted { color: var(--muted); font-size: 13px; }
     .row { display:flex; gap:10px; align-items:center; }
     input[type="text"], input[type="search"] { background:#0d1622; color:var(--text); border:1px solid #243244; border-radius:10px; padding:10px 12px; }
-    .pill { background: var(--pill); color: var(--text); padding: 8px 12px; border-radius: 9999px; display:inline-block; margin: 6px 6px 0 0; font-size: 12px; border:1px solid #26364a; }
+    .pill { background: var(--pill); color: var(--text); padding: 8px 12px; border-radius: 999px; display:inline-block; margin: 6px 6px 0 0; font-size: 12px; border:1px solid #26364a; }
     .panel { background: var(--panel); border: 1px solid #233146; border-radius: 16px; padding: 14px; }
     #output { display:flex; flex-direction: column; gap: 10px; margin-top: 14px; }
     .bubble { background:#0f1722; border:1px solid #213145; border-radius:16px; padding:12px 14px; white-space: pre-wrap; line-height: 1.45; }
@@ -207,6 +207,7 @@
               instructions: `
 Du är Coach Assistant för Linje 65.
 Vid frågor om drift/felsökning/manual ska du ALLTID använda verktyget "search_manual" innan du svarar.
+VÄNTA tills du har ett slutligt (final) transkript innan du kallar "search_manual".
 När du kallar "search_manual": skicka alltid { query: EXAKT senaste användarens transkript }, inte tom sträng och inte parafras.
 När "search_manual" returnerar "strict_answer": LÄS UPP DET ORDAGRANT (max 2 meningar), utan egna tillägg.
 Om "strict_answer" saknas: Säg att du inte kan verifiera i manualen och be om precisering (delområde, felkod, maskin).
@@ -358,27 +359,52 @@ OUTPUT (JSON string): {
         const id = msg.id || msg.tool_call_id || 'unknown';
         const tc = toolCalls.get(id) || { name: msg.name, argsText: '' };
 
-        rt.cancelAutos = true; // vi ersätter med RAG
+        // Spara response_id
         if (msg.response_id) {
           tc.response_id = msg.response_id;
-          rt.allowedResponseIds.add(msg.response_id);
+          toolCalls.set(id, tc);
         }
-        toolCalls.set(id, tc);
 
-        try {
-          const args = JSON.parse(tc.argsText || '{}');
-          if (tc.name) append(pill(`TOOL CALL → ${tc.name} q="${String(args.query||'').slice(0,32)}${(args.query||'').length>32?'…':''}"`));
-        } catch {}
+        // Snygg debug
+        let args = {};
+        try { args = JSON.parse(tc.argsText || '{}'); } catch {}
+        if (tc.name) {
+          const shown = (args.query || '').slice(0,32);
+          append(pill(`TOOL CALL → ${tc.name} q="${shown}${(args.query||'').length>32?'…':''}"`));
+        }
+
+        // Lös query innan vi bestämmer avbrottslogik
+        const q = resolveQueryFromState(args);
 
         if (tc.name === 'search_manual') {
+          // Tom query → be modellen vänta/precisera, avbryt inte autosvar
+          if (!q) {
+            rt.cancelAutos = false;
+            if (tc.response_id) rt.allowedResponseIds.add(tc.response_id);
+            rt.dc?.send(JSON.stringify({
+              type: 'response.function_call_output',
+              tool_call_id: id,
+              output: JSON.stringify({ ok:false, error:'missing_query_wait_final', need_user:true })
+            }));
+            append(pill('⏳ Ignorerar tomt tool-call (väntar på final transkript)'));
+            return;
+          }
+
           if (rt._ragBusy || tc.launched) return;
           tc.launched = true; toolCalls.set(id, tc);
+
+          rt.cancelAutos = true;
+          if (tc.response_id) rt.allowedResponseIds.add(tc.response_id);
+
           rt._ragBusy = true;
           rt._lastToolCallId = id;
           clearTimeout(ragTimer);
           ragTimer = setTimeout(() => { rt._ragBusy = false; rt.cancelAutos = false; }, RAG_TIMEOUT_MS);
-          return runToolSearchManual({ tool_call_id: id, response_id: tc.response_id, argsText: tc.argsText }).finally(()=>{});
+
+          const patchedArgs = JSON.stringify({ ...args, query: q });
+          return runToolSearchManual({ tool_call_id: id, response_id: tc.response_id, argsText: patchedArgs }).finally(()=>{});
         }
+
         if (tc.name === 'save_memory') {
           if (tc.launched) return;
           tc.launched = true; toolCalls.set(id, tc);
@@ -483,9 +509,17 @@ OUTPUT (JSON string): {
       return best;
     }
 
+    // NY: gemensam query-resolver
+    function resolveQueryFromState(args) {
+      let q = (args?.query || '').trim();
+      if (!q && (rt._liveUserBuf || '').trim()) q = rt._liveUserBuf.trim();
+      if (!q && (rt._lastUserText || '').trim()) q = rt._lastUserText.trim();
+      if (!q && (rt._lastQuery || '').trim())    q = rt._lastQuery.trim();
+      return q;
+    }
+
     // ========= Tool runners =========
     function speakVerbatim(text) {
-      // fallback (ingen tool_call_id)
       const toSay = `LÄS UPP EXAKT (ordagrant) och utan tillägg: """${text}"""`;
       rt.skipCancelForNextCreate = true; // släpp igenom vårt tal
       rt.dc?.send(JSON.stringify({
@@ -497,15 +531,7 @@ OUTPUT (JSON string): {
     async function runToolSearchManual(tc) {
       const args = parseArgsSafe(tc.argsText);
       const k = args.k ?? 5;
-
-      // Robust query: args → live-buffert → senaste final → senaste RAG
-      let q = (args.query || '').trim();
-      if (!q && (rt._liveUserBuf || '').trim()) {
-        q = rt._liveUserBuf.trim();
-        append(pill('🔁 Query från live-transkript'));
-      }
-      if (!q && (rt._lastUserText || '').trim()) q = rt._lastUserText.trim();
-      if (!q && (rt._lastQuery || '').trim())    q = rt._lastQuery.trim();
+      const q = resolveQueryFromState(args);
 
       if (!q) {
         if (tc.tool_call_id) {
