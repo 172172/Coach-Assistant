@@ -1,88 +1,120 @@
 // /api/search-manual.js
-import { q } from "./db.js";
-import fetch from "node-fetch";
+// Serverless-funktion för Vercel/Next "pages" stil (CommonJS).
+// Kräver: OPENAI_API_KEY + Postgres-anslutning (DATABASE_URL eller PG* envs).
+// Kräver i databasen: CREATE EXTENSION IF NOT EXISTS vector;
+// och en tabell (default: public.manual_chunks) med kolumnen "embedding vector(1536)".
 
-export const config = { api: { bodyParser: true } }; // Node-runtime
+const { Pool } = require('pg');
 
-const MODEL_BY_DIMS = {
-  1536: "text-embedding-3-small",
-  3072: "text-embedding-3-large",
-};
+// --- Pool (återanvänd mellan anrop) ---
+const pool =
+  global.pgPool ||
+  new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl:
+      process.env.PGSSL === 'false'
+        ? false
+        : { rejectUnauthorized: false },
+    host: process.env.PGHOST,
+    port: process.env.PGPORT,
+    user: process.env.PGUSER,
+    password: process.env.PGPASSWORD,
+    database: process.env.PGDATABASE
+  });
+if (!global.pgPool) global.pgPool = pool;
 
-function toPgVectorString(arr) {
-  return "[" + arr.map(v => (typeof v === "number" ? v : Number(v) || 0)).join(",") + "]";
-}
-
-async function detectVectorDims() {
-  // Försök läsa dimensionen från en rad i manual_chunks
-  const r = await q(`select vector_dims(embedding) as dims from manual_chunks limit 1`);
-  const dims = r.rows?.[0]?.dims;
-  if (dims === 1536 || dims === 3072) return dims;
-  // Fallback om tabellen är tom – defaulta till 3072
-  return 3072;
-}
-
-export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ ok:false, error:"POST only" });
-
-  try {
-    const { query, topK = 8 } = req.body || {};
-    if (!query?.trim()) return res.status(400).json({ ok:false, error:"Missing query" });
-
-    // 1) Välj rätt modell utifrån DB:ns vektordimension
-    const dims = await detectVectorDims();
-    const model = MODEL_BY_DIMS[dims] || "text-embedding-3-large";
-
-    // 2) Hämta embedding för frågan
-    const embRes = await fetch("https://api.openai.com/v1/embeddings", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ model, input: query })
-    });
-    if (!embRes.ok) {
-      return res.status(500).json({ ok:false, error:`Embeddings API failed: ${await embRes.text()}` });
-    }
-    const vec = (await embRes.json())?.data?.[0]?.embedding;
-    if (!Array.isArray(vec)) return res.status(500).json({ ok:false, error:"No embedding returned" });
-
-    // 3) Vektor-sök i aktiva dokument
-    const sql = `
-      with params as (select $1::vector as qvec)
-      select c.doc_id, d.title, c.idx, c.heading, c.chunk,
-             1 - (c.embedding <=> p.qvec) as score
-      from manual_chunks c
-      join manual_docs d on d.id = c.doc_id
-      cross join params p
-      where d.is_active = true
-      order by c.embedding <=> p.qvec
-      limit ${Number(topK) || 8}
-    `;
-    const r = await q(sql, [toPgVectorString(vec)]);
-
-    const snippets = r.rows.map(x => ({
-      doc_id: x.doc_id, title: x.title, idx: x.idx, heading: x.heading,
-      score: Number((x.score ?? 0).toFixed(4)), text: x.chunk
-    }));
-    const context = snippets.map(s => s.text).join("\n---\n");
-
-    return res.status(200).json({ ok:true, dims, model, count:snippets.length, snippets, context });
-  } catch (e) {
-    return res.status(500).json({ ok:false, error:e.message });
+// --- OpenAI embedding (utan SDK, bara fetch) ---
+async function embedQuery(query) {
+  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY not set');
+  const model = process.env.EMBED_MODEL || 'text-embedding-3-small'; // 1536 dims
+  const r = await fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ model, input: query })
+  });
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(
+      `OpenAI embeddings failed: ${r.status} ${r.statusText} – ${t.slice(0, 200)}`
+    );
   }
+  const j = await r.json();
+  const emb = j.data?.[0]?.embedding;
+  if (!emb) throw new Error('No embedding returned');
+  return { embedding: emb, model, dims: emb.length };
 }
-// lägg direkt efter att du hämtat body
-const minSim = Number((req.body && req.body.minSim) ?? 0);
 
-// ...efter SELECTen, innan du bygger snippets:
-const rows = r.rows || [];
-const filtered = rows.filter(x => (Number(x.score) || 0) >= minSim);
+module.exports = async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  if (req.method !== 'POST') {
+    res.status(405).end(JSON.stringify({ ok: false, error: 'Method not allowed' }));
+    return;
+  }
+  try {
+    const body = req.body || {};
+    const query = (body.query || '').trim();
+    if (!query) {
+      res.status(400).end(JSON.stringify({ ok: false, error: 'Missing query' }));
+      return;
+    }
+    const K = Number(body.k ?? body.topK ?? 5);
+    const minScore = Number(body.minSim ?? 0); // 0..1
 
-// använd 'filtered' i stället för 'r.rows' nedan
-const snippets = filtered.map(x => ({
-  doc_id: x.doc_id, title: x.title, idx: x.idx, heading: x.heading,
-  score: Number((x.score ?? 0).toFixed(4)), text: x.chunk
-}));
+    // 1) Embedding
+    const { embedding, model, dims } = await embedQuery(query);
+    const vecLiteral = '[' + embedding.join(',') + ']'; // skickas som $1::vector
 
+    // 2) Tabell/kolumnnamn (konfig via env om du vill)
+    const schema = process.env.MANUAL_SCHEMA || 'public';
+    const table = process.env.MANUAL_TABLE || 'manual_chunks';
+    const embCol = process.env.MANUAL_EMB_COL || 'embedding';
+    const textCol = process.env.MANUAL_TEXT_COL || 'chunk';
+    const titleCol = process.env.MANUAL_TITLE_COL || 'title';
+    const headingCol = process.env.MANUAL_HEADING_COL || 'heading';
+    const idxCol = process.env.MANUAL_IDX_COL || 'idx';
+    const docIdCol = process.env.MANUAL_DOCID_COL || 'doc_id';
+
+    // 3) Likhet & sortering med pgvector
+    // score = 1 - cosine_distance; filtrera på minSim om satt
+    const sql = `
+      WITH q AS (SELECT $1::vector AS emb)
+      SELECT ${docIdCol} AS doc_id,
+             ${titleCol}  AS title,
+             ${idxCol}    AS idx,
+             ${headingCol} AS heading,
+             ${textCol}   AS chunk,
+             1 - (${embCol} <=> (SELECT emb FROM q)) AS score
+      FROM ${schema}.${table}
+      WHERE 1 - (${embCol} <=> (SELECT emb FROM q)) >= $3
+      ORDER BY ${embCol} <-> (SELECT emb FROM q)
+      LIMIT $2
+    `;
+
+    const { rows } = await pool.query(sql, [vecLiteral, K, minScore]);
+
+    res.status(200).end(
+      JSON.stringify({
+        ok: true,
+        count: rows.length,
+        model,
+        dims,
+        snippets: rows.map((r) => ({
+          doc_id: r.doc_id,
+          title: r.title,
+          idx: r.idx,
+          heading: r.heading,
+          score: Number((r.score ?? 0).toFixed(4)),
+          text: r.chunk
+        }))
+      })
+    );
+  } catch (err) {
+    console.error('search-manual 500', err);
+    res
+      .status(500)
+      .end(JSON.stringify({ ok: false, error: String(err.message || err) }));
+  }
+};
