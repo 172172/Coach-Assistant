@@ -123,7 +123,8 @@
       _ragBusy:false, _lastQuery:"", _lastToolCallId:null,
       cancelAutos:false,                // stoppa modellens spontana svar när vi kör RAG
       skipCancelForNextCreate:false,    // släpp igenom vårt nästa response.created
-      allowedResponseIds:new Set()      // responses vi tillåter (tillhör aktiv tool-respons)
+      allowedResponseIds:new Set(),     // responses vi tillåter (hör till aktiv tool-respons)
+      _lastUserText:""                  // NYTT: senaste transkriberade/skrivna texten
     };
     const toolCalls = new Map(); // tool_call_id -> { name, argsText, launched?, response_id? }
 
@@ -201,14 +202,14 @@
             session: {
               voice: 'verse',
               turn_detection: { type: 'server_vad' },
-              // VIKTIGT: tvinga verktyg – modellen ska kalla search_manual
-              tool_choice: { type: 'auto' },
-              // Strikt policy hur tool-output ska användas
+              tool_choice: { type: 'auto' }, // modellen får kalla verktyg
               instructions: `
-Du är Coach Assistant för Linje 65. Vid frågor om drift/felsökning/manual ska du ALLTID använda verktyget "search_manual" innan du svarar.
-När "search_manual" returnerar ett fält "strict_answer": LÄS UPP DET ORDAGRANT. Gör inga egna tillägg. Citering får vara max 2 meningar.
+Du är Coach Assistant för Linje 65.
+Vid frågor om drift/felsökning/manual ska du ALLTID använda verktyget "search_manual" innan du svarar.
+När du kallar "search_manual": skicka alltid { query: exakt senaste användarens transkript }, inte tom sträng och inte parafras.
+När "search_manual" returnerar ett fält "strict_answer": LÄS UPP DET ORDAGRANT (max 2 meningar), utan egna tillägg.
 Om "strict_answer" saknas: Säg att du inte kan verifiera i manualen och be om precisering (delområde, felkod, maskin).
-Om frågan är hälsning/småprat kan du svara normalt (ingen tool-anrop krävs).
+Hälsning/småprat kan besvaras utan verktyg.
 `.trim(),
               tools: [
                 {
@@ -217,8 +218,8 @@ Om frågan är hälsning/småprat kan du svara normalt (ingen tool-anrop krävs)
                   description: `Sök i Linje65-manualdatabasen och returnera träffar med källor.
 OUTPUT (JSON string): {
   ok: boolean,
-  strict_answer?: string,              // ordagrant citat att läsa upp
-  best_sentence?: string,              // fallback: bästa mening
+  strict_answer?: string,
+  best_sentence?: string,
   numeric?: { value:number, sentence:string } | null,
   fallback?: boolean,
   top_score?: number,
@@ -227,7 +228,7 @@ OUTPUT (JSON string): {
                   parameters: {
                     type: 'object',
                     properties: {
-                      query: { type: 'string', description: 'Användarens fråga i fri text.' },
+                      query: { type: 'string', description: 'Användarens fråga (senaste transkript).' },
                       k: { type: 'integer', default: 5 },
                       minSim: { type: 'number', default: 0.55 }
                     },
@@ -289,7 +290,8 @@ OUTPUT (JSON string): {
         pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
         conversation_id:rt.conversation_id, _msgCount:rt._msgCount,
         _ragBusy:false, _lastQuery:"", _lastToolCallId:null,
-        cancelAutos:false, skipCancelForNextCreate:false, allowedResponseIds:new Set()
+        cancelAutos:false, skipCancelForNextCreate:false, allowedResponseIds:new Set(),
+        _lastUserText:""
       };
       $('#rtBtn').style.display = 'inline-block';
       $('#rtHangup').style.display = 'none';
@@ -321,7 +323,6 @@ OUTPUT (JSON string): {
       if (msg.type === 'response.created') {
         const rid = msg.response?.id || msg.response_id;
         if (rid && rt.allowedResponseIds.has(rid)) {
-          // Det här är den pågående tool-responsen – släpp igenom
           append(pill('✅ Tillåter pågående tool-respons'));
           return;
         }
@@ -343,17 +344,13 @@ OUTPUT (JSON string): {
         const id = msg.id || msg.tool_call_id || 'unknown';
         const tc = toolCalls.get(id) || { name: msg.name, argsText: '' };
 
-        // flagga RAG-läge
-        rt.cancelAutos = true;
-
-        // tillåt att den här response-id:n får prata (modellen fortsätter efter tool output)
+        rt.cancelAutos = true; // vi ersätter med RAG
         if (msg.response_id) {
           tc.response_id = msg.response_id;
           rt.allowedResponseIds.add(msg.response_id);
         }
         toolCalls.set(id, tc);
 
-        // debug
         try {
           const args = JSON.parse(tc.argsText || '{}');
           if (tc.name) append(pill(`TOOL CALL → ${tc.name} q="${String(args.query||'').slice(0,32)}${(args.query||'').length>32?'…':''}"`));
@@ -366,7 +363,6 @@ OUTPUT (JSON string): {
           rt._lastToolCallId = id;
           clearTimeout(ragTimer);
           ragTimer = setTimeout(() => { rt._ragBusy = false; rt.cancelAutos = false; }, RAG_TIMEOUT_MS);
-          // Kör vår tool-runner som kommer skicka response.function_call_output
           return runToolSearchManual({ tool_call_id: id, response_id: tc.response_id, argsText: tc.argsText }).finally(()=>{});
         }
         if (tc.name === 'save_memory') {
@@ -383,6 +379,7 @@ OUTPUT (JSON string): {
         if (text) {
           append(bubble(text, 'user'));
           logMsg('user', text, 'voice', msg);
+          rt._lastUserText = text; // NYTT: spara senaste uttalandet
           if (text.split(/\s+/).length < 2) return;
 
           if (!rt._ragBusy && text !== rt._lastQuery) {
@@ -390,8 +387,7 @@ OUTPUT (JSON string): {
             rt.cancelAutos = true;
             clearTimeout(ragTimer);
             ragTimer = setTimeout(() => { rt._ragBusy = false; rt.cancelAutos = false; }, RAG_TIMEOUT_MS);
-            // Ingen tool_call_id här → vi skickar ett eget tal-svar (verbatim) som backup
-            runToolSearchManual({ tool_call_id: null, response_id: null, argsText: JSON.stringify({ query: text, k: 5, minSim: 0.5 }) }).finally(()=>{});
+            runToolSearchManual({ tool_call_id: null, response_id: null, argsText: JSON.stringify({ query: text, k: 5, minSim: 0.55 }) }).finally(()=>{});
           }
         }
         return;
@@ -474,7 +470,7 @@ OUTPUT (JSON string): {
 
     // ========= Tool runners =========
     function speakVerbatim(text) {
-      // Detta används bara i fallback-läget (ingen tool_call_id)
+      // fallback (ingen tool_call_id)
       const toSay = `LÄS UPP EXAKT (ordagrant) och utan tillägg: """${text}"""`;
       rt.skipCancelForNextCreate = true; // släpp igenom vårt tal
       rt.dc?.send(JSON.stringify({
@@ -486,21 +482,43 @@ OUTPUT (JSON string): {
     async function runToolSearchManual(tc) {
       const args = parseArgsSafe(tc.argsText);
       const k = args.k ?? 5;
-      const body = { query: args.query, k, topK: k, minSim: args.minSim ?? 0.55 };
+
+      // ---- NYTT: robust query ----
+      let q = (args.query || '').trim();
+      if (!q) q = (rt._lastUserText || rt._lastQuery || '').trim();
+
+      if (!q) {
+        // inget att söka på
+        if (tc.tool_call_id) {
+          rt.dc?.send(JSON.stringify({
+            type: 'response.function_call_output',
+            tool_call_id: tc.tool_call_id,
+            output: JSON.stringify({ ok:false, error:'missing_query', need_user:true })
+          }));
+          append(pill('⚠️ search_manual: tom query → bad modellen be om förtydligande'));
+        } else {
+          speakVerbatim('Jag uppfattade inte frågan. Kan du säga den igen?');
+        }
+        rt._ragBusy = false;
+        clearTimeout(ragTimer);
+        return;
+      }
+      // ----------------------------
+
+      const body = { query: q, k, topK: k, minSim: args.minSim ?? 0.55 };
 
       try {
         const data = await fetchJSON('/api/search-manual', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
         });
 
-        append(pill(`RAG: count=${data.count||0}${data.fallback?' (fallback)':''} • top1=${(data.snippets?.[0]?.score??0).toFixed(2)} • q="${(args.query||'').slice(0,32)}${(args.query||'').length>32?'…':''}"`));
+        append(pill(`RAG: count=${data.count||0}${data.fallback?' (fallback)':''} • top1=${(data.snippets?.[0]?.score??0).toFixed(2)} • q="${q.slice(0,32)}${q.length>32?'…':''}"`));
 
         let strict = '';
         let bestSent = '';
         let numeric = null;
 
         if ((data.count||0) > 0) {
-          const q = args.query || '';
           if (isNumericQuestion(q)) {
             const must=['tapp']; const any=['givare','sensor'];
             const hit = extractNumericAnswer(data.snippets, any, must);
@@ -511,7 +529,7 @@ OUTPUT (JSON string): {
             }
           }
           if (!strict) {
-            const pick = pickBestSentence(data.snippets, args.query||'');
+            const pick = pickBestSentence(data.snippets, q);
             bestSent = (pick.s || (data.snippets[0].text||'').replace(/\s+/g,' ').trim()).slice(0, 500);
             strict = `Enligt manualen: ${bestSent}`;
           }
@@ -529,7 +547,7 @@ OUTPUT (JSON string): {
         };
 
         if (tc.tool_call_id) {
-          // *** Viktigt: lämna tillbaka output till Realtime-modellen ***
+          // *** lämna tillbaka output till Realtime-modellen ***
           rt.dc?.send(JSON.stringify({
             type: 'response.function_call_output',
             tool_call_id: tc.tool_call_id,
@@ -537,10 +555,11 @@ OUTPUT (JSON string): {
           }));
           append(pill('📤 Skickade tool-output till modellen'));
         } else {
-          // Fallback-läge (ingen tool_call från modellen): vi talar själva
+          // Fallback-läge: vi talar själva
           if (out.strict_answer) {
             speakVerbatim(out.strict_answer);
-            append(bubble(`${out.strict_answer}\nHämtat från: ${(sources[0]?.title||'manual')} • idx:${sources[0]?.idx ?? '?'} • score:${(sources[0]?.score??0).toFixed(2)}`,'assistant'));
+            const s0 = sources[0] || {};
+            append(bubble(`${out.strict_answer}\nHämtat från: ${(s0.title||'manual')} • idx:${s0.idx ?? '?'} • score:${(s0.score??0).toFixed(2)}`,'assistant'));
           } else {
             speakVerbatim('Jag kan inte verifiera det i manualen just nu. Specificera del/område eller felkod så letar jag exakt.');
           }
@@ -552,7 +571,6 @@ OUTPUT (JSON string): {
         if (!tc.tool_call_id) {
           speakVerbatim('Kunde inte nå manual-sök just nu. Försök igen strax.');
         } else {
-          // Skicka tillbaka ett fel-objekt (så modellen kan hantera)
           rt.dc?.send(JSON.stringify({
             type: 'response.function_call_output',
             tool_call_id: tc.tool_call_id,
@@ -592,6 +610,7 @@ OUTPUT (JSON string): {
     function sendQuickText(){
       const t = $('#quickText').value.trim(); if (!t) return;
       $('#quickText').value=''; append(bubble('➤ ' + t, 'user'));
+      rt._lastUserText = t; // spara även manuell text
       sendTextToRealtime(t);
     }
     function sendTextToRealtime(text) {
@@ -638,7 +657,6 @@ OUTPUT (JSON string): {
           append(bubble(`${chosen}\nHämtat från: ${(top.title||'manual')} • idx:${top.idx ?? '?'} • score:${(top.score??0).toFixed(2)}`,'assistant'));
         }
 
-        // Full lista för inspektion
         const lines = data.snippets.map((s,i)=> `#${i+1} • ${s.title || 'manual'} • idx:${s.idx ?? '?'} • score:${(s.score??0).toFixed(2)}\n${s.text}`).join('\n---\n');
         append(bubble(lines, 'assistant'));
       } catch (e) {
