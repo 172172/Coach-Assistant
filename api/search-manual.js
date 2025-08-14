@@ -73,3 +73,16 @@ export default async function handler(req, res) {
     return res.status(500).json({ ok:false, error:e.message });
   }
 }
+// lägg direkt efter att du hämtat body
+const minSim = Number((req.body && req.body.minSim) ?? 0);
+
+// ...efter SELECTen, innan du bygger snippets:
+const rows = r.rows || [];
+const filtered = rows.filter(x => (Number(x.score) || 0) >= minSim);
+
+// använd 'filtered' i stället för 'r.rows' nedan
+const snippets = filtered.map(x => ({
+  doc_id: x.doc_id, title: x.title, idx: x.idx, heading: x.heading,
+  score: Number((x.score ?? 0).toFixed(4)), text: x.chunk
+}));
+
