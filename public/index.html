@@ -127,9 +127,7 @@
     let rt = {
       pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
       conversation_id:null, _msgCount:0,
-      _ragBusy:false,            // lås: bara en RAG per tur
-      _lastQuery:"",             // dedupe på transkript
-      _lastToolCallId:null
+      _ragBusy:false, _lastQuery:"", _lastToolCallId:null
     };
     const toolCalls = new Map(); // tool_call_id -> { name, argsText }
 
@@ -161,10 +159,16 @@
     async function logMsg(role, content, modality='voice', payload=null) {
       if (!rt.conversation_id) return;
       try {
-        await fetch('/api/memory-log', {
+        const res = await fetch('/api/memory-log', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ conversation_id: rt.conversation_id, role, content, modality, payload })
         });
+        const txt = await res.text();
+        let json = {};
+        try { json = JSON.parse(txt); } catch {}
+        if (!res.ok || json?.ok === false) {
+          append(errorBubble('LOGGNING FEL: ' + (json?.error || res.status + ' ' + res.statusText)));
+        }
         rt._msgCount = (rt._msgCount || 0) + 1;
         if (rt._msgCount % 8 === 0) {
           fetch('/api/memory-summarize', {
@@ -172,7 +176,9 @@
             body: JSON.stringify({ conversation_id: rt.conversation_id })
           }).then(()=> $('#memStatus').textContent = 'Minne: uppdaterat');
         }
-      } catch {}
+      } catch (e) {
+        append(errorBubble('LOGGNING FEL: ' + (e?.message || e)));
+      }
     }
 
     // ========= Realtime connect =========
@@ -381,7 +387,7 @@ ${memoryBootstrap}`,
     // ========= Tools =========
     function parseArgsSafe(s) { try { return JSON.parse(s || '{}'); } catch { return {}; } }
 
-    // Deterministiskt RAG-svar: vi bygger svaret från toppträffen
+    // Deterministiskt RAG-svar + DIAG-chip
     async function runToolSearchManual(tc) {
       const args = parseArgsSafe(tc.argsText);
       const body = { query: args.query, topK: args.k ?? 5, minSim: args.minSim ?? 0.6 };
@@ -392,6 +398,9 @@ ${memoryBootstrap}`,
           body: JSON.stringify(body)
         });
 
+        // Visa diagnostik i UI så vi SER att söket kördes
+        append(pill(`RAG: count=${data.count||0} • model=${data.model||'?'} • dims=${data.dims||'?'} • q="${(args.query||'').slice(0,32)}${(args.query||'').length>32?'…':''}"`));
+
         if ((data.count || 0) > 0) {
           const top = data.snippets[0];
           const txt = (top.text || '').replace(/\s+/g, ' ').trim();
@@ -399,11 +408,11 @@ ${memoryBootstrap}`,
           const sourcesList = (data.snippets || []).map((s,i) =>
             `[#${i+1} | ${s.title || 'manual'} • idx:${s.idx} • score:${(s.score??0).toFixed(2)}]`
           ).join('\n');
-          const answer = `Enligt manualen: ${preview}\nHämtat från: ${top.title || 'manual'} • idx:${top.idx} • score:${(top.score ?? 0).toFixed(2)}\n${sourcesList ? sourcesList : ''}`;
+          const answer = `Enligt manualen: ${preview}\nHämtat från: ${top.title || 'manual'} • idx:${top.idx} • score:${(top.score ?? 0).toFixed(2)}`;
 
           rt.dc?.send(JSON.stringify({
             type: 'response.create',
-            response: { modalities: ['audio','text'], instructions: answer }
+            response: { modalities: ['audio','text'], instructions: answer + (sourcesList?`\n${sourcesList}`:'') }
           }));
         } else {
           rt.dc?.send(JSON.stringify({
@@ -416,6 +425,7 @@ ${memoryBootstrap}`,
         }
       } catch (err) {
         console.error('search-manual error', err);
+        append(errorBubble('Manual-sök FEL: ' + (err?.message || err)));
         rt.dc?.send(JSON.stringify({
           type: 'response.create',
           response: {
@@ -454,7 +464,6 @@ ${memoryBootstrap}`,
       if (!rt?.dc || rt.dc.readyState !== 'open') { append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({ type: 'input_text', text }));  // skickas för VAD/turn mgmt
       if (text.split(/\s+/).length < 2) return; // hoppa RAG för enstavigt
-      // RAG endast om inte låst och inte duplikat
       if (!rt._ragBusy && text !== rt._lastQuery) {
         rt._ragBusy = true;
         rt._lastQuery = text;
@@ -476,6 +485,7 @@ ${memoryBootstrap}`,
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ query: q })
         });
+        append(pill(`RAG: count=${data.count||0} • model=${data.model||'?'} • dims=${data.dims||'?'}`));
         if (!data.count) {
           append(bubble('Inga träffar i manualen.', 'assistant'));
           return;
