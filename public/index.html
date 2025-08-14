@@ -133,6 +133,10 @@
     };
     const toolCalls = new Map(); // tool_call_id -> { name, argsText }
 
+    // Failsafe-timer för att aldrig låsa fast
+    const RAG_TIMEOUT_MS = 8000;
+    let ragTimer = null;
+
     // mic visualizer (simple)
     let micAnalyser, micData;
     function setupMicViz(stream) {
@@ -293,8 +297,12 @@ ${memoryBootstrap}`,
 
     // ========= Realtime event handler =========
     function isTranscriptFinalType(t) {
-      // Smalare matchning för att undvika dubletter
-      return t === 'input_audio_buffer.transcript.completed' || t === 'input_text.completed';
+      if (!t) return false;
+      // Tillåt både .done och .completed för audio & text
+      return (
+        /^input_audio_buffer\.transcript\.(done|completed)$/.test(t) ||
+        /^input_text\.(done|completed)$/.test(t)
+      );
     }
 
     function handleRealtimeMessage(msg) {
@@ -316,7 +324,9 @@ ${memoryBootstrap}`,
           if (rt._ragBusy) return;           // undvik dubbelkörning
           rt._ragBusy = true;
           rt._lastToolCallId = id;
-          return runToolSearchManual(tc).finally(()=>{}); // låset släpps på output_done
+          clearTimeout(ragTimer);
+          ragTimer = setTimeout(() => { rt._ragBusy = false; }, RAG_TIMEOUT_MS);
+          return runToolSearchManual(tc).finally(()=>{});
         }
         if (tc.name === 'save_memory') return runToolSaveMemory(tc);
         return;
@@ -329,9 +339,14 @@ ${memoryBootstrap}`,
           append(bubble(text, 'user'));
           logMsg('user', text, 'voice', msg);
 
+          // hoppa RAG för enstavigt (hej, tjena, ok)
+          if (text.split(/\s+/).length < 2) return;
+
           if (!rt._ragBusy && text !== rt._lastQuery) {
             rt._ragBusy = true;
             rt._lastQuery = text;
+            clearTimeout(ragTimer);
+            ragTimer = setTimeout(() => { rt._ragBusy = false; }, RAG_TIMEOUT_MS);
             runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 5, minSim: 0.6 }) }).finally(()=>{});
           }
         }
@@ -350,8 +365,15 @@ ${memoryBootstrap}`,
             append(pill('Hämtat från:')); const d = document.createElement('div'); d.className='src'; d.innerHTML = list.replaceAll('\n','<br>'); append(d);
           }
         }
-        // släpp RAG-låset för nästa tur
+        rt._ragBusy = false;     // släpp låset
+        clearTimeout(ragTimer);
+        return;
+      }
+
+      // 3b) Helt klart / fel → släpp låset ändå
+      if (msg.type === 'response.completed' || msg.type === 'response.error') {
         rt._ragBusy = false;
+        clearTimeout(ragTimer);
         return;
       }
     }
@@ -359,6 +381,7 @@ ${memoryBootstrap}`,
     // ========= Tools =========
     function parseArgsSafe(s) { try { return JSON.parse(s || '{}'); } catch { return {}; } }
 
+    // Deterministiskt RAG-svar: vi bygger svaret från toppträffen
     async function runToolSearchManual(tc) {
       const args = parseArgsSafe(tc.argsText);
       const body = { query: args.query, topK: args.k ?? 5, minSim: args.minSim ?? 0.6 };
@@ -368,33 +391,40 @@ ${memoryBootstrap}`,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
         });
-        const sourcesList = (data.snippets || []).map((s,i) =>
-          `[#${i+1} | ${s.title || 'manual'} • idx:${s.idx} • score:${(s.score??0).toFixed(2)}]`
-        ).join('\n');
 
-        const toolText = `TOOL_OUTPUT_START
-${data.context || 'INGEN_TRÄFF'}
-TOOL_OUTPUT_SOURCES
-${sourcesList || 'inga källor'}
-TOOL_OUTPUT_END`;
+        if ((data.count || 0) > 0) {
+          const top = data.snippets[0];
+          const txt = (top.text || '').replace(/\s+/g, ' ').trim();
+          const preview = txt.length > 350 ? txt.slice(0, 350) + '…' : txt;
+          const sourcesList = (data.snippets || []).map((s,i) =>
+            `[#${i+1} | ${s.title || 'manual'} • idx:${s.idx} • score:${(s.score??0).toFixed(2)}]`
+          ).join('\n');
+          const answer = `Enligt manualen: ${preview}\nHämtat från: ${top.title || 'manual'} • idx:${top.idx} • score:${(top.score ?? 0).toFixed(2)}\n${sourcesList ? sourcesList : ''}`;
 
-        // Skicka sammanhållet svar (kort!)
+          rt.dc?.send(JSON.stringify({
+            type: 'response.create',
+            response: { modalities: ['audio','text'], instructions: answer }
+          }));
+        } else {
+          rt.dc?.send(JSON.stringify({
+            type: 'response.create',
+            response: {
+              modalities: ['audio','text'],
+              instructions: 'Jag hittar inget i manualen om det där just nu. Ge mig gärna en annan formulering eller fler ord så letar jag igen.'
+            }
+          }));
+        }
+      } catch (err) {
+        console.error('search-manual error', err);
         rt.dc?.send(JSON.stringify({
           type: 'response.create',
           response: {
-            modalities: ['audio','text'],
-            instructions: `Svara ENBART baserat på TOOL_OUTPUT nedan. Var kort (max 2 meningar).
-Om 'INGEN_TRÄFF' förekommer: säg att du saknar säkra uppgifter och föreslå ett tryggt nästa steg.
-Avsluta med "Hämtat från:" följt av raderna under TOOL_OUTPUT_SOURCES.
-TOOL_OUTPUT:
-${toolText}`
+            modalities:['audio','text'],
+            instructions: 'Kunde inte nå manual-sök just nu. Försök igen strax.'
           }
         }));
-      } catch (err) {
-        console.error('search-manual error', err);
-        rt.dc?.send(JSON.stringify({ type: 'response.create', response: { modalities:['audio','text'], instructions: 'Kunde inte nå manual-sök. Säg detta kort och föreslå att försöka igen.' } }));
-        // Släpp låset så användaren kan försöka igen
-        rt._ragBusy = false;
+        rt._ragBusy = false; // Släpp låset så man kan försöka igen
+        clearTimeout(ragTimer);
       }
     }
 
@@ -423,10 +453,13 @@ ${toolText}`
     function sendTextToRealtime(text) {
       if (!rt?.dc || rt.dc.readyState !== 'open') { append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({ type: 'input_text', text }));  // skickas för VAD/turn mgmt
+      if (text.split(/\s+/).length < 2) return; // hoppa RAG för enstavigt
       // RAG endast om inte låst och inte duplikat
       if (!rt._ragBusy && text !== rt._lastQuery) {
         rt._ragBusy = true;
         rt._lastQuery = text;
+        clearTimeout(ragTimer);
+        ragTimer = setTimeout(() => { rt._ragBusy = false; }, RAG_TIMEOUT_MS);
         runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 5, minSim: 0.6 }) }).finally(()=>{});
       }
     }
