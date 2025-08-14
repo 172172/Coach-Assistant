@@ -389,7 +389,8 @@ ${memoryBootstrap}`,
             rt._lastQuery = text;
             clearTimeout(ragTimer);
             ragTimer = setTimeout(() => { rt._ragBusy = false; }, RAG_TIMEOUT_MS);
-            runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 5, minSim: 0.6 }) }).finally(()=>{});
+            // ⬇️ sänk tröskel + skicka även topK
+            runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 5, minSim: 0.4 }) }).finally(()=>{});
           }
         }
         return;
@@ -427,7 +428,8 @@ ${memoryBootstrap}`,
     async function runToolSearchManual(tc) {
       const args = parseArgsSafe(tc.argsText);
       const k = args.k ?? 5;
-      const body = { query: args.query, k, topK: k, minSim: args.minSim ?? 0.6 };
+      // ⬇️ skicka både k och topK + lägre tröskel initialt
+      const body = { query: args.query, k, topK: k, minSim: args.minSim ?? 0.4 };
       try {
         const data = await fetchJSON('/api/search-manual', {
           method: 'POST',
@@ -435,17 +437,26 @@ ${memoryBootstrap}`,
           body: JSON.stringify(body)
         });
 
-        // Visa diagnostik i UI så vi SER att söket kördes
-        append(pill(`RAG: count=${data.count||0} • model=${data.model||'?'} • dims=${data.dims||'?'} • q="${(args.query||'').slice(0,32)}${(args.query||'').length>32?'…':''}"`));
+        // Visa diagnostik i UI så vi SER att söket kördes (inkl. fallback-info)
+        append(pill(`RAG: count=${data.count||0}${data.fallback?' (fallback)':''} • model=${data.model||'?'} • dims=${data.dims||'?'} • q="${(args.query||'').slice(0,32)}${(args.query||'').length>32?'…':''}"`));
 
         if ((data.count || 0) > 0) {
-          const top = data.snippets[0];
+          const weak = data.fallback === true;
+          const top = data.snippets[0] || {};
           const txt = (top.text || '').replace(/\s+/g, ' ').trim();
           const preview = txt.length > 350 ? txt.slice(0, 350) + '…' : txt;
           const sourcesList = (data.snippets || []).map((s,i) =>
-            `[#${i+1} | ${s.title || 'manual'} • idx:${s.idx} • score:${(s.score??0).toFixed(2)}]`
+            `[#${i+1} | ${(s.title || 'manual')} • idx:${s.idx ?? '?'} • score:${(s.score??0).toFixed(2)}]`
           ).join('\n');
-          const answer = `Enligt manualen: ${preview}\nHämtat från: ${top.title || 'manual'} • idx:${top.idx} • score:${(top.score ?? 0).toFixed(2)}`;
+
+          const lead = weak
+            ? 'Jag hittar inga starka träffar. Bästa match just nu:'
+            : 'Enligt manualen:';
+
+          let answer = `${lead} ${preview}\nHämtat från: ${(top.title || 'manual')} • idx:${top.idx ?? '?'} • score:${(top.score ?? 0).toFixed(2)}`;
+          if (weak) {
+            answer += `\n(obs: svag matchning – säg gärna fler detaljer, t.ex. maskin/område/format, så hittar jag bättre.)`;
+          }
 
           rt.dc?.send(JSON.stringify({
             type: 'response.create',
@@ -506,7 +517,8 @@ ${memoryBootstrap}`,
         rt._lastQuery = text;
         clearTimeout(ragTimer);
         ragTimer = setTimeout(() => { rt._ragBusy = false; }, RAG_TIMEOUT_MS);
-        runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 5, minSim: 0.6 }) }).finally(()=>{});
+        // ⬇️ skicka topK och lägre tröskel
+        runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 5, minSim: 0.4 }) }).finally(()=>{});
       }
     }
 
@@ -520,14 +532,14 @@ ${memoryBootstrap}`,
       try {
         const data = await fetchJSON('/api/search-manual', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ query: q, k: 5, topK: 5, minSim: 0.6 })
+          body: JSON.stringify({ query: q, k: 5, topK: 5, minSim: 0.4 })
         });
-        append(pill(`RAG: count=${data.count||0} • model=${data.model||'?'} • dims=${data.dims||'?'}`));
+        append(pill(`RAG: count=${data.count||0}${data.fallback?' (fallback)':''} • model=${data.model||'?'} • dims=${data.dims||'?'}`));
         if (!data.count) {
           append(bubble('Inga träffar i manualen.', 'assistant'));
           return;
         }
-        const lines = data.snippets.map((s,i)=> `#${i+1} • ${s.title || 'manual'} • idx:${s.idx} • score:${(s.score??0).toFixed(2)}\n${s.text}`).join('\n---\n');
+        const lines = data.snippets.map((s,i)=> `#${i+1} • ${s.title || 'manual'} • idx:${s.idx ?? '?'} • score:${(s.score??0).toFixed(2)}\n${s.text}`).join('\n---\n');
         append(bubble(lines, 'assistant'));
       } catch (e) {
         append(errorBubble('Manual-sök fel: ' + e.message));
