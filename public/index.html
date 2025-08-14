@@ -217,13 +217,9 @@
             type: 'session.update',
             session: {
               instructions: `Du är Coach Assistant för Linje 65.
-Svara kort (max 2 meningar) och stegvis på svenska.
-INNAN du svarar: kalla ALLTID funktionen search_manual med användarens senaste transkriberade text.
-Om manual-sök ger noll träffar, säg att du saknar täckning och föreslå nästa trygga steg.
-
-[Minne & senaste växlingar]
-${memoryBootstrap}`,
-              // Viktigt för tal-ut: välj en röst
+Svara med fakta ur manualen, inte egna gissningar.
+Vid svaga träffar: säg att underlaget är svagt och be om precisering. Gör inga antaganden.
+`,
               voice: 'verse',
               turn_detection: { type: 'server_vad' },
               tool_choice: { type: 'required' },
@@ -307,7 +303,6 @@ ${memoryBootstrap}`,
     // ========= Realtime event handler =========
     function isTranscriptFinalType(t) {
       if (!t) return false;
-      // Tillåt både .done och .completed för audio & text
       return (
         /^input_audio_buffer\.transcript\.(done|completed)$/.test(t) ||
         /^input_text\.(done|completed)$/.test(t)
@@ -358,7 +353,7 @@ ${memoryBootstrap}`,
         const tc = toolCalls.get(id);
         if (!tc) return;
         if (tc.name === 'search_manual') {
-          if (rt._ragBusy || tc.launched) return; // undvik dubbelkörning
+          if (rt._ragBusy || tc.launched) return;
           tc.launched = true; toolCalls.set(id, tc);
           rt._ragBusy = true;
           rt._lastToolCallId = id;
@@ -381,7 +376,6 @@ ${memoryBootstrap}`,
           append(bubble(text, 'user'));
           logMsg('user', text, 'voice', msg);
 
-          // hoppa RAG för enstavigt (hej, tjena, ok)
           if (text.split(/\s+/).length < 2) return;
 
           if (!rt._ragBusy && text !== rt._lastQuery) {
@@ -389,7 +383,6 @@ ${memoryBootstrap}`,
             rt._lastQuery = text;
             clearTimeout(ragTimer);
             ragTimer = setTimeout(() => { rt._ragBusy = false; }, RAG_TIMEOUT_MS);
-            // ⬇️ sänk tröskel + skicka även topK
             runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 5, minSim: 0.4 }) }).finally(()=>{});
           }
         }
@@ -408,12 +401,11 @@ ${memoryBootstrap}`,
             append(pill('Hämtat från:')); const d = document.createElement('div'); d.className='src'; d.innerHTML = list.replaceAll('\n','<br>'); append(d);
           }
         }
-        rt._ragBusy = false;     // släpp låset
+        rt._ragBusy = false;
         clearTimeout(ragTimer);
         return;
       }
 
-      // 3b) Helt klart / fel → släpp låset ändå
       if (msg.type === 'response.completed' || msg.type === 'response.error') {
         rt._ragBusy = false;
         clearTimeout(ragTimer);
@@ -424,11 +416,40 @@ ${memoryBootstrap}`,
     // ========= Tools =========
     function parseArgsSafe(s) { try { return JSON.parse(s || '{}'); } catch { return {}; } }
 
-    // Deterministiskt RAG-svar + DIAG-chip
+    // Heuristik: välj bäst mening ur top-K som troligen innehåller svaret
+    function pickBestSentence(snippets, query) {
+      const q = (query||'').toLowerCase();
+      const tokens = q.split(/[^a-zåäö0-9]+/i).filter(t => t.length>2);
+      let best = { s: '', score: -1, src: null };
+
+      for (const sn of (snippets||[])) {
+        const text = (sn.text||'').replace(/\s+/g,' ').trim();
+        const sentences = text.split(/(?<=[\.\!\?])\s+/);
+        for (const sent of sentences) {
+          let sc = (sn.score||0);
+          if (/\d/.test(sent)) sc += 0.2; // bonus om det finns siffra
+          const low = sent.toLowerCase();
+          for (const t of tokens) if (low.includes(t)) sc += 0.05;
+          if (sent.length < 25) sc -= 0.1; // straffa för kort
+          if (sc > best.score) best = { s: sent.trim(), score: sc, src: sn };
+        }
+      }
+      return best;
+    }
+
+    // Skapa ett “verbatim”-svar som modellen ska läsa upp exakt
+    function speakVerbatim(text, tailNote='') {
+      const toSay = `LÄS UPP EXAKT (ordagrant) och utan tillägg: """${text}"""${tailNote ? ' ' + tailNote : ''}`;
+      rt.dc?.send(JSON.stringify({
+        type: 'response.create',
+        response: { modalities: ['audio','text'], instructions: toSay }
+      }));
+    }
+
+    // Deterministiskt RAG-svar + DIAG-chip + verbatim-läsning
     async function runToolSearchManual(tc) {
       const args = parseArgsSafe(tc.argsText);
       const k = args.k ?? 5;
-      // ⬇️ skicka både k och topK + lägre tröskel initialt
       const body = { query: args.query, k, topK: k, minSim: args.minSim ?? 0.4 };
       try {
         const data = await fetchJSON('/api/search-manual', {
@@ -437,51 +458,40 @@ ${memoryBootstrap}`,
           body: JSON.stringify(body)
         });
 
-        // Visa diagnostik i UI så vi SER att söket kördes (inkl. fallback-info)
         append(pill(`RAG: count=${data.count||0}${data.fallback?' (fallback)':''} • model=${data.model||'?'} • dims=${data.dims||'?'} • q="${(args.query||'').slice(0,32)}${(args.query||'').length>32?'…':''}"`));
 
         if ((data.count || 0) > 0) {
-          const weak = data.fallback === true;
-          const top = data.snippets[0] || {};
-          const txt = (top.text || '').replace(/\s+/g, ' ').trim();
-          const preview = txt.length > 350 ? txt.slice(0, 350) + '…' : txt;
+          const pick = pickBestSentence(data.snippets, args.query);
+          const top = pick.src || data.snippets[0];
+          const chosen = (pick.s || (top.text||'').replace(/\s+/g,' ').trim()).slice(0, 500);
+          const score = (top.score ?? 0);
+          const weak = data.fallback === true || score < 0.55;
+
+          let lead;
+          if (weak) {
+            lead = `Svag träff enligt manualen (score ${score.toFixed(2)}).`;
+            speakVerbatim(`${lead} ${chosen}`, '(ge gärna fler detaljer så hittar jag exakt sida/avsnitt).');
+          } else {
+            lead = `Enligt manualen:`;
+            speakVerbatim(`${lead} ${chosen}`);
+          }
+
+          // Visa källor i UI
           const sourcesList = (data.snippets || []).map((s,i) =>
             `[#${i+1} | ${(s.title || 'manual')} • idx:${s.idx ?? '?'} • score:${(s.score??0).toFixed(2)}]`
           ).join('\n');
-
-          const lead = weak
-            ? 'Jag hittar inga starka träffar. Bästa match just nu:'
-            : 'Enligt manualen:';
-
-          let answer = `${lead} ${preview}\nHämtat från: ${(top.title || 'manual')} • idx:${top.idx ?? '?'} • score:${(top.score ?? 0).toFixed(2)}`;
-          if (weak) {
-            answer += `\n(obs: svag matchning – säg gärna fler detaljer, t.ex. maskin/område/format, så hittar jag bättre.)`;
-          }
-
-          rt.dc?.send(JSON.stringify({
-            type: 'response.create',
-            response: { modalities: ['audio','text'], instructions: answer + (sourcesList?`\n${sourcesList}`:'') }
-          }));
+          append(bubble(`${lead} ${chosen}\nHämtat från: ${(top.title || 'manual')} • idx:${top.idx ?? '?'} • score:${score.toFixed(2)}${sourcesList?`\n${sourcesList}`:''}`, 'assistant'));
+          logMsg('assistant', `${lead} ${chosen}`, 'voice', { rag:true, score, fallback:data.fallback===true });
         } else {
-          rt.dc?.send(JSON.stringify({
-            type: 'response.create',
-            response: {
-              modalities: ['audio','text'],
-              instructions: 'Jag hittar inget i manualen om det där just nu. Säg gärna samma sak med fler detaljer (maskin/område/format), så letar jag igen.'
-            }
-          }));
+          const msg = 'Jag hittar inget i manualen om det där just nu. Säg gärna samma sak med fler detaljer (maskin/område/format), så letar jag igen.';
+          speakVerbatim(msg);
+          append(bubble(msg, 'assistant'));
         }
       } catch (err) {
         console.error('search-manual error', err);
         append(errorBubble('Manual-sök fel: ' + (err?.message || err)));
-        rt.dc?.send(JSON.stringify({
-          type: 'response.create',
-          response: {
-            modalities:['audio','text'],
-            instructions: 'Kunde inte nå manual-sök just nu. Försök igen strax.'
-          }
-        }));
-        rt._ragBusy = false; // Släpp låset så man kan försöka igen
+        speakVerbatim('Kunde inte nå manual-sök just nu. Försök igen strax.');
+        rt._ragBusy = false;
         clearTimeout(ragTimer);
       }
     }
@@ -494,9 +504,9 @@ ${memoryBootstrap}`,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userId: localStorage.getItem('operator_id') || 'kevin', key: args.key, value: args.value })
         });
-        rt.dc?.send(JSON.stringify({ type:'response.create', response:{ modalities:['audio','text'], instructions:`Noterat. Jag sparade minnet: ${args.key} = ${args.value}.` } }));
+        speakVerbatim(`Noterat. Jag sparade minnet: ${args.key} är ${args.value}.`);
       } catch (e) {
-        rt.dc?.send(JSON.stringify({ type:'response.create', response:{ modalities:['audio','text'], instructions:`Jag kunde inte spara minnet just nu.` } }));
+        speakVerbatim('Jag kunde inte spara minnet just nu.');
       }
     }
 
@@ -511,13 +521,12 @@ ${memoryBootstrap}`,
     function sendTextToRealtime(text) {
       if (!rt?.dc || rt.dc.readyState !== 'open') { append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({ type: 'input_text', text }));  // skickas för VAD/turn mgmt
-      if (text.split(/\s+/).length < 2) return; // hoppa RAG för enstavigt
+      if (text.split(/\s+/).length < 2) return;
       if (!rt._ragBusy && text !== rt._lastQuery) {
         rt._ragBusy = true;
         rt._lastQuery = text;
         clearTimeout(ragTimer);
         ragTimer = setTimeout(() => { rt._ragBusy = false; }, RAG_TIMEOUT_MS);
-        // ⬇️ skicka topK och lägre tröskel
         runToolSearchManual({ argsText: JSON.stringify({ query: text, k: 5, minSim: 0.4 }) }).finally(()=>{});
       }
     }
@@ -539,8 +548,11 @@ ${memoryBootstrap}`,
           append(bubble('Inga träffar i manualen.', 'assistant'));
           return;
         }
+        const pick = pickBestSentence(data.snippets, q);
+        const top = pick.src || data.snippets[0];
+        const chosen = (pick.s || (top.text||'').replace(/\s+/g,' ').trim()).slice(0,500);
         const lines = data.snippets.map((s,i)=> `#${i+1} • ${s.title || 'manual'} • idx:${s.idx ?? '?'} • score:${(s.score??0).toFixed(2)}\n${s.text}`).join('\n---\n');
-        append(bubble(lines, 'assistant'));
+        append(bubble(`➤ Utdrag: ${chosen}\n\n${lines}`, 'assistant'));
       } catch (e) {
         append(errorBubble('Manual-sök fel: ' + e.message));
       }
