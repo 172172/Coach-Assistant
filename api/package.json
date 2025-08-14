@@ -1,12 +1,9 @@
 {
-  "name": "coach-assistant",
-  "version": "1.0.0",
-  "type": "module",
-  "engines": { "node": "20.x" },
-  "dependencies": {
-    "pg": "^8.11.5",
-    "node-fetch": "^3.3.2",
-    "form-data": "^4.0.0",
-    "formidable": "^3.5.1"
+  "functions": {
+    "api/*.js": {
+      "runtime": "nodejs20.x",
+      "memory": 1024,
+      "maxDuration": 15
+    }
   }
 }
