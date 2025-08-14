@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="sv">
 <head>
@@ -129,7 +130,7 @@
       conversation_id:null, _msgCount:0,
       _ragBusy:false, _lastQuery:"", _lastToolCallId:null
     };
-    const toolCalls = new Map(); // tool_call_id -> { name, argsText, launched? }
+    const toolCalls = new Map(); // tool_call_id -> { name, argsText }
 
     // Failsafe-timer för att aldrig låsa fast
     const RAG_TIMEOUT_MS = 8000;
@@ -223,10 +224,8 @@ Om manual-sök ger noll träffar, säg att du saknar täckning och föreslå nä
 
 [Minne & senaste växlingar]
 ${memoryBootstrap}`,
-              // Viktigt för tal-ut: välj en röst
-              voice: 'verse',
               turn_detection: { type: 'server_vad' },
-              tool_choice: { type: 'required' },
+              tool_choice: { type: 'auto' },
               tools: [
                 {
                   type: 'function',
@@ -265,7 +264,6 @@ ${memoryBootstrap}`,
 
         // 5) Token + offer/answer
         const { token, model } = await fetchJSON('/api/rt-token');
-        append(pill('Realtime modell: ' + model));
         const offer = await rt.pc.createOffer();
         await rt.pc.setLocalDescription(offer);
         const sdpAnswer = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
@@ -324,53 +322,20 @@ ${memoryBootstrap}`,
         return;
       }
 
-      // 0a) DEBUG: visa när modellen triggar verktyg
-      if (msg.type === 'response.function_call_arguments.done') {
-        const id = msg.id || msg.tool_call_id || 'unknown';
-        const tc = toolCalls.get(id);
-        if (!tc) return;
-
-        try {
-          const args = JSON.parse(tc.argsText || '{}');
-          if (tc.name) append(pill(`TOOL CALL → ${tc.name} q="${String(args.query||'').slice(0,32)}${(args.query||'').length>32?'…':''}"`));
-        } catch {}
-
-        if (tc.name === 'search_manual') {
-          if (rt._ragBusy || tc.launched) return;
-          tc.launched = true; toolCalls.set(id, tc);
-          rt._ragBusy = true;
-          rt._lastToolCallId = id;
-          clearTimeout(ragTimer);
-          ragTimer = setTimeout(() => { rt._ragBusy = false; }, RAG_TIMEOUT_MS);
-          return runToolSearchManual(tc).finally(()=>{});
-        }
-        if (tc.name === 'save_memory') {
-          if (tc.launched) return;
-          tc.launched = true; toolCalls.set(id, tc);
-          return runToolSaveMemory(tc);
-        }
-        return;
-      }
-
-      // 1) Tool call completed → execute tool (fallback, om inte redan körts)
+      // 1) Tool call completed → execute tool (bara om vi inte redan kör en RAG)
       if (msg.type === 'response.function_call.completed') {
         const id = msg.id || msg.tool_call_id || 'unknown';
         const tc = toolCalls.get(id);
         if (!tc) return;
         if (tc.name === 'search_manual') {
-          if (rt._ragBusy || tc.launched) return; // undvik dubbelkörning
-          tc.launched = true; toolCalls.set(id, tc);
+          if (rt._ragBusy) return;           // undvik dubbelkörning
           rt._ragBusy = true;
           rt._lastToolCallId = id;
           clearTimeout(ragTimer);
           ragTimer = setTimeout(() => { rt._ragBusy = false; }, RAG_TIMEOUT_MS);
           return runToolSearchManual(tc).finally(()=>{});
         }
-        if (tc.name === 'save_memory') {
-          if (tc.launched) return;
-          tc.launched = true; toolCalls.set(id, tc);
-          return runToolSaveMemory(tc);
-        }
+        if (tc.name === 'save_memory') return runToolSaveMemory(tc);
         return;
       }
 
@@ -426,8 +391,7 @@ ${memoryBootstrap}`,
     // Deterministiskt RAG-svar + DIAG-chip
     async function runToolSearchManual(tc) {
       const args = parseArgsSafe(tc.argsText);
-      const k = args.k ?? 5;
-      const body = { query: args.query, k, topK: k, minSim: args.minSim ?? 0.6 };
+      const body = { query: args.query, topK: args.k ?? 5, minSim: args.minSim ?? 0.6 };
       try {
         const data = await fetchJSON('/api/search-manual', {
           method: 'POST',
@@ -456,13 +420,13 @@ ${memoryBootstrap}`,
             type: 'response.create',
             response: {
               modalities: ['audio','text'],
-              instructions: 'Jag hittar inget i manualen om det där just nu. Säg gärna samma sak med fler detaljer (maskin/område/format), så letar jag igen.'
+              instructions: 'Jag hittar inget i manualen om det där just nu. Ge mig gärna en annan formulering eller fler ord så letar jag igen.'
             }
           }));
         }
       } catch (err) {
         console.error('search-manual error', err);
-        append(errorBubble('Manual-sök fel: ' + (err?.message || err)));
+        append(errorBubble('Manual-sök FEL: ' + (err?.message || err)));
         rt.dc?.send(JSON.stringify({
           type: 'response.create',
           response: {
@@ -520,7 +484,7 @@ ${memoryBootstrap}`,
       try {
         const data = await fetchJSON('/api/search-manual', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ query: q, k: 5, topK: 5, minSim: 0.6 })
+          body: JSON.stringify({ query: q })
         });
         append(pill(`RAG: count=${data.count||0} • model=${data.model||'?'} • dims=${data.dims||'?'}`));
         if (!data.count) {
