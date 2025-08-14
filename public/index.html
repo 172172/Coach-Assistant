@@ -129,7 +129,7 @@
       conversation_id:null, _msgCount:0,
       _ragBusy:false, _lastQuery:"", _lastToolCallId:null
     };
-    const toolCalls = new Map(); // tool_call_id -> { name, argsText }
+    const toolCalls = new Map(); // tool_call_id -> { name, argsText, launched? }
 
     // Failsafe-timer för att aldrig låsa fast
     const RAG_TIMEOUT_MS = 8000;
@@ -224,7 +224,7 @@ Om manual-sök ger noll träffar, säg att du saknar täckning och föreslå nä
 [Minne & senaste växlingar]
 ${memoryBootstrap}`,
               turn_detection: { type: 'server_vad' },
-              tool_choice: { type: 'auto' },
+              tool_choice: { type: 'required' },
               tools: [
                 {
                   type: 'function',
@@ -321,20 +321,57 @@ ${memoryBootstrap}`,
         return;
       }
 
-      // 1) Tool call completed → execute tool (bara om vi inte redan kör en RAG)
-      if (msg.type === 'response.function_call.completed') {
+      // 0a) TIDIG AVBRYTNING av generiskt prat medan RAG pågår
+      if (msg.type === 'response.output_text.delta' && rt._ragBusy) {
+        if (msg.response_id) {
+          try {
+            rt.dc?.send(JSON.stringify({ type: 'response.cancel', response_id: msg.response_id }));
+          } catch {}
+        }
+        return; // visa/prata inte generisk text
+      }
+
+      // 0b) När verktygsargumenten är klara: kör direkt (snabbare än 'completed')
+      if (msg.type === 'response.function_call_arguments.done') {
         const id = msg.id || msg.tool_call_id || 'unknown';
         const tc = toolCalls.get(id);
         if (!tc) return;
         if (tc.name === 'search_manual') {
-          if (rt._ragBusy) return;           // undvik dubbelkörning
+          if (rt._ragBusy || tc.launched) return;
+          tc.launched = true; toolCalls.set(id, tc);
           rt._ragBusy = true;
           rt._lastToolCallId = id;
           clearTimeout(ragTimer);
           ragTimer = setTimeout(() => { rt._ragBusy = false; }, RAG_TIMEOUT_MS);
           return runToolSearchManual(tc).finally(()=>{});
         }
-        if (tc.name === 'save_memory') return runToolSaveMemory(tc);
+        if (tc.name === 'save_memory') {
+          if (tc.launched) return;
+          tc.launched = true; toolCalls.set(id, tc);
+          return runToolSaveMemory(tc);
+        }
+        return;
+      }
+
+      // 1) Tool call completed → execute tool (fallback, om inte redan körts)
+      if (msg.type === 'response.function_call.completed') {
+        const id = msg.id || msg.tool_call_id || 'unknown';
+        const tc = toolCalls.get(id);
+        if (!tc) return;
+        if (tc.name === 'search_manual') {
+          if (rt._ragBusy || tc.launched) return; // undvik dubbelkörning
+          tc.launched = true; toolCalls.set(id, tc);
+          rt._ragBusy = true;
+          rt._lastToolCallId = id;
+          clearTimeout(ragTimer);
+          ragTimer = setTimeout(() => { rt._ragBusy = false; }, RAG_TIMEOUT_MS);
+          return runToolSearchManual(tc).finally(()=>{});
+        }
+        if (tc.name === 'save_memory') {
+          if (tc.launched) return;
+          tc.launched = true; toolCalls.set(id, tc);
+          return runToolSaveMemory(tc);
+        }
         return;
       }
 
