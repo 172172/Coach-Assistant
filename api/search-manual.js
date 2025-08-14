@@ -1,75 +1,143 @@
-// /api/search-manual.js
-import { q } from "./db.js";
-import fetch from "node-fetch";
+// ESM-version för Vercel Node-funktioner (project har "type":"module")
+import { Pool } from 'pg';
 
-export const config = { api: { bodyParser: true } }; // Node-runtime
+// Pool återanvänds mellan anrop
+const pool =
+  globalThis.pgPool ??
+  new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.PGSSL === 'false' ? false : { rejectUnauthorized: false },
+    host: process.env.PGHOST,
+    port: process.env.PGPORT,
+    user: process.env.PGUSER,
+    password: process.env.PGPASSWORD,
+    database: process.env.PGDATABASE
+  });
+if (!globalThis.pgPool) globalThis.pgPool = pool;
 
-const MODEL_BY_DIMS = {
-  1536: "text-embedding-3-small",
-  3072: "text-embedding-3-large",
-};
-
-function toPgVectorString(arr) {
-  return "[" + arr.map(v => (typeof v === "number" ? v : Number(v) || 0)).join(",") + "]";
+// Body-parser som tål både string och objekt
+function readJsonBody(req) {
+  try {
+    if (!req.body) return {};
+    if (typeof req.body === 'string') return JSON.parse(req.body);
+    return req.body;
+  } catch {
+    return {};
+  }
 }
 
-async function detectVectorDims() {
-  // Försök läsa dimensionen från en rad i manual_chunks
-  const r = await q(`select vector_dims(embedding) as dims from manual_chunks limit 1`);
-  const dims = r.rows?.[0]?.dims;
-  if (dims === 1536 || dims === 3072) return dims;
-  // Fallback om tabellen är tom – defaulta till 3072
-  return 3072;
+// Använder Node 18+/20+ inbyggda fetch (du behöver inte node-fetch)
+async function embedQuery(query) {
+  if (!process.env.OPENAI_API_KEY) {
+    const err = new Error('OPENAI_API_KEY saknas (env)');
+    err.code = 'NO_OPENAI_KEY';
+    throw err;
+  }
+  const model = process.env.EMBED_MODEL || 'text-embedding-3-small'; // 1536 dims
+  const r = await fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ model, input: query })
+  });
+  if (!r.ok) {
+    const t = await r.text();
+    const err = new Error(`OpenAI embeddings misslyckades: ${r.status} ${r.statusText} – ${t.slice(0,200)}`);
+    err.code = 'EMBED_FAIL';
+    throw err;
+  }
+  const j = await r.json();
+  const emb = j.data?.[0]?.embedding;
+  if (!emb) {
+    const err = new Error('Embedding saknas i OpenAI-svar');
+    err.code = 'NO_EMBED';
+    throw err;
+  }
+  return { embedding: emb, model, dims: emb.length };
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ ok:false, error:"POST only" });
+  res.setHeader('Content-Type', 'application/json');
+  if (req.method !== 'POST') {
+    res.status(405).end(JSON.stringify({ ok: false, error: 'Method not allowed' }));
+    return;
+  }
 
   try {
-    const { query, topK = 8 } = req.body || {};
-    if (!query?.trim()) return res.status(400).json({ ok:false, error:"Missing query" });
-
-    // 1) Välj rätt modell utifrån DB:ns vektordimension
-    const dims = await detectVectorDims();
-    const model = MODEL_BY_DIMS[dims] || "text-embedding-3-large";
-
-    // 2) Hämta embedding för frågan
-    const embRes = await fetch("https://api.openai.com/v1/embeddings", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ model, input: query })
-    });
-    if (!embRes.ok) {
-      return res.status(500).json({ ok:false, error:`Embeddings API failed: ${await embRes.text()}` });
+    const body = readJsonBody(req);
+    const query = String((body.query || '')).trim();
+    if (!query) {
+      res.status(400).end(JSON.stringify({ ok: false, error: 'Missing query' }));
+      return;
     }
-    const vec = (await embRes.json())?.data?.[0]?.embedding;
-    if (!Array.isArray(vec)) return res.status(500).json({ ok:false, error:"No embedding returned" });
+    const K = Number(body.k ?? body.topK ?? 5);
+    const minScore = Number(body.minSim ?? 0); // 0..1
 
-    // 3) Vektor-sök i aktiva dokument
+    // 1) Embedding
+    const { embedding, model, dims } = await embedQuery(query);
+    const vecLiteral = `[${embedding.join(',')}]`;
+
+    // 2) Tabell/kolumner (styr via env om du vill byta namn)
+    const schema     = process.env.MANUAL_SCHEMA     || 'public';
+    const table      = process.env.MANUAL_TABLE      || 'manual_chunks';
+    const embCol     = process.env.MANUAL_EMB_COL    || 'embedding';
+    const textCol    = process.env.MANUAL_TEXT_COL   || 'chunk';
+    const titleCol   = process.env.MANUAL_TITLE_COL  || 'title';
+    const headingCol = process.env.MANUAL_HEADING_COL|| 'heading';
+    const idxCol     = process.env.MANUAL_IDX_COL    || 'idx';
+    const docIdCol   = process.env.MANUAL_DOCID_COL  || 'doc_id';
+
+    // 3) Vektorsökning (cosine). Filtrera på minSim och sortera på avstånd.
     const sql = `
-      with params as (select $1::vector as qvec)
-      select c.doc_id, d.title, c.idx, c.heading, c.chunk,
-             1 - (c.embedding <=> p.qvec) as score
-      from manual_chunks c
-      join manual_docs d on d.id = c.doc_id
-      cross join params p
-      where d.is_active = true
-      order by c.embedding <=> p.qvec
-      limit ${Number(topK) || 8}
+      WITH q AS (SELECT $1::vector AS emb)
+      SELECT ${docIdCol} AS doc_id,
+             ${titleCol}  AS title,
+             ${idxCol}    AS idx,
+             ${headingCol} AS heading,
+             ${textCol}   AS chunk,
+             1 - (${embCol} <=> (SELECT emb FROM q)) AS score
+      FROM ${schema}.${table}
+      WHERE 1 - (${embCol} <=> (SELECT emb FROM q)) >= $3
+      ORDER BY ${embCol} <-> (SELECT emb FROM q)
+      LIMIT $2
     `;
-    const r = await q(sql, [toPgVectorString(vec)]);
 
-    const snippets = r.rows.map(x => ({
-      doc_id: x.doc_id, title: x.title, idx: x.idx, heading: x.heading,
-      score: Number((x.score ?? 0).toFixed(4)), text: x.chunk
+    let rows;
+    try {
+      const r = await pool.query(sql, [vecLiteral, K, minScore]);
+      rows = r.rows || [];
+    } catch (dbErr) {
+      const msg = String(dbErr?.message || dbErr);
+      if (msg.includes('relation') && msg.includes('does not exist')) {
+        throw new Error('Tabellen saknas. Skapa public.manual_chunks (se SQL).');
+      }
+      if (msg.includes('<->') || msg.includes('<=>')) {
+        throw new Error('pgvector saknas. Kör: CREATE EXTENSION IF NOT EXISTS vector;');
+      }
+      if (msg.includes('dimension mismatch')) {
+        throw new Error('Dimensionsfel: kolumnen måste vara vector(1536) för text-embedding-3-small.');
+      }
+      throw dbErr;
+    }
+
+    res.status(200).end(JSON.stringify({
+      ok: true,
+      count: rows.length,
+      model,
+      dims,
+      snippets: rows.map(r => ({
+        doc_id: r.doc_id,
+        title: r.title,
+        idx: r.idx,
+        heading: r.heading,
+        score: Number((r.score ?? 0).toFixed(4)),
+        text: r.chunk
+      }))
     }));
-    const context = snippets.map(s => s.text).join("\n---\n");
-
-    return res.status(200).json({ ok:true, dims, model, count:snippets.length, snippets, context });
-  } catch (e) {
-    return res.status(500).json({ ok:false, error:e.message });
+  } catch (err) {
+    console.error('search-manual 500', err);
+    res.status(500).end(JSON.stringify({ ok: false, error: err?.message || String(err) }));
   }
 }
