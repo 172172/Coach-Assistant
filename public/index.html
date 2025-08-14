@@ -129,7 +129,7 @@
       conversation_id:null, _msgCount:0,
       _ragBusy:false, _lastQuery:"", _lastToolCallId:null
     };
-    const toolCalls = new Map(); // tool_call_id -> { name, argsText, launched? }
+    const toolCalls = new Map(); // tool_call_id -> { name, argsText, launched?, response_id? }
 
     // Failsafe-timer
     const RAG_TIMEOUT_MS = 8000;
@@ -155,7 +155,7 @@
       } catch(e) {}
     }
 
-    // ========= Logging to Supabase via server =========
+    // ========= Logging to Supabase via server (tyst vid fel) =========
     async function logMsg(role, content, modality='voice', payload=null) {
       if (!rt.conversation_id) return;
       try {
@@ -164,20 +164,19 @@
           body: JSON.stringify({ conversation_id: rt.conversation_id, role, content, modality, payload })
         });
         const txt = await res.text();
-        let json = {};
-        try { json = JSON.parse(txt); } catch {}
+        let json = {}; try { json = JSON.parse(txt); } catch {}
         if (!res.ok || json?.ok === false) {
-          append(errorBubble('LOGGNING FEL: ' + (json?.error || res.status + ' ' + res.statusText)));
+          console.warn('LOGGNING FEL:', json?.error || res.status + ' ' + res.statusText);
         }
         rt._msgCount = (rt._msgCount || 0) + 1;
         if (rt._msgCount % 8 === 0) {
           fetch('/api/memory-summarize', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ conversation_id: rt.conversation_id })
-          }).then(()=> $('#memStatus').textContent = 'Minne: uppdaterat');
+          }).then(()=> $('#memStatus').textContent = 'Minne: uppdaterat').catch(()=>{});
         }
       } catch (e) {
-        append(errorBubble('LOGGNING FEL: ' + (e?.message || e)));
+        console.warn('LOGGNING FEL:', e?.message || e);
       }
     }
 
@@ -198,7 +197,6 @@
           body: JSON.stringify({ userId: localStorage.getItem('operator_id') || 'kevin' })
         });
         const conversation_id = memInit.conversation_id;
-        const memoryBootstrap = memInit.memoryBootstrap || '';
         rt.conversation_id = conversation_id;
         $('#memStatus').textContent = 'Minne: laddat';
 
@@ -216,7 +214,7 @@
           const sessUpdate = {
             type: 'session.update',
             session: {
-              // Strikt policy så modellen inte fabulerar
+              // Strikt policy: ingen fri text, endast citat vi skickar
               instructions: `Du är Coach Assistant för Linje 65. Svara endast med ordagrant citat som tillhandahålls via systemet. Gör inga egna antaganden. Om inget citat tillhandahålls ska du säga att du inte kan verifiera i manualen.`,
               voice: 'verse',
               turn_detection: { type: 'server_vad' },
@@ -313,21 +311,45 @@
         const id = msg.id || msg.tool_call_id || msg.response_id || 'unknown';
         const prev = toolCalls.get(id) || { name: msg.name, argsText: '' };
         prev.argsText += (msg.delta || msg.arguments_delta || '');
-        prev.name = prev.name || msg.name; toolCalls.set(id, prev);
+        prev.name = prev.name || msg.name;
+        toolCalls.set(id, prev);
         return;
       }
 
-      // 0a) DEBUG: visa när modellen triggar verktyg
+      // 0a) När modellen verkligen "skapar" en respons -> stoppa allt som inte är vårt
+      if (msg.type === 'response.created') {
+        const rid = msg.response?.id || msg.response_id;
+        const meta = msg.response?.metadata;
+        if (!meta || meta.source !== 'rag') {
+          if (rid) {
+            rt.dc?.send(JSON.stringify({ type: 'response.cancel', response_id: rid }));
+            append(pill('🛑 Auto-respons stoppad'));
+          }
+        }
+        return;
+      }
+
+      // 0b) DEBUG + AVBRYT autosvar så fort ett tool call blir klart med argumenten
       if (msg.type === 'response.function_call_arguments.done') {
         const id = msg.id || msg.tool_call_id || 'unknown';
-        const tc = toolCalls.get(id);
-        if (!tc) return;
+        const tc = toolCalls.get(id) || { name: msg.name, argsText: '' };
 
+        // spara response_id (för att kunna avbryta)
+        if (msg.response_id) tc.response_id = msg.response_id;
+        toolCalls.set(id, tc);
+
+        // debug-pill
         try {
           const args = JSON.parse(tc.argsText || '{}');
           if (tc.name) append(pill(`TOOL CALL → ${tc.name} q="${String(args.query||'').slice(0,32)}${(args.query||'').length>32?'…':''}"`));
         } catch {}
 
+        // Avbryt modellens pågående autosvar (om något)
+        if (tc.response_id) {
+          rt.dc?.send(JSON.stringify({ type: 'response.cancel', response_id: tc.response_id }));
+          append(pill('⚡ Avbröt modellens autosvar'));
+        }
+
         if (tc.name === 'search_manual') {
           if (rt._ragBusy || tc.launched) return;
           tc.launched = true; toolCalls.set(id, tc);
@@ -345,11 +367,12 @@
         return;
       }
 
-      // 1) Tool call completed → execute tool (fallback om ej redan körts)
+      // 1) Tool call completed (fallback om inte redan körts)
       if (msg.type === 'response.function_call.completed') {
         const id = msg.id || msg.tool_call_id || 'unknown';
         const tc = toolCalls.get(id);
         if (!tc) return;
+
         if (tc.name === 'search_manual') {
           if (rt._ragBusy || tc.launched) return;
           tc.launched = true; toolCalls.set(id, tc);
@@ -367,7 +390,7 @@
         return;
       }
 
-      // 2) User transcript (final) — FALLBACK: kör manual-sök EN gång per tur
+      // 2) User transcript (final) — kör vår egen RAG om modellen inte hann trigga tool
       if (isTranscriptFinalType(msg.type)) {
         const text = (msg.transcript || msg.text || '').trim();
         if (text) {
@@ -441,7 +464,8 @@
       return best; // {sent,num,sn,sc} eller null
     }
 
-    // Plocka bästa mening (icke-numerik) – prefererar meningar med siffra + query-ord
+    // Plocka bästa mening (icke-numerik) – domänboost för tapp/givare/sensor/OCME/felsökning
+    const DOMAIN_BOOST = ['tapp','givare','sensor','ocme','felsök','format','karusell','ventil'];
     function pickBestSentence(snippets, query) {
       const q = (query||'').toLowerCase();
       const tokens = q.split(/[^a-zåäö0-9]+/i).filter(t => t.length>2);
@@ -451,9 +475,10 @@
         const sentences = text.split(/(?<=[\.\!\?:;])\s+/);
         for (const sent of sentences) {
           let sc = (sn.score||0);
-          if (/\d/.test(sent)) sc += 0.2;
           const low = sent.toLowerCase();
-          for (const t of tokens) if (low.includes(t)) sc += 0.05;
+          if (/\d/.test(sent)) sc += 0.15;
+          for (const t of tokens) if (low.includes(t)) sc += 0.04;
+          for (const d of DOMAIN_BOOST) if (low.includes(d)) sc += 0.05;
           if (sent.length < 25) sc -= 0.1;
           if (sc > best.score) best = { s: sent.trim(), score: sc, src: sn };
         }
@@ -461,12 +486,12 @@
       return best;
     }
 
-    // Säg åt modellen att läsa upp exakt text utan parafraser
+    // Säg åt modellen att läsa upp exakt text utan parafraser (märkt som vårt RAG-svar)
     function speakVerbatim(text) {
       const toSay = `LÄS UPP EXAKT (ordagrant) och utan tillägg: """${text}"""`;
       rt.dc?.send(JSON.stringify({
         type: 'response.create',
-        response: { modalities: ['audio','text'], instructions: toSay }
+        response: { modalities: ['audio','text'], instructions: toSay, metadata: { source: 'rag' } }
       }));
     }
 
@@ -496,8 +521,8 @@
 
         // --- NUMERIK: kräver verifierbar siffra + domänord ---
         if (isNum) {
-          const must = ['tapp'];               // måste finnas i meningen
-          const any  = ['givare','sensor'];    // gärna någon av dessa
+          const must = ['tapp'];
+          const any  = ['givare','sensor'];
           const hit = extractNumericAnswer(data.snippets, any, must);
 
           if (hit && hit.sent) {
@@ -507,7 +532,6 @@
             append(bubble(`${answer}\nHämtat från: ${(src.title||'manual')} • idx:${src.idx ?? '?'} • score:${(src.score??0).toFixed(2)}`,'assistant'));
             logMsg('assistant', answer, 'voice', { rag:true, numeric:true, num: hit.num, score: src.score, fallback: data.fallback===true });
           } else {
-            // Ingen säker mening → inget påhitt
             const msg = 'Jag kan inte verifiera exakt antal i manualen för den här frågan. Specificera gärna del/område eller felkod så hittar jag exakt.';
             speakVerbatim(msg);
             append(bubble(`${msg}\n(Tips: orden “tapp” och “givare” finns i manualen.)`,'assistant'));
@@ -515,7 +539,7 @@
           return;
         }
 
-        // --- ICKE-NUMERIK: läs upp bästa mening/utdrag ordagrant (ingen spekulation) ---
+        // --- ICKE-NUMERIK: läs upp bästa mening ordagrant (domän-boost, ingen spekulation) ---
         const pick = pickBestSentence(data.snippets, q);
         const top = pick.src || data.snippets[0];
         const chosen = (pick.s || (top.text||'').replace(/\s+/g,' ').trim()).slice(0, 500);
