@@ -32,7 +32,7 @@
     .muted { color: var(--muted); font-size: 13px; }
     .row { display:flex; gap:10px; align-items:center; }
     input[type="text"], input[type="search"] { background:#0d1622; color:var(--text); border:1px solid #243244; border-radius:10px; padding:10px 12px; }
-    .pill { background: var(--pill); color: var(--text); padding: 8px 12px; border-radius: 999px; display:inline-block; margin: 6px 6px 0 0; font-size: 12px; border:1px solid #26364a; }
+    .pill { background: var(--pill); color: var(--text); padding: 8px 12px; border-radius: 9999px; display:inline-block; margin: 6px 6px 0 0; font-size: 12px; border:1px solid #26364a; }
     .panel { background: var(--panel); border: 1px solid #233146; border-radius: 16px; padding: 14px; }
     #output { display:flex; flex-direction: column; gap: 10px; margin-top: 14px; }
     .bubble { background:#0f1722; border:1px solid #213145; border-radius:16px; padding:12px 14px; white-space: pre-wrap; line-height: 1.45; }
@@ -108,7 +108,7 @@
     function errorBubble(text) { const d = document.createElement('div'); d.className = 'bubble error'; d.textContent = text; return d; }
     function append(el) { $('#output').appendChild(el); el.scrollIntoView({behavior:'smooth', block:'end'}); }
 
-    // ========= Operator ID persistence =========
+    // ========= Operator ID =========
     const operatorInput = $('#operatorId');
     operatorInput.value = localStorage.getItem('operator_id') || 'kevin';
     $('#saveIdBtn').onclick = () => {
@@ -124,14 +124,15 @@
       cancelAutos:false,                // stoppa modellens spontana svar när vi kör RAG
       skipCancelForNextCreate:false,    // släpp igenom vårt nästa response.created
       allowedResponseIds:new Set(),     // responses vi tillåter (hör till aktiv tool-respons)
-      _lastUserText:""                  // NYTT: senaste transkriberade/skrivna texten
+      _lastUserText:"",                 // senaste finala transkriptet
+      _liveUserBuf:""                   // pågående (icke-final) transkript
     };
     const toolCalls = new Map(); // tool_call_id -> { name, argsText, launched?, response_id? }
 
     const RAG_TIMEOUT_MS = 8000;
     let ragTimer = null;
 
-    // mic visualizer (simple)
+    // mic visualizer
     let micAnalyser, micData;
     function setupMicViz(stream) {
       try {
@@ -202,12 +203,12 @@
             session: {
               voice: 'verse',
               turn_detection: { type: 'server_vad' },
-              tool_choice: { type: 'auto' }, // modellen får kalla verktyg
+              tool_choice: { type: 'auto' },
               instructions: `
 Du är Coach Assistant för Linje 65.
 Vid frågor om drift/felsökning/manual ska du ALLTID använda verktyget "search_manual" innan du svarar.
-När du kallar "search_manual": skicka alltid { query: exakt senaste användarens transkript }, inte tom sträng och inte parafras.
-När "search_manual" returnerar ett fält "strict_answer": LÄS UPP DET ORDAGRANT (max 2 meningar), utan egna tillägg.
+När du kallar "search_manual": skicka alltid { query: EXAKT senaste användarens transkript }, inte tom sträng och inte parafras.
+När "search_manual" returnerar "strict_answer": LÄS UPP DET ORDAGRANT (max 2 meningar), utan egna tillägg.
 Om "strict_answer" saknas: Säg att du inte kan verifiera i manualen och be om precisering (delområde, felkod, maskin).
 Hälsning/småprat kan besvaras utan verktyg.
 `.trim(),
@@ -291,7 +292,7 @@ OUTPUT (JSON string): {
         conversation_id:rt.conversation_id, _msgCount:rt._msgCount,
         _ragBusy:false, _lastQuery:"", _lastToolCallId:null,
         cancelAutos:false, skipCancelForNextCreate:false, allowedResponseIds:new Set(),
-        _lastUserText:""
+        _lastUserText:"", _liveUserBuf:""
       };
       $('#rtBtn').style.display = 'inline-block';
       $('#rtHangup').style.display = 'none';
@@ -308,7 +309,20 @@ OUTPUT (JSON string): {
     }
 
     function handleRealtimeMessage(msg) {
-      // 0) function-call args deltas
+      // --- Live transcript buffer (för tool-call före final) ---
+      try {
+        const t = msg?.type || "";
+        if (/(input_audio_buffer|input_text)\.transcript\.(started|start)$/.test(t)) {
+          rt._liveUserBuf = "";
+        }
+        if (/(input_audio_buffer|input_text)\.transcript\.delta$/.test(t)) {
+          const chunk = msg.delta || msg.text || "";
+          if (chunk) rt._liveUserBuf = (rt._liveUserBuf || "") + chunk;
+        }
+      } catch {}
+      // ----------------------------------------------------------
+
+      // function-call args deltas
       if (msg.type === 'response.function_call_arguments.delta') {
         const id = msg.id || msg.tool_call_id || msg.response_id || 'unknown';
         const prev = toolCalls.get(id) || { name: msg.name, argsText: '' };
@@ -319,7 +333,7 @@ OUTPUT (JSON string): {
         return;
       }
 
-      // 0a) response.created → stoppa endast när vi ska ersätta med RAG
+      // response.created → stoppa endast när vi ska ersätta med RAG
       if (msg.type === 'response.created') {
         const rid = msg.response?.id || msg.response_id;
         if (rid && rt.allowedResponseIds.has(rid)) {
@@ -339,7 +353,7 @@ OUTPUT (JSON string): {
         return;
       }
 
-      // 0b) function-call ready → kör verktyget och lämna OUTPUT tillbaka till modellen
+      // tool-call klar → kör verktyget och lämna OUTPUT till modellen
       if (msg.type === 'response.function_call_arguments.done') {
         const id = msg.id || msg.tool_call_id || 'unknown';
         const tc = toolCalls.get(id) || { name: msg.name, argsText: '' };
@@ -373,13 +387,14 @@ OUTPUT (JSON string): {
         return;
       }
 
-      // 1) (Fallback) transcript final → om modellen inte kallat tool själv, kör vi RAG en gång
+      // Fallback: transcript final → om modellen inte kallat tool, kör RAG en gång
       if (isTranscriptFinalType(msg.type)) {
         const text = (msg.transcript || msg.text || '').trim();
         if (text) {
           append(bubble(text, 'user'));
           logMsg('user', text, 'voice', msg);
-          rt._lastUserText = text; // NYTT: spara senaste uttalandet
+          rt._lastUserText = text;      // spara final
+          rt._liveUserBuf = "";         // nollställ live-buffert
           if (text.split(/\s+/).length < 2) return;
 
           if (!rt._ragBusy && text !== rt._lastQuery) {
@@ -393,7 +408,7 @@ OUTPUT (JSON string): {
         return;
       }
 
-      // 2) Final text → visa + släpp lås
+      // Final text → visa + släpp lås
       if (msg.type === 'response.output_text.done') {
         const text = msg.output_text || msg.text || '';
         if (text?.trim()) {
@@ -408,7 +423,7 @@ OUTPUT (JSON string): {
         return;
       }
 
-      // 3) Avslut/fel → städa state
+      // Avslut/fel → städa state
       if (msg.type === 'response.completed' || msg.type === 'response.error') {
         rt._ragBusy = false;
         rt.cancelAutos = false;
@@ -483,19 +498,23 @@ OUTPUT (JSON string): {
       const args = parseArgsSafe(tc.argsText);
       const k = args.k ?? 5;
 
-      // ---- NYTT: robust query ----
+      // Robust query: args → live-buffert → senaste final → senaste RAG
       let q = (args.query || '').trim();
-      if (!q) q = (rt._lastUserText || rt._lastQuery || '').trim();
+      if (!q && (rt._liveUserBuf || '').trim()) {
+        q = rt._liveUserBuf.trim();
+        append(pill('🔁 Query från live-transkript'));
+      }
+      if (!q && (rt._lastUserText || '').trim()) q = rt._lastUserText.trim();
+      if (!q && (rt._lastQuery || '').trim())    q = rt._lastQuery.trim();
 
       if (!q) {
-        // inget att söka på
         if (tc.tool_call_id) {
           rt.dc?.send(JSON.stringify({
             type: 'response.function_call_output',
             tool_call_id: tc.tool_call_id,
             output: JSON.stringify({ ok:false, error:'missing_query', need_user:true })
           }));
-          append(pill('⚠️ search_manual: tom query → bad modellen be om förtydligande'));
+          append(pill('⚠️ search_manual: tom query → be om förtydligande'));
         } else {
           speakVerbatim('Jag uppfattade inte frågan. Kan du säga den igen?');
         }
@@ -503,7 +522,6 @@ OUTPUT (JSON string): {
         clearTimeout(ragTimer);
         return;
       }
-      // ----------------------------
 
       const body = { query: q, k, topK: k, minSim: args.minSim ?? 0.55 };
 
@@ -547,7 +565,7 @@ OUTPUT (JSON string): {
         };
 
         if (tc.tool_call_id) {
-          // *** lämna tillbaka output till Realtime-modellen ***
+          // lämna tillbaka output till Realtime-modellen
           rt.dc?.send(JSON.stringify({
             type: 'response.function_call_output',
             tool_call_id: tc.tool_call_id,
@@ -555,7 +573,7 @@ OUTPUT (JSON string): {
           }));
           append(pill('📤 Skickade tool-output till modellen'));
         } else {
-          // Fallback-läge: vi talar själva
+          // Fallback-läge: prata själv
           if (out.strict_answer) {
             speakVerbatim(out.strict_answer);
             const s0 = sources[0] || {};
@@ -604,7 +622,7 @@ OUTPUT (JSON string): {
       }
     }
 
-    // ========= Send text manually (fallback) =========
+    // ========= Send text manuellt (fallback) =========
     $('#sendTextBtn').onclick = sendQuickText;
     $('#quickText').addEventListener('keydown', e => { if (e.key==='Enter') sendQuickText(); });
     function sendQuickText(){
