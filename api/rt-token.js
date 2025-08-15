@@ -4,41 +4,37 @@ export const config = { api: { bodyParser: true } };
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Only GET' });
   try {
-    const model = process.env.REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17';
+    const model = process.env.REALTIME_MODEL || 'gpt-4o-realtime-preview';
     const instructions = `
 Du är Coach Assistant för Linje 65. Svara kort, tydligt och på svenska.
-Använd punktlistor för arbetssteg. Om manualtäckning saknas: säg att du är osäker
+Använd punktlistor för arbetssteg. Om manualtäckning saknas: säg det är osäkert
 och be om förtydligande. Förebygg faror och slöseri.
-Vid frågor om drift/felsökning/manual ska du ALLTID använda verktyget "search_manual".
-`.trim();
+
+För frågor om Linje 65, manualer, procedurer eller tekniska detaljer: Använd alltid verktyget "search_manual" för att hämta relevant information från manualen innan du svarar. Basera ditt svar enbart på resultaten från verktyget – hitta inte på information.
+`;
 
     const tools = [
       {
         type: 'function',
         name: 'search_manual',
-        description: 'Sök i Linje 65-manualdatabasen och sammanfatta kort ett verifierat svar.',
+        description: 'Sök i Linje 65-manualen efter relevant information. Använd detta för alla frågor som rör manualer, procedurer eller tekniska detaljer.',
         parameters: {
           type: 'object',
           properties: {
-            query: { type: 'string', description: 'Användarens exakta fråga/transkript.' },
-            k: { type: 'integer', description: 'Antal träffar att hämta.', default: 5 },
-            minSim: { type: 'number', description: 'Minsta likhet (0–1).', default: 0.55 },
-            topK: { type: 'integer', description: 'Max antal som returneras till klient.', default: 5 }
+            query: {
+              type: 'string',
+              description: 'Sökfrågan på svenska, baserat på användarens fråga.'
+            },
+            k: {
+              type: 'integer',
+              description: 'Antal resultat att hämta (default 5).'
+            },
+            minSim: {
+              type: 'number',
+              description: 'Minsta likhetspoäng (default 0).'
+            }
           },
           required: ['query']
-        }
-      },
-      {
-        type: 'function',
-        name: 'save_memory',
-        description: 'Spara stabil fakta/inställning i långtidsminne.',
-        parameters: {
-          type: 'object',
-          properties: {
-            key: { type: 'string' },
-            value: { type: 'string' }
-          },
-          required: ['key','value']
         }
       }
     ];
@@ -47,21 +43,22 @@ Vid frågor om drift/felsökning/manual ska du ALLTID använda verktyget "search
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-        'OpenAI-Beta': 'realtime=v1'
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         model,
-        voice: 'verse',
-        modalities: ['audio','text'],
-        instructions,
-        tools
+        voice: 'verse',                 // röst; byt vid behov
+        modalities: ['audio', 'text'],  // tal in/ut + text
+        instructions,                   // Uppdaterade instructions
+        tools,                          // Lägg till tools här
+        // turn_detection kan även styras efter anslutning via session.update (klienten)
       })
     });
 
     const j = await r.json();
     if (!r.ok) return res.status(500).json({ error: 'OpenAI error', details: j });
 
+    // Kortlivat token som webbläsaren får använda för WebRTC
     const token = j?.client_secret?.value || j?.client_secret || j?.id;
     if (!token) return res.status(500).json({ error: 'No client secret', details: j });
 
