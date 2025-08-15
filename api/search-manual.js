@@ -43,10 +43,18 @@ async function columns(schema, table){
   );
   return rows.map(r => r.column_name);
 }
+async function tableExists(schema, table){
+  const { rows } = await pool.query(
+    `SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2`,
+    [schema, table]
+  );
+  return rows.length>0;
+}
 
-function envMap(){
-  const schema = process.env.MANUAL_SCHEMA || 'public';
-  const chunksTable = process.env.MANUAL_CHUNKS_TABLE || 'manual_chunks';
+async function getMappings(){
+  const schema      = process.env.MANUAL_SCHEMA || 'public';
+  const chunksTable = process.env.MANUAL_TABLE  || 'manual_chunks';
+  const docsTable   = process.env.MANUAL_DOCS_TABLE || 'manual_docs';
 
   const chunkCols = await columns(schema, chunksTable);
   const pick = (envName, cands) => {
@@ -61,13 +69,11 @@ function envMap(){
   const headingCol = pick('MANUAL_HEADING_COL', ['heading','section','h1','h2']);
   const docIdCol   = pick('MANUAL_DOCID_COL', ['doc_id','document_id','docid','source_id','doc']);
 
-  if(!textCol) throw new Error('Kunde inte hitta textkolumn i manual_chunks (försök MANUAL_TEXT_COL eller använd: chunk/content/text/body/raw/paragraph). Sätt MANUAL_TEXT_COL.');
-  if(!embCol)  throw new Error('Kunde inte hitta embeddingskolumn. Sätt MANUAL_EMB_COL.');
-  const map = { schema, chunksTable, textCol, embCol, idxCol, headingCol, docIdCol, join: { exists:false } };
+  if(!textCol) throw new Error('Kunde inte hitta textkolumn i manual_chunks (provat: chunk/content/text/body/raw/paragraph). Sätt MANUAL_TEXT_COL.');
+  if(!embCol)  throw new Error('Kunde inte hitta embedding-kolumn i manual_chunks (provat: embedding/vector/emb/embedding_1536/embed). Sätt MANUAL_EMB_COL.');
 
-  // valfri join mot docs-tabell för att få titel
-  const docsTable = process.env.MANUAL_DOCS_TABLE;
-  if (docsTable){
+  let join = { exists:false };
+  if (await tableExists(schema, docsTable)) {
     const docsCols = await columns(schema, docsTable);
     const pickDocs = (envName, cands) => {
       const v = process.env[envName];
@@ -76,10 +82,10 @@ function envMap(){
     };
     const docsIdCol    = pickDocs('MANUAL_DOCS_ID_COL',    ['doc_id','id','document_id','docid','source_id']);
     const docsTitleCol = pickDocs('MANUAL_DOCS_TITLE_COL', ['title','name','doc_title']);
-    if (docsIdCol) map.join = { exists:true, schema, table:docsTable, idCol:docsIdCol, titleCol:docsTitleCol||null };
+    if (docsIdCol) join = { exists:true, schema, table:docsTable, idCol:docsIdCol, titleCol:docsTitleCol||null };
   }
 
-  return map;
+  return { schema, chunksTable, textCol, embCol, idxCol, headingCol, docIdCol, join };
 }
 
 function buildSQL(map, filtered){
@@ -101,52 +107,56 @@ function buildSQL(map, filtered){
     ? `WHERE 1 - (c.${id(map.embCol)} <=> (SELECT emb FROM q)) >= $3`
     : ``;
 
-  const sql = `
-WITH q AS (
-  SELECT CAST($1 AS vector) AS emb
-)
-SELECT ${sel.join(', ')}
-${fromJoin}
-${where}
-ORDER BY score DESC
-LIMIT $2
-`.trim();
-  return sql;
+  return `
+    WITH q AS (SELECT $1::vector AS emb)
+    SELECT ${sel.join(',\n           ')}
+    ${fromJoin}
+    ${where}
+    ORDER BY c.${id(map.embCol)} <-> (SELECT emb FROM q)
+    LIMIT $2
+  `;
 }
 
 export default async function handler(req,res){
-  if (req.method !== 'POST') return res.status(405).end(JSON.stringify({ error:'Only POST' }));
+  res.setHeader('Content-Type','application/json');
+  if (req.method !== 'POST') return res.status(405).end(JSON.stringify({ok:false,error:'Method not allowed'}));
+
   try{
-    const { query='', k=5, topK=5, minSim=0.55 } = readJsonBody(req);
-    const q = String(query||'').trim();
-    if(!q) return res.status(200).end(JSON.stringify({ ok:true, count:0, fallback:false, snippets:[] }));
+    const body = readJsonBody(req);
+    const query = String((body.query||'')).trim();
+    if (!query) return res.status(400).end(JSON.stringify({ok:false,error:'Missing query'}));
+    const K = Number(body.k ?? body.topK ?? 5);
+    const minScore = Number(body.minSim ?? 0);
 
-    const { embedding } = await embedQuery(q);
-    const map = await envMap();
-    const sql = buildSQL(map, true);
-    const { rows } = await pool.query(sql, [JSON.stringify(embedding), Math.max(1, topK|0), Math.max(0, Math.min(1, Number(minSim))) ]);
-    const count = rows.length;
+    const { embedding, model, dims } = await embedQuery(query);
+    const vecLiteral = `[${embedding.join(',')}]`;
 
-    res.setHeader('Content-Type','application/json');
-    if(!count){
-      // försök utan filter
-      const sql2 = buildSQL(map, false);
-      const { rows:rows2 } = await pool.query(sql2, [JSON.stringify(embedding), Math.max(1, topK|0) ]);
-      return res.end(JSON.stringify({
-        ok:true, count: rows2.length, fallback:true,
-        snippets: rows2.map(r => ({
-          doc_id:  r.doc_id ?? null,
-          title:   r.title ?? null,
-          idx:     r.idx ?? null,
-          heading: r.heading ?? null,
-          score:   Number((r.score ?? 0).toFixed(4)),
-          text:    r.chunk
-        }))
-      }));
+    const map = await getMappings();
+
+    // 1) Försök med filter
+    let sql = buildSQL(map, true);
+    let rows;
+    try{
+      const r = await pool.query(sql, [vecLiteral, K, minScore]);
+      rows = r.rows || [];
+    } catch (dbErr){
+      const msg = String(dbErr?.message || dbErr);
+      if (msg.includes('<->') || msg.includes('<=>')) throw new Error('pgvector saknas/ej aktiverad. Kör: CREATE EXTENSION IF NOT EXISTS vector;');
+      if (msg.includes('dimension mismatch')) throw new Error('Dimensionsfel: vektordimension matchar inte modellen (text-embedding-3-small = vector(1536)).');
+      throw dbErr;
     }
 
-    return res.end(JSON.stringify({
-      ok:true, count, fallback:false,
+    let fallback = false;
+    if (rows.length === 0) {
+      // 2) Fallback utan WHERE (visa topp-K oavsett score)
+      fallback = true;
+      sql = buildSQL(map, false);
+      const r2 = await pool.query(sql, [vecLiteral, K]);
+      rows = r2.rows || [];
+    }
+
+    res.status(200).end(JSON.stringify({
+      ok:true, count: rows.length, model, dims, fallback,
       snippets: rows.map(r => ({
         doc_id:  r.doc_id ?? null,
         title:   r.title ?? null,
