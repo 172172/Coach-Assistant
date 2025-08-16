@@ -102,7 +102,7 @@
     let ragTimer = null;
 
     // Linje 65 keywords for fallback trigger
-    const linjeKeywords = ['linje', 'manual', 'tapp', 'givare', 'sensor', 'ocme', 'felsök', 'format', 'karusell', 'ventil', 'carlsberg'];
+    const linjeKeywords = ['linje', 'manual', 'tapp', 'givare', 'sensor', 'ocme', 'felsök', 'format', 'karusell', 'ventil', 'carlsberg', 'personer', 'operatör'];
 
     // Check if query is Linje-related
     function isLinjeRelated(query) {
@@ -189,13 +189,14 @@ För off-topic frågor (t.ex. "vem är Donald Trump") redirecta vänligt: "Jag �
 Använd punktlistor för arbetssteg. Förebygg faror och slöseri.
 Använd verktyget "search_manual" ENDAST för specifika frågor om Linje 65, manualer, procedurer, tekniska detaljer, personer på linjen eller Carlsberg – aldrig för småprat, math eller irrelevant.
 VÄNTA på ett final transkript innan du kallar verktyget.
-Basa ditt svar enbart på resultat från verktyget när det används – hitta inte på information.
+Basa ditt svar enbart på resultat från verktyget när det används – hitta inte på information. Om inget resultat från manualen: Säg "Jag har tyvärr inte lärt mig det ännu från manualen – kan du förtydliga eller fråga om något annat på linjen?"
+För personer: Om relaterat till Linje 65 (t.ex. omnämnda i manualen), använd verktyg och svara baserat på resultat; annars redirecta som off-topic.
 Huvuduppgift: Undervisa operatörer i day-to-day tasks på Linje 65.
-Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är kvadratroten av 16" – "4! Något mer matte eller linje-fråga?" För "hur felsöker jag tapp" – använd verktyg.
+Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är kvadratroten av 16" – "4! Något mer matte eller linje-fråga?" För "hur felsöker jag tapp" – använd verktyg. För "vem är operatör X på linjen" – använd verktyg om i manual. För "vem är Elon Musk" – redirecta.
 `.trim(),
               tools:[
                 { type:'function', name:'search_manual',
-                  description:`Sök i Linje65-manualdatabasen efter relevant information. Använd detta ENDAST för frågor som rör manualer, procedurer eller tekniska detaljer om Linje 65.`,
+                  description:`Sök i Linje65-manualdatabasen efter relevant information. Använd detta ENDAST för frågor som rör manualer, procedurer eller tekniska detaljer om Linje 65, inklusive personer relaterade till linjen.`,
                   parameters:{ type:'object', properties:{
                     query:{type:'string',description:'Sökfrågan på svenska, baserat på användarens fråga.'},
                     k:{type:'integer',description:'Antal resultat att hämta (default 5).',default:5},
@@ -387,7 +388,7 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
           rt._ragBusy=true; rt._lastToolCallId=id; clearTimeout(ragTimer);
           ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
           const patchedArgs=JSON.stringify({...args, query:qNow});
-          return runToolSearchManual({tool_call_id:id,response_id:tc.response_id,argsText:patchedArgs}).finally(()=>{ rt.cancelAutos = false; }); // Reset här
+          return runToolSearchManual({tool_call_id:id,response_id:tc.response_id,argsText:patchedArgs}).finally(()=>{});
         }
 
         if (tc.name==='save_memory'){
@@ -407,7 +408,7 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
         clearTimeout(ragTimer); return;
       }
 
-      // Slut/fel – reset cancelAutos här också
+      // Slut/fel
       if (msg.type==='response.completed' || msg.type==='response.error' || msg.type==='error'){
         rt._ragBusy=false; rt.cancelAutos=false; rt.skipCancelForNextCreate=false;
         if (msg.response_id) rt.allowedResponseIds.delete(msg.response_id);
@@ -536,6 +537,8 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
             bestSent=(pick.s || (data.snippets[0].text||'').replace(/\s+/g,' ').trim()).slice(0,500);
             strict=`Enligt manualen: ${bestSent}`;
           }
+        } else {
+          strict = 'Jag har tyvärr inte lärt mig det ännu från manualen – kan du förtydliga eller fråga om något annat på linjen?';
         }
 
         const sources=(data.snippets||[]).slice(0,5).map(s=>({title:s.title||'manual',idx:s.idx,score:s.score}));
