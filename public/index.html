@@ -178,19 +178,15 @@ Du är Coach Assistant för Linje 65. Svara kort, tydligt och på svenska.
 Använd punktlistor för arbetssteg. Om manualtäckning saknas: säg att det är osäkert
 och be om förtydligande. Förebygg faror och slöseri.
 
-För frågor om Linje 65, manualer, procedurer eller tekniska detaljer:
-Använd alltid verktyget "search_manual" för att hämta relevant information från manualen
-innan du svarar, oavsett om frågan kommer via text eller audio.
+Var social och naturlig i samtal: Svara vänligt på hälsningar, småprat, allmänna frågor om produktion, matte eller annat utan att använda verktyg.
+Använd verktyget "search_manual" ENDAST för specifika frågor om Linje 65, manualer, procedurer eller tekniska detaljer – aldrig för småprat eller icke-relaterade ämnen.
 VÄNTA på ett final transkript innan du kallar verktyget.
-Basa ditt svar enbart på resultat från verktyget – hitta inte på information.
-Du får INTE ge något svar förrän du har fått tool_result från 'search_manual' för aktuell fråga,
-om inte frågan uppenbart är hälsning/småprat.
-Hälsningar och småprat (t.ex. "hej", "godmorgon") ska besvaras direkt utan verktyg, naturligt och vänligt, utan att söka i manualen.
-Använd verktyget ENDAST om frågan rör Linje 65-specifika ämnen som drift, felsökning, procedurer eller manualdetaljer.
+Basa ditt svar enbart på resultat från verktyget när det används – hitta inte på information.
+Hälsningar/småprat kan besvaras direkt utan verktyg.
 `.trim(),
               tools:[
                 { type:'function', name:'search_manual',
-                  description:`Sök i Linje65-manualdatabasen efter relevant information. Använd detta för alla frågor som rör manualer, procedurer eller tekniska detaljer.`,
+                  description:`Sök i Linje65-manualdatabasen efter relevant information. Använd detta ENDAST för frågor som rör manualer, procedurer eller tekniska detaljer om Linje 65.`,
                   parameters:{ type:'object', properties:{
                     query:{type:'string',description:'Sökfrågan på svenska, baserat på användarens fråga.'},
                     k:{type:'integer',description:'Antal resultat att hämta (default 5).',default:5},
@@ -295,12 +291,7 @@ Använd verktyget ENDAST om frågan rör Linje 65-specifika ämnen som drift, fe
             append(bubble(utext,'user')); logMsg('user',utext,'voice',msg);
             // Om ett tool väntar, kör det nu
             if (rt._pendingTool){ tryRunPending('final'); return; }
-            // Fallback: trigga RAG om modellen inte gör tool-call själv
-            if (!rt._ragBusy && utext!==rt._lastQuery){
-              rt._ragBusy=true; rt._lastQuery=utext; rt.cancelAutos=true; clearTimeout(ragTimer);
-              ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
-              runToolSearchManual({tool_call_id:null,response_id:null,argsText:JSON.stringify({query:utext,k:5,minSim:0.55})}).finally(()=>{});
-            }
+            // Removed fallback RAG trigger - let model decide
           }
         }
         // assistant → visa text
@@ -319,11 +310,7 @@ Använd verktyget ENDAST om frågan rör Linje 65-specifika ämnen som drift, fe
         if (full){
           rt._lastUserText = full; rt._liveUserBuf = '';
           append(bubble(full,'user')); logMsg('user',full,'voice',msg);
-          if (!rt._ragBusy && full!==rt._lastQuery){
-            rt._ragBusy=true; rt._lastQuery=full; rt.cancelAutos=true; clearTimeout(ragTimer);
-            ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
-            runToolSearchManual({tool_call_id:null,response_id:null,argsText:JSON.stringify({query:full,k:5,minSim:0.55})}).finally(()=>{});
-          }
+          // Removed fallback RAG trigger - let model decide
         }
         return;
       }
@@ -608,12 +595,7 @@ Använd verktyget ENDAST om frågan rör Linje 65-specifika ämnen som drift, fe
     function sendTextToRealtime(text){
       if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({type:'input_text', text}));
-      if (text.split(/\s+/).length<2) return;
-      if(!rt._ragBusy && text!==rt._lastQuery){
-        rt._ragBusy=true; rt._lastQuery=text; rt.cancelAutos=true; clearTimeout(ragTimer);
-        ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
-        runToolSearchManual({tool_call_id:null,response_id:null,argsText:JSON.stringify({query:text,k:5,minSim:0.55})}).finally(()=>{});
-      }
+      // Removed automatic RAG trigger - let model decide
     }
 
     // ===== Manual test UI =====
