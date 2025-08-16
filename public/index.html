@@ -147,7 +147,7 @@
             session:{
               voice:'verse',
               turn_detection:{type:'server_vad'},
-              tool_choice:{type:'auto'},
+              tool_choice:'auto',                          // <-- fix här
               instructions:`
 Du är Coach Assistant för Linje 65.
 Vid frågor om drift/felsökning/manual ska du ALLTID använda verktyget "search_manual" innan du svarar.
@@ -179,7 +179,11 @@ Hälsning/småprat kan besvaras utan verktyg.
         const {token, model}=await fetchJSON('/api/rt-token');
         append(pill('Realtime modell: '+model));
         const offer=await rt.pc.createOffer(); await rt.pc.setLocalDescription(offer);
-        const sdp=await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/sdp'},body:offer.sdp}).then(r=>r.text());
+        const sdp=await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`,{
+          method:'POST',
+          headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/sdp','OpenAI-Beta':'realtime=v1'},  // <-- header
+          body:offer.sdp
+        }).then(r=>r.text());
         await rt.pc.setRemoteDescription({type:'answer', sdp});
 
         rt.connected=true; $('#rtBtn').style.display='none'; $('#rtHangup').style.display='inline-block'; status('Realtime ansluten');
@@ -214,7 +218,7 @@ Hälsning/småprat kan besvaras utan verktyg.
     }
 
     function handleRealtimeMessage(msg){
-      console.log('Mottaget event:', msg.type, msg); // Logga hela msg för debugging, speciellt errors
+      console.log('Mottaget event:', msg.type, msg);
 
       // Live transcript buffer
       try{
@@ -223,7 +227,6 @@ Hälsning/småprat kan besvaras utan verktyg.
         if (/(input_audio_buffer|input_text)\.transcript\.delta$/.test(t)) {
           const chunk=msg.delta||msg.text||"";
           if (chunk) rt._liveUserBuf=(rt._liveUserBuf||"")+chunk;
-          // Om ett tool väntar, försök trigga det så fort vi har text
           if (rt._pendingTool) tryRunPending('delta');
         }
       }catch{}
@@ -239,7 +242,7 @@ Hälsning/småprat kan besvaras utan verktyg.
         return;
       }
 
-      // response.created → bara stoppa när vi faktiskt ersätter med RAG
+      // response.created → stoppa bara när vi ersätter med RAG
       if (msg.type==='response.created'){
         const rid=msg.response?.id||msg.response_id;
         if (rid && rt.allowedResponseIds.has(rid)) return;
@@ -261,7 +264,6 @@ Hälsning/småprat kan besvaras utan verktyg.
         if (tc.name==='search_manual'){
           const qNow=resolveQueryFromState(args);
           if (!qNow){
-            // Parkera tool-callet och vänta upp till 2s på transkript
             parkPendingTool({id, argsText: tc.argsText, response_id: tc.response_id});
             append(pill('⏳ Väntar på transkript (max 2s)'));
             return;
@@ -283,13 +285,13 @@ Hälsning/småprat kan besvaras utan verktyg.
         return;
       }
 
-      // transcript final → spara + (om inget pending) kör fallback RAG
+      // transcript final → spara + ev. fallback RAG
       if (isTranscriptFinalType(msg.type)){
         const text=(msg.transcript||msg.text||'').trim();
         if (text){
           append(bubble(text,'user')); logMsg('user',text,'voice',msg);
           rt._lastUserText=text; rt._liveUserBuf="";
-          if (rt._pendingTool){ tryRunPending('final'); return; } // pending får köra först
+          if (rt._pendingTool){ tryRunPending('final'); return; }
           if (text.split(/\s+/).length<2) return;
           if (!rt._ragBusy && text!==rt._lastQuery){
             rt._ragBusy=true; rt._lastQuery=text; rt.cancelAutos=true; clearTimeout(ragTimer);
@@ -309,27 +311,25 @@ Hälsning/småprat kan besvaras utan verktyg.
         clearTimeout(ragTimer); return;
       }
 
-      // Slut/fel – utökad loggning här för att fånga OpenAI-errors
+      // Slut/fel
       if (msg.type==='response.completed' || msg.type==='response.error' || msg.type==='error'){
-        console.error('OpenAI Realtime error details:', msg); // Logga full error för debugging
+        console.error('OpenAI Realtime error details:', msg);
         append(errorBubble(`OpenAI error: ${msg.error?.message || msg.error?.code || 'Okänd error'}`));
         rt._ragBusy=false; rt.cancelAutos=false; rt.skipCancelForNextCreate=false;
         if (msg.response_id) rt.allowedResponseIds.delete(msg.response_id);
         clearTimeout(ragTimer); 
-        hangupRealtime(); // Stäng anslutning vid error för att undvika loopar
+        hangupRealtime();
         return;
       }
     }
 
     // ===== Pending tool orchestration =====
     function parkPendingTool({id,argsText,response_id}){
-      // lägg bara en åt gången
       rt._pendingTool = {
         id, argsText, response_id,
         deadline: Date.now()+WAIT_FOR_QUERY_MS,
         interval: rt._pendingTool?.interval || null,
       };
-      // kicka igång polling om inte redan
       if (!rt._pendingTool.interval){
         rt._pendingTool.interval = setInterval(()=> tryRunPending('poll'), 150);
       }
@@ -337,12 +337,10 @@ Hälsning/småprat kan besvaras utan verktyg.
 
     function tryRunPending(trigger){
       const p = rt._pendingTool; if (!p) return;
-      // försök lösa query
       let args={}; try{ args=JSON.parse(p.argsText||'{}'); }catch{}
       const q = resolveQueryFromState(args);
       if (q){
         clearInterval(p.interval); rt._pendingTool=null;
-        // nu kör vi på riktigt och ersätter autosvar
         rt.cancelAutos = true; if (p.response_id) rt.allowedResponseIds.add(p.response_id);
         rt._ragBusy = true; rt._lastToolCallId = p.id; clearTimeout(ragTimer);
         ragTimer = setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
@@ -353,13 +351,14 @@ Hälsning/småprat kan besvaras utan verktyg.
       }
       if (Date.now() > p.deadline){
         clearInterval(p.interval); rt._pendingTool=null;
-        // timeout → returnera säkert tool-output och låt autosvar vara
         rt.cancelAutos=false; if (p.response_id) rt.allowedResponseIds.add(p.response_id);
+        // --- korrigerat sätt att skicka toolsvar ---
         rt.dc?.send(JSON.stringify({
-          type:'response.function_call_output',
-          tool_call_id:p.id,
-          output: JSON.stringify({ ok:false, error:'missing_query_timeout', need_user:true })
+          type:'conversation.item.create',
+          item:{ type:'function_call_output', call_id:p.id, output: JSON.stringify({ ok:false, error:'missing_query_timeout', need_user:true }) }
         }));
+        rt.skipCancelForNextCreate = true;
+        rt.dc?.send(JSON.stringify({ type:'response.create' }));
         append(pill('⌛ Timeout: inget transkript att söka på'));
       }
     }
@@ -416,7 +415,12 @@ Hälsning/småprat kan besvaras utan verktyg.
 
       if(!q){
         if(tc.tool_call_id){
-          rt.dc?.send(JSON.stringify({ type:'response.function_call_output', tool_call_id:tc.tool_call_id, output:JSON.stringify({ok:false,error:'missing_query',need_user:true}) }));
+          rt.dc?.send(JSON.stringify({
+            type:'conversation.item.create',
+            item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify({ok:false,error:'missing_query',need_user:true}) }
+          }));
+          rt.skipCancelForNextCreate = true;
+          rt.dc?.send(JSON.stringify({ type:'response.create' }));
           append(pill('⚠️ search_manual: tom query → be om förtydligande'));
         }else{
           speakVerbatim('Jag uppfattade inte frågan. Kan du säga den igen?');
@@ -447,7 +451,12 @@ Hälsning/småprat kan besvaras utan verktyg.
         const out={ ok:true, strict_answer:strict||undefined, best_sentence:bestSent||undefined, numeric:numeric||null, fallback:!!data.fallback, top_score:(data.snippets?.[0]?.score??null), sources };
 
         if (tc.tool_call_id){
-          rt.dc?.send(JSON.stringify({ type:'response.function_call_output', tool_call_id:tc.tool_call_id, output:JSON.stringify(out) }));
+          rt.dc?.send(JSON.stringify({
+            type:'conversation.item.create',
+            item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify(out) }
+          }));
+          rt.skipCancelForNextCreate = true;
+          rt.dc?.send(JSON.stringify({ type:'response.create' }));
           append(pill('📤 Skickade tool-output till modellen'));
         } else {
           if (out.strict_answer){
@@ -460,7 +469,14 @@ Hälsning/småprat kan besvaras utan verktyg.
       }catch(err){
         console.error('search-manual error',err); append(errorBubble('Manual-sök fel: '+(err?.message||err)));
         if(!tc.tool_call_id){ speakVerbatim('Kunde inte nå manual-sök just nu. Försök igen strax.'); }
-        else { rt.dc?.send(JSON.stringify({ type:'response.function_call_output', tool_call_id:tc.tool_call_id, output:JSON.stringify({ ok:false, error:'search-manual failed' }) })); }
+        else {
+          rt.dc?.send(JSON.stringify({
+            type:'conversation.item.create',
+            item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify({ ok:false, error:'search-manual failed' }) }
+          }));
+          rt.skipCancelForNextCreate = true;
+          rt.dc?.send(JSON.stringify({ type:'response.create' }));
+        }
       }finally{
         rt._ragBusy=false; clearTimeout(ragTimer);
       }
@@ -470,11 +486,29 @@ Hälsning/småprat kan besvaras utan verktyg.
       const args=parseArgsSafe(tc.argsText);
       try{
         await fetch('/api/save-memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:localStorage.getItem('operator_id')||'kevin',key:args.key,value:args.value})});
-        rt.skipCancelForNextCreate=true;
-        rt.dc?.send(JSON.stringify({ type:'response.create', response:{ modalities:['audio','text'], instructions:`Noterat. Jag sparade minnet: ${args.key} = ${args.value}.`, metadata:{source:'rag'} } }));
-      }catch{
-        rt.skipCancelForNextCreate=true;
-        rt.dc?.send(JSON.stringify({ type:'response.create', response:{ modalities:['audio','text'], instructions:`Jag kunde inte spara minnet just nu.`, metadata:{source:'rag'} } }));
+        if (tc.tool_call_id){
+          rt.dc?.send(JSON.stringify({
+            type:'conversation.item.create',
+            item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify({ ok:true }) }
+          }));
+          rt.skipCancelForNextCreate = true;
+          rt.dc?.send(JSON.stringify({ type:'response.create' }));
+        } else {
+          rt.skipCancelForNextCreate=true;
+          rt.dc?.send(JSON.stringify({ type:'response.create', response:{ modalities:['audio','text'], instructions:`Noterat. Jag sparade minnet: ${args.key} = ${args.value}.`, metadata:{source:'rag'} } }));
+        }
+      }catch(e){
+        if (tc.tool_call_id){
+          rt.dc?.send(JSON.stringify({
+            type:'conversation.item.create',
+            item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify({ ok:false, error: e?.message||String(e) }) }
+          }));
+          rt.skipCancelForNextCreate = true;
+          rt.dc?.send(JSON.stringify({ type:'response.create' }));
+        } else {
+          rt.skipCancelForNextCreate=true;
+          rt.dc?.send(JSON.stringify({ type:'response.create', response:{ modalities:['audio','text'], instructions:`Jag kunde inte spara minnet just nu.`, metadata:{source:'rag'} } }));
+        }
       }
     }
 
