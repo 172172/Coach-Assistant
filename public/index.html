@@ -212,10 +212,14 @@ Hälsning/småprat kan besvaras utan verktyg.
           // Starta MediaRecorder för audio input
           rt.mediaRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm;codecs=opus' });
           rt.mediaRecorder.ondataavailable = async (e) => {
-            if (e.data.size > 0) {
-              const buffer = await e.data.arrayBuffer();
-              const base64Audio = arrayBufferToBase64(buffer);
-              rt.ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: base64Audio }));
+            if (e.data.size > 0 && rt.ws && rt.ws.readyState === WebSocket.OPEN) {  // Säkerhetscheck här
+              try {
+                const buffer = await e.data.arrayBuffer();
+                const base64Audio = arrayBufferToBase64(buffer);
+                rt.ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: base64Audio }));
+              } catch (err) {
+                console.warn('Fel vid skick av audio chunk efter stängning:', err);
+              }
             }
           };
           rt.mediaRecorder.start(250); // Skicka chunks var 250ms
@@ -234,7 +238,10 @@ Hälsning/småprat kan besvaras utan verktyg.
 
     async function hangupRealtime(){
       try{
-        if (rt.mediaRecorder) rt.mediaRecorder.stop();
+        if (rt.mediaRecorder) {
+          rt.mediaRecorder.stop();
+          rt.mediaRecorder = null;  // Nollställ för att undvika kvarvarande events
+        }
         if (rt.audioContext) rt.audioContext.close();
         if (rt.ws) rt.ws.close();
       }catch{}
