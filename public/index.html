@@ -73,7 +73,8 @@ let rt = {
   _ragBusy:false, _lastQuery:"", _lastToolCallId:null,
   cancelAutos:false, skipCancelForNextCreate:false, allowedResponseIds:new Set(),
   _lastUserText:"", _liveUserBuf:"",
-  _pendingTool:null, _fallbackTimer:null
+  _pendingTool:null, _fallbackTimer:null,
+  _lastManualFor:null            // NY: spåra vilket user‑transkript vi sökt på
 };
 const toolCalls = new Map();
 const RAG_TIMEOUT_MS = 8000;
@@ -381,8 +382,9 @@ function handleRealtimeMessage(msg){
         rt._lastUserText=utext;
         append(bubble(utext,'user'));
         logMsg('user',utext,'voice',msg);
+        // NY: starta sök direkt (slipper vänta på fallback)
+        triggerManualSearch(utext);
         if(rt._pendingTool) tryRunPending('final');
-        scheduleFallbackManual(utext);
       }
     }
     if(msg.item?.role==='assistant'){
@@ -402,8 +404,8 @@ function handleRealtimeMessage(msg){
     if(rt._liveUserBuf.trim()){
       rt._lastUserText=rt._liveUserBuf.trim();
       append(pill('🎤 Final (committed)'));
+      triggerManualSearch(rt._lastUserText); // NY: säkerställ sök på committed
       if(rt._pendingTool) tryRunPending('final');
-      scheduleFallbackManual(rt._lastUserText);
       rt._liveUserBuf='';
     }
     return;
@@ -415,8 +417,8 @@ function handleRealtimeMessage(msg){
       rt._lastUserText=full; rt._liveUserBuf='';
       append(bubble(full,'user'));
       logMsg('user',full,'voice',msg);
+      triggerManualSearch(full); // NY
       if(rt._pendingTool) tryRunPending('final');
-      scheduleFallbackManual(full);
     }
     return;
   }
@@ -453,10 +455,23 @@ function speakVerbatim(text){
   }));
 }
 
+function triggerManualSearch(q){
+  q=(q||'').trim();
+  if(!q) return;
+  if(rt._ragBusy) return;
+  if(rt._lastManualFor === q) return;
+  rt._ragBusy = true;
+  rt._lastQuery = q;
+  rt._lastManualFor = q;
+  rt.cancelAutos = true;
+  runToolSearchManual({ tool_call_id:null, response_id:null, argsText:JSON.stringify({ query:q, k:5, minSim:0.55 }) });
+}
+
 async function runToolSearchManual(tc){
   const args = parseArgsSafe(tc.argsText);
   const k = args.k ?? 5;
   const q = resolveQueryFromState(args);
+  console.log('[RAG] start search_manual', {q,k,fromTool:!!tc.tool_call_id});
 
   if(!q){
     if(tc.tool_call_id){
@@ -500,7 +515,6 @@ async function runToolSearchManual(tc){
     };
 
     if(tc.tool_call_id){
-      // Säkerställ att call_id inte är 'unknown'
       if(tc.tool_call_id === 'unknown'){
         append(errorBubble('Saknar giltigt call_id – svar skickas ej.'));
       } else {
@@ -515,7 +529,17 @@ async function runToolSearchManual(tc){
     } else {
       if(out.strict_answer){
         const s0=sources[0]||{};
-        append(bubble(`${out.strict_answer}\nKälla: ${(s0.title||'manual')} idx:${s0.idx??'?'} score:${(s0.score??0).toFixed(2)}`,'assistant'));
+        const answer = out.strict_answer;
+        append(bubble(`${answer}\nKälla: ${(s0.title||'manual')} idx:${s0.idx??'?'} score:${(s0.score??0).toFixed(2)}`,'assistant'));
+        // NY: generera röst + text via modellen (verbatim)
+        rt.skipCancelForNextCreate = true;
+        rt.dc?.send(JSON.stringify({
+          type:'response.create',
+            response:{
+              modalities:['audio','text'],
+              instructions:`Läs upp svaret kort och exakt.\nSvar: ${answer}\nOmfråga om mer detaljer vid behov.`
+            }
+        }));
       } else {
         speakVerbatim('Jag kan inte verifiera det i manualen. Kan du precisera område eller felkod?');
       }
