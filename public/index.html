@@ -101,6 +101,15 @@
     const WAIT_FOR_QUERY_MS = 2000;
     let ragTimer = null;
 
+    // Linje 65 keywords for fallback trigger
+    const linjeKeywords = ['linje', 'manual', 'tapp', 'givare', 'sensor', 'ocme', 'felsök', 'format', 'karusell', 'ventil', 'carlsberg'];
+
+    // Check if query is Linje-related
+    function isLinjeRelated(query) {
+      const lowerQuery = query.toLowerCase();
+      return linjeKeywords.some(kw => lowerQuery.includes(kw));
+    }
+
     // mic viz
     let micAnalyser, micData;
     function setupMicViz(stream){
@@ -152,7 +161,7 @@
         // Nedströms ljud (modellens TTS)
         rt.pc.addTransceiver('audio', { direction:'recvonly' });
 
-        // Skicka mikrofon uppströms
+        // From/to/mentions: from:user, to:user, @user, list:id or list:slug.
         rt.mic.getTracks().forEach(t=>rt.pc.addTrack(t,rt.mic));
 
         rt.remoteAudio=new Audio();
@@ -174,15 +183,15 @@
               input_audio_transcription: { model: "whisper-1" },
               tool_choice:'auto',
               instructions:`
-Du är Coach Assistant för Linje 65. Svara kort, tydligt och på svenska.
-Använd punktlistor för arbetssteg. Om manualtäckning saknas: säg att det är osäkert
-och be om förtydligande. Förebygg faror och slöseri.
-
-Var social och naturlig i samtal: Svara vänligt på hälsningar, småprat, allmänna frågor om produktion, matte eller annat utan att använda verktyg.
-Använd verktyget "search_manual" ENDAST för specifika frågor om Linje 65, manualer, procedurer eller tekniska detaljer – aldrig för småprat eller icke-relaterade ämnen.
+Du är Coach Assistant för Linje 65, som Jarvis från Iron Man – hjälpsam, kvick, social och vänlig. Svara kort, tydligt och på svenska.
+Var naturlig i samtal: Svara vänligt på hälsningar (t.ex. "Hej! Hur mår du idag?"), småprat, mattematik (t.ex. "5*7 är 35"), allmänna produktionsfrågor eller annat utan verktyg.
+För off-topic frågor (t.ex. "vem är Donald Trump") redirecta vänligt: "Jag är skapad för att hjälpa med Linje 65 och dagliga tasks – inte politik eller kändisar. Vad kan jag assistera med på linjen?"
+Använd punktlistor för arbetssteg. Förebygg faror och slöseri.
+Använd verktyget "search_manual" ENDAST för specifika frågor om Linje 65, manualer, procedurer, tekniska detaljer, personer på linjen eller Carlsberg – aldrig för småprat, math eller irrelevant.
 VÄNTA på ett final transkript innan du kallar verktyget.
 Basa ditt svar enbart på resultat från verktyget när det används – hitta inte på information.
-Hälsningar/småprat kan besvaras direkt utan verktyg.
+Huvuduppgift: Undervisa operatörer i day-to-day tasks på Linje 65.
+Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är kvadratroten av 16" – "4! Något mer matte eller linje-fråga?" För "hur felsöker jag tapp" – använd verktyg.
 `.trim(),
               tools:[
                 { type:'function', name:'search_manual',
@@ -291,7 +300,12 @@ Hälsningar/småprat kan besvaras direkt utan verktyg.
             append(bubble(utext,'user')); logMsg('user',utext,'voice',msg);
             // Om ett tool väntar, kör det nu
             if (rt._pendingTool){ tryRunPending('final'); return; }
-            // Removed fallback RAG trigger - let model decide
+            // Smart fallback: Trigga RAG endast om Linje-relaterat och ingen tool-call
+            if (isLinjeRelated(utext) && !rt._ragBusy && utext!==rt._lastQuery){
+              rt._ragBusy=true; rt._lastQuery=utext; rt.cancelAutos=true; clearTimeout(ragTimer);
+              ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
+              runToolSearchManual({tool_call_id:null,response_id:null,argsText:JSON.stringify({query:utext,k:5,minSim:0.45})}).finally(()=>{});
+            }
           }
         }
         // assistant → visa text
@@ -310,7 +324,11 @@ Hälsningar/småprat kan besvaras direkt utan verktyg.
         if (full){
           rt._lastUserText = full; rt._liveUserBuf = '';
           append(bubble(full,'user')); logMsg('user',full,'voice',msg);
-          // Removed fallback RAG trigger - let model decide
+          if (isLinjeRelated(full) && !rt._ragBusy && full!==rt._lastQuery){
+            rt._ragBusy=true; rt._lastQuery=full; rt.cancelAutos=true; clearTimeout(ragTimer);
+            ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
+            runToolSearchManual({tool_call_id:null,response_id:null,argsText:JSON.stringify({query:full,k:5,minSim:0.45})}).finally(()=>{});
+          }
         }
         return;
       }
@@ -501,7 +519,7 @@ Hälsningar/småprat kan besvaras direkt utan verktyg.
         rt._ragBusy=false; clearTimeout(ragTimer); return;
       }
 
-      const body={ query:q, k, topK:k, minSim:args.minSim ?? 0.55 };
+      const body={ query:q, k, topK:k, minSim:args.minSim ?? 0.45 };
 
       try{
         const data=await fetchJSON('/api/search-manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -595,7 +613,11 @@ Hälsningar/småprat kan besvaras direkt utan verktyg.
     function sendTextToRealtime(text){
       if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({type:'input_text', text}));
-      // Removed automatic RAG trigger - let model decide
+      if (isLinjeRelated(text) && !rt._ragBusy && text!==rt._lastQuery){
+        rt._ragBusy=true; rt._lastQuery=text; rt.cancelAutos=true; clearTimeout(ragTimer);
+        ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
+        runToolSearchManual({tool_call_id:null,response_id:null,argsText:JSON.stringify({query:text,k:5,minSim:0.45})}).finally(()=>{});
+      }
     }
 
     // ===== Manual test UI =====
@@ -605,7 +627,7 @@ Hälsningar/småprat kan besvaras direkt utan verktyg.
       const q=$('#manualQuery').value.trim(); if(!q){ append(pill('Skriv en fråga för manualen.')); return; }
       append(bubble('🔎 Manual: '+q,'user'));
       try{
-        const data=await fetchJSON('/api/search-manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,k:5,topK:5,minSim:0.55})});
+        const data=await fetchJSON('/api/search-manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,k:5,topK:5,minSim:0.45})});
         append(pill(`RAG: count=${data.count||0}${data.fallback?' (fallback)':''} • top1=${(data.snippets?.[0]?.score??0).toFixed(2)}`));
         if(!data.count){ append(bubble('Inga träffar i manualen.','assistant')); return; }
         const isNum=/\b(hur många|antal(?:et)?|how many|number of|count)\b/i.test(q);
