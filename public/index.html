@@ -118,34 +118,40 @@ async function connectRealtime(){
     $('#memStatus').textContent='Minne: laddat';
 
     rt.pc = new RTCPeerConnection();
+
+    // NY: fånga inkommande modell-ljud
+    rt.pc.ontrack = ev => {
+      console.log('ontrack (remote audio)', ev.streams);
+      if(!rt.remoteAudio){
+        rt.remoteAudio = new Audio();
+        rt.remoteAudio.autoplay = true;
+        rt.remoteAudio.playsInline = true;
+        rt.remoteAudio.style.display='none'; // ändra vid felsökning
+        document.body.appendChild(rt.remoteAudio);
+      }
+      rt.remoteAudio.srcObject = ev.streams[0];
+      const p = rt.remoteAudio.play();
+      if(p) p.catch(err=>console.warn('Autoplay blockerat – klicka sidan och försök igen:', err));
+    };
+
+    // Begär modellens audio (recvonly) och lägg till mic
     rt.pc.addTransceiver('audio',{direction:'recvonly'});
     rt.mic.getTracks().forEach(t=>rt.pc.addTrack(t,rt.mic));
-    rt.remoteAudio=new Audio(); rt.remoteAudio.autoplay=true; rt.remoteAudio.playsInline=true;
-    
-    // Koppla remote audio stream till audio-elementet
-    rt.pc.ontrack = function(event) {
-      if(event.track.kind === 'audio') {
-        rt.remoteAudio.srcObject = event.streams[0];
-        rt.remoteAudio.play().catch(()=>{});
-      }
-    };
-    
+
     rt.dc = rt.pc.createDataChannel('oai-events');
 
     rt.dc.onopen = () => {
       const instructions = `
 Du är Coach Assistant för Linje 65.
-Svara kort och på svenska. Punktlistor för steg.
-ALLTID: Vänta tills användarens transkript är slut (final).
-Därefter: Kalla funktionen search_manual med {query: EXAKT transkript}.
-Ge inget sak-svar utan tool_result (om inte ren hälsning/småprat).
-Om strict_answer -> läs upp ordagrant utan tillägg (max 2 meningar).
-Om ingen strict_answer -> säg att det ej kan verifieras och be om precisering.
+Svara kort på svenska. Punktlistor.
+VÄNTA på final transkript innan search_manual.
+Kalla search_manual med exakt transkript.
+Om strict_answer: läs upp ordagrant (max 2 meningar). Annars be om precisering.
 `.trim();
       const tools = [
         {
           type:'function', name:'search_manual',
-          description:'Sök i Linje 65-manualen. Alltid före tekniskt svar.',
+          description:'Sök i Linje 65-manualen innan tekniskt svar.',
           parameters:{
             type:'object',
             properties:{
@@ -154,18 +160,13 @@ Om ingen strict_answer -> säg att det ej kan verifieras och be om precisering.
               minSim:{type:'number',default:0.55}
             }, required:['query']
           }
-        },
-        {
-          type:'function', name:'save_memory',
-          description:'Spara stabil fakta / inställning.',
-          parameters:{
-            type:'object',
-            properties:{ key:{type:'string'}, value:{type:'string'} },
-            required:['key','value']
-          }
         }
       ];
-      rt.dc.send(JSON.stringify({ type:'session.update', session:{instructions, tools} }));
+      // NY: inkludera modalities för säkerhets skull
+      rt.dc.send(JSON.stringify({
+        type:'session.update',
+        session:{ instructions, tools, modalities:['audio','text'] }
+      }));
       append(pill('Realtime ansluten. Prata när som helst.'));
     };
 
@@ -184,6 +185,11 @@ Om ingen strict_answer -> säg att det ej kan verifieras och be om precisering.
       body:offer.sdp
     }).then(r=>r.text());
     await rt.pc.setRemoteDescription({type:'answer', sdp});
+
+    // Försök spela (om spår redan kom)
+    if(rt.remoteAudio?.srcObject){
+      rt.remoteAudio.play().catch(e=>console.warn('Play retry misslyckades:', e));
+    }
 
     rt.connected=true;
     $('#rtBtn').style.display='none';
