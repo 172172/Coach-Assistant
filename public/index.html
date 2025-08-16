@@ -171,23 +171,29 @@
               voice:'verse',
               modalities:['audio','text'],
               turn_detection:{type:'server_vad'},
-              input_audio_transcription: { model: "whisper-1" }, // Tillagd för att aktivera transkription av röstinput
               tool_choice:'auto',
               instructions:`
-Du är Coach Assistant för Linje 65.
-Vid frågor om drift/felsökning/manual ska du ALLTID använda verktyget "search_manual" innan du svarar.
-VÄNTA tills du har ett slutligt (final) transkript innan du kallar "search_manual".
-När du kallar "search_manual": skicka alltid { query: EXAKT senaste användarens transkript }, inte tom sträng och inte parafras.
-När "search_manual" returnerar "strict_answer": LÄS UPP DET ORDAGRANT (max 2 meningar), utan egna tillägg.
-Om "strict_answer" saknas: Säg att du inte kan verifiera i manualen och be om precisering (delområde, felkod, maskin).
-Hälsning/småprat kan besvaras utan verktyg.
+Du är Coach Assistant för Linje 65. Svara kort, tydligt och på svenska.
+Använd punktlistor för arbetssteg. Om manualtäckning saknas: säg att det är osäkert
+och be om förtydligande. Förebygg faror och slöseri.
+
+För frågor om Linje 65, manualer, procedurer eller tekniska detaljer:
+Använd alltid verktyget "search_manual" för att hämta relevant information från manualen
+innan du svarar, oavsett om frågan kommer via text eller audio.
+VÄNTA på ett final transkript innan du kallar verktyget.
+Basa ditt svar enbart på resultat från verktyget – hitta inte på information.
+Du får INTE ge något svar förrän du har fått tool_result från 'search_manual' för aktuell fråga,
+om inte frågan uppenbart är hälsning/småprat.
+Hälsningar och småprat (t.ex. "hej", "godmorgon") ska besvaras direkt utan verktyg, naturligt och vänligt, utan att söka i manualen.
+Använd verktyget ENDAST om frågan rör Linje 65-specifika ämnen som drift, felsökning, procedurer eller manualdetaljer.
 `.trim(),
               tools:[
                 { type:'function', name:'search_manual',
-                  description:`Sök i Linje65-manualdatabasen och returnera träffar med källor. OUTPUT (JSON): { ok, strict_answer?, best_sentence?, numeric?, fallback?, top_score?, sources:[{title?,idx?,score?}] }`,
+                  description:`Sök i Linje65-manualdatabasen efter relevant information. Använd detta för alla frågor som rör manualer, procedurer eller tekniska detaljer.`,
                   parameters:{ type:'object', properties:{
-                    query:{type:'string',description:'Senaste transkriptet från användaren'},
-                    k:{type:'integer',default:5}, minSim:{type:'number',default:0.55}
+                    query:{type:'string',description:'Sökfrågan på svenska, baserat på användarens fråga.'},
+                    k:{type:'integer',description:'Antal resultat att hämta (default 5).',default:5},
+                    minSim:{type:'number',description:'Minsta likhetspoäng (default 0.45).',default:0.45}
                   }, required:['query'] }
                 },
                 { type:'function', name:'save_memory',
@@ -289,11 +295,7 @@ Hälsning/småprat kan besvaras utan verktyg.
             // Om ett tool väntar, kör det nu
             if (rt._pendingTool){ tryRunPending('final'); return; }
             // Fallback: trigga RAG om modellen inte gör tool-call själv
-            if (!rt._ragBusy && utext!==rt._lastQuery){
-              rt._ragBusy=true; rt._lastQuery=utext; rt.cancelAutos=true; clearTimeout(ragTimer);
-              ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
-              runToolSearchManual({tool_call_id:null,response_id:null,argsText:JSON.stringify({query:utext,k:5,minSim:0.55})}).finally(()=>{});
-            }
+            // Borttagen fallback för att undvika sökning på småprat
           }
         }
         // assistant → visa text
@@ -312,11 +314,7 @@ Hälsning/småprat kan besvaras utan verktyg.
         if (full){
           rt._lastUserText = full; rt._liveUserBuf = '';
           append(bubble(full,'user')); logMsg('user',full,'voice',msg);
-          if (!rt._ragBusy && full!==rt._lastQuery){
-            rt._ragBusy=true; rt._lastQuery=full; rt.cancelAutos=true; clearTimeout(ragTimer);
-            ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
-            runToolSearchManual({tool_call_id:null,response_id:null,argsText:JSON.stringify({query:full,k:5,minSim:0.55})}).finally(()=>{});
-          }
+          // Borttagen fallback för att undvika sökning på småprat
         }
         return;
       }
@@ -327,7 +325,7 @@ Hälsning/småprat kan besvaras utan verktyg.
         if (/(input_audio_buffer|input_text)\.transcript\.(started|start)$/.test(t)) rt._liveUserBuf="";
         if (/(input_audio_buffer|input_text)\.transcript\.delta$/.test(t)) {
           const chunk=msg.delta||msg.text||"";
-          if (chunk) rt._liveUserBuf = (rt._liveUserBuf||"")+chunk;
+          if (chunk) rt._liveUserBuf=(rt._liveUserBuf||"")+chunk;
           if (rt._pendingTool) tryRunPending('delta');
         }
       }catch{}
@@ -602,11 +600,7 @@ Hälsning/småprat kan besvaras utan verktyg.
       if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({type:'input_text', text}));
       if (text.split(/\s+/).length<2) return;
-      if(!rt._ragBusy && text!==rt._lastQuery){
-        rt._ragBusy=true; rt._lastQuery=text; rt.cancelAutos=true; clearTimeout(ragTimer);
-        ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
-        runToolSearchManual({tool_call_id:null,response_id:null,argsText:JSON.stringify({query:text,k:5,minSim:0.55})}).finally(()=>{});
-      }
+      // Borttagen automatisk RAG-trigg för att undvika sökning på småprat
     }
 
     // ===== Manual test UI =====
