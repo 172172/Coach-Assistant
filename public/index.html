@@ -102,7 +102,7 @@
     let ragTimer = null;
 
     // Linje 65 keywords for fallback trigger
-    const linjeKeywords = ['linje', 'manual', 'tapp', 'givare', 'sensor', 'ocme', 'felsök', 'format', 'karusell', 'ventil', 'carlsberg', 'personer', 'operatör'];
+    const linjeKeywords = ['linje', 'manual', 'tapp', 'givare', 'sensor', 'ocme', 'felsök', 'format', 'karusell', 'ventil', 'carlsberg', 'person', 'anställd', 'operatör', 'chef', 'namn', 'medarbetare'];
 
     // Check if query is Linje-related
     function isLinjeRelated(query) {
@@ -187,11 +187,10 @@ Du är Coach Assistant för Linje 65, som Jarvis från Iron Man – hjälpsam, k
 Var naturlig i samtal: Svara vänligt på hälsningar (t.ex. "Hej! Hur mår du idag?"), småprat, mattematik (t.ex. "5*7 är 35"), allmänna produktionsfrågor eller annat utan verktyg.
 För off-topic frågor (t.ex. "vem är Donald Trump") redirecta vänligt: "Jag är skapad för att hjälpa med Linje 65 och dagliga tasks – inte politik eller kändisar. Vad kan jag assistera med på linjen?"
 Använd punktlistor för arbetssteg. Förebygg faror och slöseri.
-Om någon frågar efter Gezim, Oscar, Jonas, Tobias eller Thomas så kollar du manualen om vem dom är. Det står under personal och chefer i manualen.
 Använd verktyget "search_manual" ENDAST för specifika frågor om Linje 65, manualer, procedurer, tekniska detaljer, personer på linjen eller Carlsberg – aldrig för småprat, math eller irrelevant.
 VÄNTA på ett final transkript innan du kallar verktyget.
-Basa ditt svar enbart på resultat från verktyget när det används – hitta inte på information. Om inget resultat från manualen: Säg "Jag har tyvärr inte lärt mig det ännu från manualen – kan du förtydliga eller fråga om något annat på linjen?"
-För personer: Om relaterat till Linje 65 (t.ex. omnämnda i manualen), använd verktyg och svara baserat på resultat; annars redirecta som off-topic.
+Basa ditt svar enbart på resultat från verktyget när det används – hitta inte på information. Om inget resultat från manualen: Säg "Jag har tyvärr inte lärt mig om den personen/ämnet ännu från manualen – är det relaterat till linjen? Kan du förtydliga?"
+För personer: Om relaterat till Linje 65 (t.ex. omnämnda i manualen som operatörer, chefer eller anställda), använd verktyg och svara baserat på resultat; annars redirecta som off-topic.
 Huvuduppgift: Undervisa operatörer i day-to-day tasks på Linje 65.
 Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är kvadratroten av 16" – "4! Något mer matte eller linje-fråga?" För "hur felsöker jag tapp" – använd verktyg. För "vem är operatör X på linjen" – använd verktyg om i manual. För "vem är Elon Musk" – redirecta.
 `.trim(),
@@ -539,7 +538,7 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
             strict=`Enligt manualen: ${bestSent}`;
           }
         } else {
-          strict = 'Jag har tyvärr inte lärt mig det ännu från manualen – kan du förtydliga eller fråga om något annat på linjen?';
+          strict = 'Jag har tyvärr inte lärt mig om den personen/ämnet ännu från manualen – är det relaterat till linjen? Kan du förtydliga?';
         }
 
         const sources=(data.snippets||[]).slice(0,5).map(s=>({title:s.title||'manual',idx:s.idx,score:s.score}));
