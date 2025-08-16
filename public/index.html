@@ -5,314 +5,209 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>🦾 Coach Assistant – Linje 65 (Realtime)</title>
   <style>
-    body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+    body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; }
     button { margin: 5px; }
-    textarea { width: 100%; height: 100px; }
-    #log { border: 1px solid #ccc; padding: 10px; height: 200px; overflow-y: auto; }
-    #status { color: green; }
+    #status { font-weight: bold; }
+    #memory { margin-top: 10px; }
+    #chat { border: 1px solid #ccc; padding: 10px; height: 200px; overflow-y: auto; }
+    #input { width: 100%; margin-top: 10px; }
   </style>
 </head>
 <body>
-
   <h1>🦾 Coach Assistant – Linje 65 (Realtime)</h1>
 
   <div>
-    <label for="operator">Operatör:</label>
-    <input type="text" id="operator" placeholder="Ange operatörsnamn">
+    <label>Operatör:</label>
+    <input type="text" id="operator" placeholder="Spara">
     <button id="save-operator">Spara</button>
   </div>
 
-  <button id="connect-btn">Anslut Realtime</button>
-  <button id="disconnect-btn" disabled>Lägg på</button>
+  <button id="connect">Anslut Realtime</button>
+  <button id="disconnect">Lägg på</button>
 
-  <div id="status">Inte ansluten</div>
-  <div>Minne: —</div>
+  <p id="status">Inte ansluten</p>
+  <p id="memory">Minne: —</p>
 
-  <textarea id="chat-input" placeholder="Skriv ditt meddelande här..."></textarea>
-  <button id="send-btn" disabled>Skicka</button>
+  <div id="chat"></div>
+
+  <textarea id="input" placeholder="Skriv meddelande..."></textarea>
+  <button id="send">Skicka</button>
 
   <button id="test-manual">Testa manual</button>
 
-  <div id="log"></div>
-
-  <footer>
-    <p>Realtime-röst med WebRTC. Manual/RAG via Supabase. Logg + minne i Supabase (conversations/messages/summary).</p>
-  </footer>
+  <footer>Realtime-röst med WebRTC. Manual/RAG via Supabase. Logg + minne i Supabase.</footer>
 
   <script>
-    // Komplett klientkod för att hantera realtime med tool calls
     let ws = null;
+    let mediaRecorder = null;
+    let stream = null;
     let token = null;
     let model = null;
-    let audioContext = null;
-    let mediaStream = null;
-    let mediaRecorder = null;
-    let audioQueue = [];
-    let isPlaying = false;
-    let currentArgs = {}; // För att samla function call arguments
-    let operatorName = localStorage.getItem('operator') || '';
+    const chatDiv = document.getElementById('chat');
+    const status = document.getElementById('status');
+    const memory = document.getElementById('memory');
+    const input = document.getElementById('input');
+    const connectBtn = document.getElementById('connect');
+    const disconnectBtn = document.getElementById('disconnect');
+    const sendBtn = document.getElementById('send');
+    const testBtn = document.getElementById('test-manual');
 
-    const operatorInput = document.getElementById('operator');
-    const saveOperatorBtn = document.getElementById('save-operator');
-    const connectBtn = document.getElementById('connect-btn');
-    const disconnectBtn = document.getElementById('disconnect-btn');
-    const statusDiv = document.getElementById('status');
-    const chatInput = document.getElementById('chat-input');
-    const sendBtn = document.getElementById('send-btn');
-    const testManualBtn = document.getElementById('test-manual');
-    const logDiv = document.getElementById('log');
-
-    operatorInput.value = operatorName;
-
-    function log(message) {
-      logDiv.innerHTML += `<p>${message}</p>`;
-      logDiv.scrollTop = logDiv.scrollHeight;
+    // Hämta token från server
+    async function getToken() {
+      const res = await fetch('/api/rt-token');
+      const data = await res.json();
+      if (data.error) {
+        console.error('Token error:', data.error);
+        status.textContent = 'Fel vid token-hämtning';
+        return null;
+      }
+      token = data.token;
+      model = data.model;
+      return token;
     }
 
-    saveOperatorBtn.addEventListener('click', () => {
-      operatorName = operatorInput.value.trim();
-      localStorage.setItem('operator', operatorName);
-      log(`Operatör sparad: ${operatorName}`);
-    });
+    // Anslut WebSocket
+    async function connectRealtime() {
+      if (!token) await getToken();
+      if (!token) return;
 
-    connectBtn.addEventListener('click', async () => {
-      try {
-        const res = await fetch('/api/rt-token');
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
-        token = data.token;
-        model = data.model;
-        connectWebSocket();
-      } catch (err) {
-        log(`Fel vid hämtning av token: ${err.message}`);
-      }
-    });
+      ws = new WebSocket(`wss://api.openai.com/v1/realtime?model=${model}`, ['openai-realtime', token]);
 
-    disconnectBtn.addEventListener('click', () => {
-      if (ws) ws.close();
-      if (mediaRecorder) mediaRecorder.stop();
-      if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
-      statusDiv.textContent = 'Inte ansluten';
-      connectBtn.disabled = false;
-      disconnectBtn.disabled = true;
-      sendBtn.disabled = true;
-    });
-
-    sendBtn.addEventListener('click', () => {
-      const text = chatInput.value.trim();
-      if (text && ws) {
-        ws.send(JSON.stringify({
-          type: 'conversation.item.create',
-          item: { type: 'message', role: 'user', content: [{ type: 'text', text }] }
-        }));
-        ws.send(JSON.stringify({ type: 'response.create' }));
-        chatInput.value = '';
-        log(`Du: ${text}`);
-      }
-    });
-
-    testManualBtn.addEventListener('click', async () => {
-      const query = prompt('Ange sökfråga för manualen:');
-      if (!query) return;
-      try {
-        const res = await fetch('/api/search-manual', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query, k: 5, minSim: 0 })
-        });
-        const data = await res.json();
-        log(`Manualsök: ${JSON.stringify(data.snippets, null, 2)}`);
-      } catch (err) {
-        log(`Fel vid manualsök: ${err.message}`);
-      }
-    });
-
-    async function connectWebSocket() {
-      ws = new WebSocket(`wss://api.openai.com/v1/realtime?model=${model}`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'OpenAI-Beta': 'realtime=v1'
-        }
-      });
-
-      ws.onopen = async () => {
-        statusDiv.textContent = 'Ansluten';
-        connectBtn.disabled = true;
-        disconnectBtn.disabled = false;
-        sendBtn.disabled = false;
-
-        // Uppdatera session om nödvändigt, men tools är redan i session
+      ws.onopen = () => {
+        status.textContent = 'Ansluten';
+        // Uppdatera session för turn_detection
         ws.send(JSON.stringify({
           type: 'session.update',
           session: {
-            turn_detection: { type: 'server_vad' },
-            input_audio_transcription: { model: 'whisper-1' }
+            turn_detection: { type: 'server_vad' }  // Bättre detektion av tal-slut
           }
         }));
-
-        // Starta mikrofon
-        try {
-          mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          audioContext = new (window.AudioContext || window.webkitAudioContext)();
-          const source = audioContext.createMediaStreamSource(mediaStream);
-          mediaRecorder = new MediaRecorder(mediaStream, { mimeType: 'audio/webm;codecs=opus' });
-          mediaRecorder.ondataavailable = event => {
-            if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({
-                type: 'input_audio_buffer.append',
-                audio: event.data // Behöver konvertera till base64 eller hantera binärt
-              }));
-              // Obs: Realtime API förväntar base64 audio i input_audio_buffer.append
-              // Konvertera blob till base64
-              const reader = new FileReader();
-              reader.readAsDataURL(event.data);
-              reader.onload = () => {
-                const base64 = reader.result.split(',')[1];
-                ws.send(JSON.stringify({
-                  type: 'input_audio_buffer.append',
-                  audio: base64
-                }));
-              };
-            }
-          };
-          mediaRecorder.start(100); // Skicka audio var 100ms
-        } catch (err) {
-          log(`Mikrofonfel: ${err.message}`);
-        }
+        startAudio();
       };
 
       ws.onmessage = async (event) => {
         const data = JSON.parse(event.data);
-        console.log(data); // För debugging
+        console.log('WS message:', data);
 
-        switch (data.type) {
-          case 'response.audio.delta':
-            // Hantera audio output
-            const audioDelta = atob(data.delta); // Base64 till binary
-            audioQueue.push(new Uint8Array(audioDelta.split('').map(c => c.charCodeAt(0))));
-            if (!isPlaying) playAudioQueue();
-            break;
-
-          case 'input_audio_buffer.speech_started':
-            // Stoppa audio output vid interrupt
-            audioQueue = [];
-            if (audioContext) audioContext.suspend();
-            break;
-
-          case 'conversation.item.created':
-            if (data.item.type === 'message' && data.item.role === 'assistant') {
-              log(`Assistant: ${data.item.content[0].text}`);
+        if (data.type === 'response.audio.delta' || data.type === 'response.audio') {
+          // Spela upp audio-svar (base64 till blob)
+          const audioData = data.delta || data.audio;
+          const audioBlob = new Blob([Uint8Array.from(atob(audioData), c => c.charCodeAt(0))], { type: 'audio/wav' });
+          const audio = new Audio(URL.createObjectURL(audioBlob));
+          audio.play();
+          addToChat('Assistant (röst): Svar spelas upp...');
+        } else if (data.type === 'response.text.delta' || data.type === 'response.text') {
+          addToChat(`Assistant (text): ${data.delta || data.text}`);
+        } else if (data.type === 'response.function_call') {
+          // Hantera tool call!
+          const toolName = data.name;
+          if (toolName === 'search_manual') {
+            const args = JSON.parse(data.arguments);  // { query: '...', k: 5, minSim: 0.45 }
+            console.log('Tool call args:', args);
+            status.textContent = 'Söker i manualen...';
+            try {
+              const response = await fetch('/api/search-manual', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(args)
+              });
+              const result = await response.json();
+              console.log('Tool result:', result);
+              // Skicka tillbaka till session
+              ws.send(JSON.stringify({
+                type: 'session.tool_result',
+                tool_call_id: data.id,
+                result: JSON.stringify(result)  // Hela resultatet, inklusive snippets
+              }));
+              addToChat('Manual-sök: Hittade ' + result.count + ' resultat.');
+            } catch (err) {
+              console.error('Tool error:', err);
+              ws.send(JSON.stringify({
+                type: 'session.tool_result',
+                tool_call_id: data.id,
+                result: JSON.stringify({ error: err.message })
+              }));
             }
-            break;
-
-          case 'response.function_call_arguments.delta':
-            // Samla arguments delta
-            const delta = data.delta;
-            for (const [key, value] of Object.entries(delta)) {
-              if (!currentArgs[data.call_id]) currentArgs[data.call_id] = {};
-              if (!currentArgs[data.call_id][key]) currentArgs[data.call_id][key] = '';
-              currentArgs[data.call_id][key] += value;
-            }
-            break;
-
-          case 'response.output_item.done':
-            if (data.item.type === 'function_call') {
-              const callId = data.item.call_id;
-              const name = data.item.name;
-              let args;
-              try {
-                args = JSON.parse(currentArgs[callId] || '{}');
-              } catch {
-                args = {};
-              }
-              if (name === 'search_manual') {
-                // Exekvera tool
-                try {
-                  const res = await fetch('/api/search-manual', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      query: args.query || '',
-                      k: args.k || 5,
-                      minSim: args.minSim || 0
-                    })
-                  });
-                  const result = await res.json();
-                  // Skicka tillbaka output
-                  ws.send(JSON.stringify({
-                    type: 'conversation.item.create',
-                    item: {
-                      type: 'function_call_output',
-                      call_id: callId,
-                      output: JSON.stringify(result)
-                    }
-                  }));
-                  // Generera response
-                  ws.send(JSON.stringify({ type: 'response.create' }));
-                } catch (err) {
-                  log(`Tool fel: ${err.message}`);
-                  // Skicka error output
-                  ws.send(JSON.stringify({
-                    type: 'conversation.item.create',
-                    item: {
-                      type: 'function_call_output',
-                      call_id: callId,
-                      output: JSON.stringify({ ok: false, error: err.message })
-                    }
-                  }));
-                  ws.send(JSON.stringify({ type: 'response.create' }));
-                }
-              }
-              // Rensa currentArgs
-              delete currentArgs[callId];
-            }
-            break;
-
-          // Hantera andra events vid behov, t.ex. transcription för logg
-          case 'input_audio_buffer.transcription.delta':
-            log(`Transkription delta: ${data.delta}`);
-            break;
-
-          default:
-            // Andra events
-            break;
+          }
+        } else if (data.type === 'error') {
+          console.error('WS error:', data.error);
+          status.textContent = 'Fel: ' + data.error.message;
         }
       };
 
       ws.onclose = () => {
-        statusDiv.textContent = 'Frånkopplad';
-        connectBtn.disabled = false;
-        disconnectBtn.disabled = true;
-        sendBtn.disabled = true;
-      };
-
-      ws.onerror = (err) => {
-        log(`WebSocket fel: ${err.message}`);
+        status.textContent = 'Frånkopplad';
+        stopAudio();
       };
     }
 
-    async function playAudioQueue() {
-      if (audioQueue.length === 0) {
-        isPlaying = false;
-        return;
-      }
-      isPlaying = true;
-      const buffer = audioQueue.shift();
+    // Starta audio-inspelning
+    async function startAudio() {
       try {
-        const audioBuffer = await audioContext.decodeAudioData(buffer.buffer);
-        const source = audioContext.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioContext.destination);
-        source.start();
-        source.onended = playAudioQueue;
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        mediaRecorder.ondataavailable = (e) => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(e.data);  // Skicka audio-chunks direkt
+          }
+        };
+        mediaRecorder.start(250);  // Skicka var 250ms
+        status.textContent = 'Lyssnar...';
       } catch (err) {
-        log(`Audio playback fel: ${err.message}`);
-        playAudioQueue();
+        console.error('Audio error:', err);
+        status.textContent = 'Kan inte starta audio';
       }
     }
 
-    // Todo: Hantera minne från Supabase osv, men inte specificerat i problemet
-  </script>
+    // Stoppa audio
+    function stopAudio() {
+      if (mediaRecorder) mediaRecorder.stop();
+      if (stream) stream.getTracks().forEach(track => track.stop());
+    }
 
+    // Lägg till meddelande i chat
+    function addToChat(msg) {
+      const p = document.createElement('p');
+      p.textContent = msg;
+      chatDiv.appendChild(p);
+      chatDiv.scrollTop = chatDiv.scrollHeight;
+    }
+
+    // Event listeners
+    connectBtn.addEventListener('click', connectRealtime);
+    disconnectBtn.addEventListener('click', () => {
+      if (ws) ws.close();
+    });
+    sendBtn.addEventListener('click', () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'input.text',
+          text: input.value
+        }));
+        addToChat('Du (text): ' + input.value);
+        input.value = '';
+      }
+    });
+    testBtn.addEventListener('click', async () => {
+      // Testa manual-sök manuellt
+      const query = prompt('Ange sökfråga för manual:');
+      if (query) {
+        const res = await fetch('/api/search-manual', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query, k: 5, minSim: 0.45 })
+        });
+        const data = await res.json();
+        addToChat('Manual-test: ' + JSON.stringify(data, null, 2));
+      }
+    });
+
+    // Spara operator (exempel, anpassa till Supabase)
+    document.getElementById('save-operator').addEventListener('click', () => {
+      const op = document.getElementById('operator').value;
+      console.log('Sparar operator:', op);
+      // TODO: Skicka till Supabase
+    });
+  </script>
 </body>
 </html>
