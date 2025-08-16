@@ -310,32 +310,51 @@ function handleRealtimeMessage(msg){
   console.log('Mottaget event:', msg.type, msg);
 
   if(msg.type==='response.function_call_arguments.delta'){
-    const id=msg.id||msg.tool_call_id||msg.response_id||'unknown';
-    const prev=toolCalls.get(id)||{name:msg.name,argsText:''};
-    prev.argsText+=(msg.delta||msg.arguments_delta||'');
-    prev.name=prev.name||msg.name;
-    if(msg.response_id) prev.response_id=msg.response_id;
-    toolCalls.set(id,prev);
+    // FIX: använd item_id som nyckel (call_id)
+    const callId = msg.item_id || msg.call_id || msg.id;
+    if(!callId){
+      console.warn('Saknar item_id på function_call_arguments.delta', msg);
+      return;
+    }
+    const prev = toolCalls.get(callId) || { name: msg.name, argsText:'', tool_call_id:callId };
+    prev.argsText += (msg.delta || msg.arguments_delta || '');
+    if(msg.name) prev.name = msg.name;
+    if(msg.response_id) prev.response_id = msg.response_id;
+    toolCalls.set(callId, prev);
     return;
   }
 
   if(msg.type==='response.function_call_arguments.done'){
-    const id=msg.id||msg.tool_call_id||'unknown';
-    const tc=toolCalls.get(id)||{name:msg.name,argsText:''};
-    if(msg.response_id){ tc.response_id=msg.response_id; toolCalls.set(id,tc); }
+    const callId = msg.item_id || msg.call_id || msg.id;
+    if(!callId){
+      console.warn('Saknar item_id på function_call_arguments.done', msg);
+      return;
+    }
+    const tc = toolCalls.get(callId) || { name: msg.name, argsText:'', tool_call_id:callId };
+    tc.tool_call_id = callId;
+    if(msg.response_id){ tc.response_id = msg.response_id; }
+    toolCalls.set(callId, tc);
+
     let args={}; try{ args=JSON.parse(tc.argsText||'{}'); }catch{}
-    if(tc.name){ append(pill(`TOOL CALL → ${tc.name} q="${(args.query||'').slice(0,32)}${(args.query||'').length>32?'…':''}"`)); }
+    if(tc.name){
+      append(pill(`TOOL CALL → ${tc.name} (${callId.slice(0,8)}) q="${(args.query||'').slice(0,32)}${(args.query||'').length>32?'…':''}"`));
+    }
+
     if(tc.name==='search_manual'){
-      const qNow=resolveQueryFromState(args);
-      if(!qNow){ parkPendingTool({id,argsText:tc.argsText,response_id:tc.response_id}); return; }
+      const qNow = resolveQueryFromState(args);
+      if(!qNow){
+        parkPendingTool({ id:callId, argsText:tc.argsText, response_id:tc.response_id });
+        return;
+      }
       if(rt._ragBusy || tc.launched) return;
-      tc.launched=true; toolCalls.set(id,tc);
-      startRagTool(id, tc.response_id);
-      const patchedArgs=JSON.stringify({...args, query:qNow});
-      runToolSearchManual({tool_call_id:id,response_id:tc.response_id,argsText:patchedArgs});
+      tc.launched = true;
+      toolCalls.set(callId, tc);
+      startRagTool(callId, tc.response_id);
+      const patchedArgs = JSON.stringify({ ...args, query:qNow });
+      runToolSearchManual({ tool_call_id:callId, response_id:tc.response_id, argsText:patchedArgs });
     } else if(tc.name==='save_memory'){
       if(tc.launched) return;
-      tc.launched=true; toolCalls.set(id,tc);
+      tc.launched = true; toolCalls.set(callId, tc);
       runToolSaveMemory(tc);
     }
     return;
@@ -443,24 +462,25 @@ async function runToolSearchManual(tc){
     if(tc.tool_call_id){
       rt.dc?.send(JSON.stringify({
         type:'conversation.item.create',
-        item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify({ok:false,error:'missing_query',need_user:true}) }
+        item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify({ ok:false, error:'missing_query', need_user:true }) }
       }));
-      rt.skipCancelForNextCreate=true;
+      rt.skipCancelForNextCreate = true;
       rt.dc?.send(JSON.stringify({ type:'response.create' }));
       append(pill('⚠️ search_manual: tom query'));
     } else {
       speakVerbatim('Jag uppfattade inte frågan. Kan du upprepa?');
     }
-    rt._ragBusy=false; clearTimeout(ragTimer); return;
+    rt._ragBusy = false; clearTimeout(ragTimer); return;
   }
 
-  const body={ query:q, k, topK:k, minSim:args.minSim ?? 0.55 };
+  const body = { query:q, k, topK:k, minSim:args.minSim ?? 0.55 };
 
   try{
     const data = await fetchJSON('/api/search-manual',{
-      method:'POST',headers:{'Content-Type':'application/json'},
+      method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify(body)
     });
+
     append(pill(`RAG: count=${data.count||0}${data.fallback?' (fallback)':''} • top1=${(data.snippets?.[0]?.score??0).toFixed(2)} • q="${q.slice(0,32)}${q.length>32?'…':''}"`));
 
     let strict='', bestSentence='';
@@ -470,7 +490,7 @@ async function runToolSearchManual(tc){
     }
     const sources=(data.snippets||[]).slice(0,5).map(s=>({title:s.title||'manual',idx:s.idx,score:s.score}));
 
-    const out={
+    const out = {
       ok:true,
       strict_answer: strict || undefined,
       best_sentence: bestSentence || undefined,
@@ -480,13 +500,18 @@ async function runToolSearchManual(tc){
     };
 
     if(tc.tool_call_id){
-      rt.dc?.send(JSON.stringify({
-        type:'conversation.item.create',
-        item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify(out) }
-      }));
-      rt.skipCancelForNextCreate=true;
-      rt.dc?.send(JSON.stringify({ type:'response.create' }));
-      append(pill('📤 Skickade tool-output'));
+      // Säkerställ att call_id inte är 'unknown'
+      if(tc.tool_call_id === 'unknown'){
+        append(errorBubble('Saknar giltigt call_id – svar skickas ej.'));
+      } else {
+        rt.dc?.send(JSON.stringify({
+          type:'conversation.item.create',
+          item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify(out) }
+        }));
+        rt.skipCancelForNextCreate = true;
+        rt.dc?.send(JSON.stringify({ type:'response.create' }));
+        append(pill('📤 Skickade tool-output'));
+      }
     } else {
       if(out.strict_answer){
         const s0=sources[0]||{};
@@ -497,15 +522,15 @@ async function runToolSearchManual(tc){
     }
   }catch(err){
     append(errorBubble('Manual-sök fel: '+(err.message||err)));
-    if(!tc.tool_call_id){
-      speakVerbatim('Kunde inte nå manualen just nu. Försök igen snart.');
-    } else {
+    if(tc.tool_call_id){
       rt.dc?.send(JSON.stringify({
         type:'conversation.item.create',
         item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify({ ok:false, error:'search_manual failed' }) }
       }));
       rt.skipCancelForNextCreate=true;
       rt.dc?.send(JSON.stringify({ type:'response.create' }));
+    } else {
+      speakVerbatim('Kunde inte nå manualen just nu.');
     }
   }finally{
     rt._ragBusy=false; clearTimeout(ragTimer);
