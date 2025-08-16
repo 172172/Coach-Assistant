@@ -145,9 +145,10 @@ async function connectRealtime(){
       const instructions = `
 Du är Coach Assistant för Linje 65.
 Svara kort på svenska. Punktlistor.
-VÄNTA på final transkript innan search_manual.
-Kalla search_manual med exakt transkript.
-Om strict_answer: läs upp ordagrant (max 2 meningar). Annars be om precisering.
+Du MÅSTE alltid använda search_manual för alla frågor om Linje 65.
+VIKTIGT: Vänta på final transkript, sedan kalla search_manual med transkriptet.
+Svara bara baserat på search_manual-resultat, inte din allmänna kunskap.
+Om strict_answer finns: läs upp ordagrant (max 2 meningar). Annars be om precisering.
 `.trim();
       const tools = [
         {
@@ -307,9 +308,15 @@ function scheduleFallbackManual(txt){
 
 function parseArgsSafe(s){ try{return JSON.parse(s||'{}');}catch{return{};} }
 
+// Lägg till en debuggare för att visa alla verktygsanrop
 function handleRealtimeMessage(msg){
   console.log('Mottaget event:', msg.type, msg);
 
+  // Lägg till denna loggning för att hitta verktygsanrop
+  if(msg.type?.includes('function_call')){
+    console.log('FUNCTION CALL EVENT:', msg);
+  }
+  
   if(msg.type==='response.function_call_arguments.delta'){
     // FIX: använd item_id som nyckel (call_id)
     const callId = msg.item_id || msg.call_id || msg.id;
@@ -460,11 +467,13 @@ function triggerManualSearch(q){
   if(!q) return;
   if(rt._ragBusy) return;
   if(rt._lastManualFor === q) return;
+  
+  console.log('MANUAL SEARCH TRIGGERED:', q);
   rt._ragBusy = true;
   rt._lastQuery = q;
   rt._lastManualFor = q;
   rt.cancelAutos = true;
-  runToolSearchManual({ tool_call_id:null, response_id:null, argsText:JSON.stringify({ query:q, k:5, minSim:0.55 }) });
+  runToolSearchManual({ tool_call_id:null, response_id:null, argsText:JSON.stringify({ query:q, k:5, minSim:0.45 }) });
 }
 
 async function runToolSearchManual(tc){
