@@ -121,7 +121,15 @@ async function connectRealtime(){
     rt.pc.addTransceiver('audio',{direction:'recvonly'});
     rt.mic.getTracks().forEach(t=>rt.pc.addTrack(t,rt.mic));
     rt.remoteAudio=new Audio(); rt.remoteAudio.autoplay=true; rt.remoteAudio.playsInline=true;
-
+    
+    // Koppla remote audio stream till audio-elementet
+    rt.pc.ontrack = function(event) {
+      if(event.track.kind === 'audio') {
+        rt.remoteAudio.srcObject = event.streams[0];
+        rt.remoteAudio.play().catch(()=>{});
+      }
+    };
+    
     rt.dc = rt.pc.createDataChannel('oai-events');
 
     rt.dc.onopen = () => {
