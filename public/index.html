@@ -161,7 +161,7 @@
         // Nedströms ljud (modellens TTS)
         rt.pc.addTransceiver('audio', { direction:'recvonly' });
 
-        // From/to/mentions: from:user, to:user, @user, list:id or list:slug.
+        // Skicka mikrofon uppströms
         rt.mic.getTracks().forEach(t=>rt.pc.addTrack(t,rt.mic));
 
         rt.remoteAudio=new Audio();
@@ -387,7 +387,7 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
           rt._ragBusy=true; rt._lastToolCallId=id; clearTimeout(ragTimer);
           ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
           const patchedArgs=JSON.stringify({...args, query:qNow});
-          return runToolSearchManual({tool_call_id:id,response_id:tc.response_id,argsText:patchedArgs}).finally(()=>{});
+          return runToolSearchManual({tool_call_id:id,response_id:tc.response_id,argsText:patchedArgs}).finally(()=>{ rt.cancelAutos = false; }); // Reset här
         }
 
         if (tc.name==='save_memory'){
@@ -407,7 +407,7 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
         clearTimeout(ragTimer); return;
       }
 
-      // Slut/fel
+      // Slut/fel – reset cancelAutos här också
       if (msg.type==='response.completed' || msg.type==='response.error' || msg.type==='error'){
         rt._ragBusy=false; rt.cancelAutos=false; rt.skipCancelForNextCreate=false;
         if (msg.response_id) rt.allowedResponseIds.delete(msg.response_id);
@@ -569,7 +569,8 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
           rt.dc?.send(JSON.stringify({ type:'response.create' }));
         }
       }finally{
-        rt._ragBusy=false; clearTimeout(ragTimer);
+        rt._ragBusy=false; rt.cancelAutos=false; // Reset här också
+        clearTimeout(ragTimer);
       }
     }
 
@@ -644,5 +645,5 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
       }catch(e){ append(errorBubble('Manual-sök fel: '+e.message)); }
     }
   </script>
-<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9703d489cb3ef3b6',t:'MTc1NTM3NzcwMS4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</body>
 </html>
