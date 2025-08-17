@@ -88,7 +88,7 @@ async function getMappings(){
   return { schema, chunksTable, textCol, embCol, idxCol, headingCol, docIdCol, join };
 }
 
-function buildSQL(map, filtered){
+function buildSQL(map, filtered, keywordWhere = ''){
   const sel = [];
   sel.push(map.join.exists ? (map.join.titleCol ? `d.${id(map.join.titleCol)} AS title` : `NULL AS title`) : `NULL AS title`);
   sel.push(map.docIdCol ? `c.${id(map.docIdCol)} AS doc_id` : `NULL AS doc_id`);
@@ -104,8 +104,8 @@ function buildSQL(map, filtered){
     : `FROM ${id(map.schema)}.${id(map.chunksTable)} c`;
 
   const where = filtered
-    ? `WHERE 1 - (c.${id(map.embCol)} <=> (SELECT emb FROM q)) >= $3`
-    : ``;
+    ? `WHERE 1 - (c.${id(map.embCol)} <=> (SELECT emb FROM q)) >= $3 ${keywordWhere ? 'AND ' + keywordWhere : ''}`
+    : (keywordWhere ? `WHERE ${keywordWhere}` : ``);
 
   return `
     WITH q AS (SELECT $1::vector AS emb)
@@ -133,8 +133,18 @@ export default async function handler(req,res){
 
     const map = await getMappings();
 
+    const isHybrid = process.env.HYBRID_ENABLED === 'true';
+    let keywordWhere = '';
+    if (isHybrid && body.personQ) { // Anta du skickar 'personQ: true' från frontend i body
+      const nameTokens = query.match(/\b([A-ZÅÄÖa-zåäö]+)\b/g) || []; // Extrahera möjliga namn
+      if (nameTokens.length) {
+        keywordWhere = nameTokens.map(t => `c.${id(map.textCol)} ILIKE '%${t}%'`).join(' OR ');
+        keywordWhere = `(${keywordWhere})`;
+      }
+    }
+
     // 1) Försök med filter
-    let sql = buildSQL(map, true);
+    let sql = buildSQL(map, true, keywordWhere);
     let rows;
     try{
       const r = await pool.query(sql, [vecLiteral, K, minScore]);
@@ -150,7 +160,7 @@ export default async function handler(req,res){
     if (rows.length === 0) {
       // 2) Fallback utan WHERE (visa topp-K oavsett score)
       fallback = true;
-      sql = buildSQL(map, false);
+      sql = buildSQL(map, false, keywordWhere);
       const r2 = await pool.query(sql, [vecLiteral, K]);
       rows = r2.rows || [];
     }
