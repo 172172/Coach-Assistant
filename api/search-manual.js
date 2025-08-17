@@ -1,13 +1,12 @@
-// /api/search-manual.js – komplett ersättning
-// Node/Next.js API-route för att söka i din manual med pgvector
-// Förbättringar: konsekvent cosine (<=>) för score & sortering, säkert rubrikfilter,
-// fallback utan minScore, samt robust kolumn-/join-upptäckt.
+// /api/search-manual.js – v2 (ren JavaScript, inga TypeScript-annotationer)
+// För Next.js/Vercel Node runtime. Sök i manual med pgvector (cosine).
+// Fixar troliga 500-fel: tog bort TS-typer, tydligare fel, robust rubrikfilter.
 
 import { Pool } from 'pg';
 
 // ---------- DB pool ----------
 const pool =
-  (globalThis as any).pgPool ??
+  global.pgPool ??
   new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.PGSSL === 'false' ? false : { rejectUnauthorized: false },
@@ -17,10 +16,10 @@ const pool =
     password: process.env.PGPASSWORD,
     database: process.env.PGDATABASE,
   });
-if (!(globalThis as any).pgPool) (globalThis as any).pgPool = pool;
+if (!global.pgPool) global.pgPool = pool;
 
 // ---------- Helpers ----------
-function readJsonBody(req: any) {
+function readJsonBody(req) {
   try {
     if (!req.body) return {};
     if (typeof req.body === 'string') return JSON.parse(req.body);
@@ -30,12 +29,11 @@ function readJsonBody(req: any) {
   }
 }
 
-function quoteIdent(id: string) {
-  // enkel identifier-quoting
+function quoteIdent(id) {
   return '"' + String(id).replace(/"/g, '""') + '"';
 }
 
-async function embedQuery(q: string) {
+async function embedQuery(q) {
   if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY saknas (env)');
   const model = process.env.EMBED_MODEL || 'text-embedding-3-small'; // 1536-dim
   const r = await fetch('https://api.openai.com/v1/embeddings', {
@@ -51,12 +49,12 @@ async function embedQuery(q: string) {
     throw new Error(`OpenAI embeddings misslyckades: ${r.status} ${r.statusText} – ${t.slice(0, 200)}`);
   }
   const j = await r.json();
-  const emb = j.data?.[0]?.embedding;
+  const emb = j.data && j.data[0] && j.data[0].embedding;
   if (!emb) throw new Error('Embedding saknas i OpenAI-svar');
-  return { embedding: emb as number[], model, dims: emb.length };
+  return { embedding: emb, model, dims: emb.length };
 }
 
-async function tableExists(schema: string, table: string) {
+async function tableExists(schema, table) {
   const { rows } = await pool.query(
     `SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2 LIMIT 1`,
     [schema, table]
@@ -64,12 +62,12 @@ async function tableExists(schema: string, table: string) {
   return rows.length > 0;
 }
 
-async function columns(schema: string, table: string) {
+async function columns(schema, table) {
   const { rows } = await pool.query(
     `SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2`,
     [schema, table]
   );
-  return rows.map((r: any) => r.column_name);
+  return rows.map((r) => r.column_name);
 }
 
 async function getMappings() {
@@ -78,8 +76,8 @@ async function getMappings() {
   const docsTable = process.env.MANUAL_DOCS_TABLE || 'manual_docs';
 
   const chunkCols = await columns(schema, chunksTable);
-  const pick = (envName: string, cands: string[]) => {
-    const v = (process.env as any)[envName];
+  const pick = (envName, cands) => {
+    const v = process.env[envName];
     if (v && chunkCols.includes(v)) return v;
     return cands.find((c) => chunkCols.includes(c));
   };
@@ -95,11 +93,11 @@ async function getMappings() {
   if (!embCol)
     throw new Error('Kunde inte hitta embedding-kolumn i manualtabellen (embedding/vector/emb/embedding_1536/embed). Sätt MANUAL_EMB_COL.');
 
-  let join: any = { exists: false };
+  let join = { exists: false };
   if (await tableExists(schema, docsTable)) {
     const docsCols = await columns(schema, docsTable);
-    const pickDocs = (envName: string, cands: string[]) => {
-      const v = (process.env as any)[envName];
+    const pickDocs = (envName, cands) => {
+      const v = process.env[envName];
       if (v && docsCols.includes(v)) return v;
       return cands.find((c) => docsCols.includes(c));
     };
@@ -115,11 +113,8 @@ async function getMappings() {
   return { schema, chunksTable, textCol, embCol, idxCol, headingCol, docIdCol, join };
 }
 
-function buildSQL(
-  map: any,
-  { filtered, heading, restrict }: { filtered: boolean; heading?: string | null; restrict?: boolean }
-) {
-  const sel: string[] = [];
+function buildSQL(map, { filtered, heading, restrict }) {
+  const sel = [];
   sel.push(map.join.exists ? (map.join.titleCol ? `d.${quoteIdent(map.join.titleCol)} AS title` : `NULL AS title`) : `NULL AS title`);
   sel.push(map.docIdCol ? `c.${quoteIdent(map.docIdCol)} AS doc_id` : `NULL AS doc_id`);
   sel.push(map.idxCol ? `c.${quoteIdent(map.idxCol)} AS idx` : `NULL AS idx`);
@@ -127,17 +122,15 @@ function buildSQL(
   sel.push(`c.${quoteIdent(map.textCol)} AS chunk`);
   sel.push(`1 - (c.${quoteIdent(map.embCol)} <=> (SELECT emb FROM q)) AS score`);
 
-  const fromJoin =
-    map.join.exists && map.docIdCol
-      ? `FROM ${quoteIdent(map.schema)}.${quoteIdent(map.chunksTable)} c
+  const fromJoin = map.join.exists && map.docIdCol
+    ? `FROM ${quoteIdent(map.schema)}.${quoteIdent(map.chunksTable)} c
        LEFT JOIN ${quoteIdent(map.join.schema)}.${quoteIdent(map.join.table)} d
          ON d.${quoteIdent(map.join.idCol)} = c.${quoteIdent(map.docIdCol)}`
-      : `FROM ${quoteIdent(map.schema)}.${quoteIdent(map.chunksTable)} c`;
+    : `FROM ${quoteIdent(map.schema)}.${quoteIdent(map.chunksTable)} c`;
 
-  const where: string[] = [];
+  const where = [];
   if (filtered) where.push(`1 - (c.${quoteIdent(map.embCol)} <=> (SELECT emb FROM q)) >= $3`);
 
-  // Rubrikfilter: matcha heading-kolumn eller dokumentets title
   if (heading && restrict) {
     const headCol = map.headingCol ? `c.${quoteIdent(map.headingCol)}` : `NULL`;
     const titleCol = map.join.exists && map.join.titleCol ? `d.${quoteIdent(map.join.titleCol)}` : `NULL`;
@@ -156,7 +149,7 @@ function buildSQL(
 }
 
 // ---------- Handler ----------
-export default async function handler(req: any, res: any) {
+export default async function handler(req, res) {
   res.setHeader('Content-Type', 'application/json');
   if (req.method !== 'POST')
     return res.status(405).end(JSON.stringify({ ok: false, error: 'Method not allowed' }));
@@ -165,39 +158,37 @@ export default async function handler(req: any, res: any) {
     const body = readJsonBody(req);
     const q = (body.query || '').trim();
     const K = Math.min(Math.max(parseInt(body.k || body.topK || 5, 10) || 5, 1), 20);
-    const minScore = typeof body.minSim === 'number' ? body.minSim : 0.4; // baströskel
+    const minScore = typeof body.minSim === 'number' ? body.minSim : 0.4;
     const heading = body.heading ? String(body.heading).trim() : null;
     const restrict = !!body.restrictToHeading;
 
     if (!q) return res.status(400).end(JSON.stringify({ ok: false, error: 'Tom query' }));
 
     const { embedding, dims } = await embedQuery(q);
-    // pgvector måste matcha dim (1536 om text-embedding-3-small)
     const vecLiteral = '[' + embedding.map((x) => Number(x).toFixed(6)).join(',') + ']';
 
     const map = await getMappings();
 
-    // Primär query – med minScore
     let sql = buildSQL(map, { filtered: true, heading, restrict });
-    let params: any[] = [vecLiteral, K, minScore];
+    let params = [vecLiteral, K, minScore];
     if (heading && restrict) params.push(`%${heading}%`);
 
-    let rows: any[] = [];
+    let rows = [];
     try {
       const r = await pool.query(sql, params);
       rows = r.rows || [];
-    } catch (dbErr: any) {
-      // vanliga pitfalls
-      if (/does not exist/.test(dbErr.message))
-        throw new Error('Tabell/kolumn saknas – kontrollera MANUAL_* env variabler och pgvector-installation.');
-      if (/column .* is of type .* but expression is of type/.test(dbErr.message))
+    } catch (dbErr) {
+      if (/does not exist/i.test(dbErr.message))
+        throw new Error('Tabell/kolumn eller typ saknas – kontrollera MANUAL_* env och pgvector-installation.');
+      if (/type vector/i.test(dbErr.message))
+        throw new Error('pgvector saknas – kör CREATE EXTENSION vector; och säkerställ vector(1536).');
+      if (/is of type .* but expression is of type/i.test(dbErr.message))
         throw new Error('Kolumntyp felaktig – säkerställ att embedding-kolumnen är vector(1536).');
       throw dbErr;
     }
 
     let usedFallback = false;
     if (!rows.length) {
-      // Fallback – utan minScore men med ev. rubrikfilter
       usedFallback = true;
       sql = buildSQL(map, { filtered: false, heading, restrict });
       params = [vecLiteral, K];
@@ -206,30 +197,26 @@ export default async function handler(req: any, res: any) {
       rows = r2.rows || [];
     }
 
-    return res.status(200).end(
-      JSON.stringify({
-        ok: true,
-        query: q,
-        k: K,
-        dims,
-        heading: heading || null,
-        restricted: restrict,
-        fallback: usedFallback,
-        snippets: rows.map((r: any) => ({
-          doc_id: r.doc_id ?? null,
-          title: r.title ?? null,
-          idx: r.idx ?? null,
-          heading: r.heading ?? null,
-          score: Number((r.score ?? 0).toFixed(4)),
-          text: r.chunk,
-        })),
-      })
-    );
-  } catch (err: any) {
+    return res.status(200).end(JSON.stringify({
+      ok: true,
+      query: q,
+      k: K,
+      dims,
+      heading: heading || null,
+      restricted: restrict,
+      fallback: usedFallback,
+      snippets: rows.map((r) => ({
+        doc_id: r.doc_id ?? null,
+        title: r.title ?? null,
+        idx: r.idx ?? null,
+        heading: r.heading ?? null,
+        score: Number((r.score ?? 0).toFixed(4)),
+        text: r.chunk,
+      })),
+    }));
+  } catch (err) {
     console.error('search-manual 500', err);
-    res.status(500).end(
-      JSON.stringify({ ok: false, error: err?.message || String(err) })
-    );
+    res.status(500).end(JSON.stringify({ ok: false, error: err && err.message ? err.message : String(err) }));
   }
 }
 
