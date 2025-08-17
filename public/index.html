@@ -809,6 +809,186 @@ För övrigt: Använd verktyget "search_manual". Sammanfatta coachigt och naturl
         clearTimeout(ragTimer); return;
       }
     }
+    <script>
+// ===== Procedure Runner (Sortbyte / generiskt) =====
+const runner = {
+  active: false,
+  slug: null,
+  steps: [],
+  idx: 0,
+  vars: {},
+  awaiting: null
+};
+
+async function startProcedure(slug){
+  try{
+    const { procedure } = await fetchJSON('/api/procedure-get', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ slug })
+    });
+    runner.active = true;
+    runner.slug = slug;
+    runner.vars = {};
+    runner.idx = 0;
+    runner.awaiting = null;
+    runner.steps = (procedure.recipe?.steps) || [];
+    const intro = procedure.recipe?.intro || `Startar procedur: ${procedure.title}`;
+    if (typeof speakGrounded === 'function') {
+      speakGrounded({ query: intro, facts:[intro], askFollowup:false });
+    } else {
+      speakVerbatim(intro);
+    }
+    append(bubble('▶ '+procedure.title,'assistant'));
+    runNextStep();
+  }catch(e){
+    append(errorBubble('Kunde inte starta proceduren: '+(e?.message||e)));
+  }
+}
+
+function runNextStep(){
+  if (!runner.active) return;
+  if (runner.idx >= runner.steps.length){
+    const done = 'Proceduren är klar.';
+    if (typeof speakGrounded === 'function') speakGrounded({ query: done, facts:[done], askFollowup:false });
+    else speakVerbatim(done);
+    append(bubble('✅ Proceduren är klar.','assistant'));
+    runner.active = false; return;
+  }
+  const st = runner.steps[runner.idx];
+  switch (st.type){
+    case 'say': {
+      sayCoach(st.text);
+      runner.idx++; break;
+    }
+    case 'await_confirm': {
+      runner.awaiting = { kind:'confirm', ok_words: st.ok_words || ['klar','nästa','redo'] };
+      append(pill('Väntar på bekräftelse: '+runner.awaiting.ok_words.join('/')));
+      runner.idx++; break;
+    }
+    case 'ask_number': {
+      runner.awaiting = { kind:'number', var: st.var, prompt: st.prompt };
+      sayCoach(st.prompt);
+      append(bubble('🧮 '+st.prompt,'assistant'));
+      runner.idx++; break;
+    }
+    case 'ask_choice': {
+      runner.awaiting = { kind:'choice', var: st.var, prompt: st.prompt, choices: st.choices||[] };
+      sayCoach(st.prompt);
+      append(bubble('❓ '+st.prompt,'assistant'));
+      runner.idx++; break;
+    }
+    case 'calc': {
+      try{
+        const ctx = { ...runner.vars, floor: Math.floor };
+        for (const a of (st.assign||[])){
+          const v = safeEvalExpr(a.expr, ctx);
+          runner.vars[a.name] = v;
+          ctx[a.name] = v;
+        }
+      }catch(e){
+        append(errorBubble('Beräkningsfel: '+(e?.message||e)));
+      }
+      runner.idx++; break;
+    }
+    case 'say_vars': {
+      const msg = (st.template||'').replace(/~([a-z0-9_]+)~/gi, (_,k)=> String(runner.vars[k] ?? '?'));
+      sayCoach(msg);
+      runner.idx++; break;
+    }
+    default: {
+      runner.idx++; break;
+    }
+  }
+  if (!runner.awaiting && runner.active) runNextStep();
+}
+
+function sayCoach(text){
+  if (!text) return;
+  if (typeof speakGrounded === 'function') speakGrounded({ query: text, facts:[text], askFollowup:false });
+  else speakVerbatim(text);
+  append(bubble(text,'assistant'));
+}
+
+// SÄKER evaluator (stöd för + - * / ( ) floor och ?:), variabler ur ctx
+function safeEvalExpr(expr, ctx){
+  const illegal = /[^0-9a-zA-Z_+\-*/().?:\s]/;  // tillåt ?: för villkor
+  if (illegal.test(expr)) throw new Error('Otillåtna tecken i uttryck: '+expr);
+  const replaced = String(expr).replace(/[a-zA-Z_][a-zA-Z0-9_]*/g, (m)=>{
+    if (m==='floor') return 'Math.floor';
+    if (!(m in ctx)) throw new Error('Okänd variabel: '+m);
+    return String(ctx[m]);
+  });
+  // eslint-disable-next-line no-new-func
+  return Function('"use strict"; return ('+replaced+');')();
+}
+
+// Tolkning av användarens yttrande (text/ASR)
+function handleUserUtterance(raw){
+  const u = (raw||'').toLowerCase().trim();
+  // Trigga proceduren
+  if (!runner.active && /starta\s+sortbyte.*öl.*öl/.test(u)) { startProcedure('sortbyte-ol-ol'); return true; }
+
+  if (!runner.active) return false;
+  if (u==='avsluta' || u==='stoppa'){ runner.active=false; append(pill('🛑 Procedur stoppad')); return true; }
+
+  if (runner.awaiting){
+    const a = runner.awaiting;
+
+    if (a.kind==='confirm'){
+      const ok = (a.ok_words||[]).some(w => u.includes(w));
+      if (ok){ runner.awaiting=null; runNextStep(); return true; }
+      return true;
+    }
+
+    if (a.kind==='number'){
+      const m = u.match(/(\d+(?:[.,]\d+)?)/);
+      if (m){
+        const val = Number(m[1].replace(',','.'));
+        runner.vars[a.var] = val;
+        append(pill(`${a.var} = ${val}`));
+        runner.awaiting=null; runNextStep(); return true;
+      } else {
+        sayCoach(`Jag hörde inget tal. ${a.prompt}`);
+        return true;
+      }
+    }
+
+    if (a.kind==='choice'){
+      const hit = (a.choices||[]).find(c => {
+        const lbl = String(c.label||'').toLowerCase();
+        const aliases = (c.aliases||[]).map(x=>String(x).toLowerCase());
+        return u.includes(lbl) || aliases.some(x=>u.includes(x));
+      });
+      if (hit){
+        runner.vars[a.var] = hit.value;
+        append(pill(`${a.var} = ${hit.label||hit.value}`));
+        runner.awaiting=null; runNextStep(); return true;
+      } else {
+        sayCoach(`Jag uppfattade inte valet. ${a.prompt}`);
+        return true;
+      }
+    }
+  }
+
+  if (u==='nästa' || u==='klar' || u==='redo'){ runNextStep(); return true; }
+  if (u==='upprepa'){
+    const back = Math.max(0, runner.idx-1);
+    const st = runner.steps[back];
+    if (st?.type==='say' && st.text) sayCoach('(upprepar) '+st.text);
+    return true;
+  }
+  return false;
+}
+
+/* === KOPPLA IN (två rader) =========================================
+1) I din sendQuickText() – innan du skickar till modellen:
+   if (handleUserUtterance(t)) return;
+
+2) I din röstloop (handleRealtimeMessage), när du fångar utext:
+   if (handleUserUtterance(utext)) return;
+===================================================================== */
+</script>
+
   </script>
 </body>
 </html>
