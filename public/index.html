@@ -205,14 +205,15 @@
       'oskar': 'oscar', 'osker': 'oscar', 'ozkar': 'oscar', 'åskar': 'oscar', 'osca': 'oscar',
       'thomas': 'thomas', 'tomas': 'thomas', 'tomaz': 'thomas',
       'gezim': 'gezim', 'gesim': 'gezim', 'jezim': 'gezim',
-      // Lägg till fler för andra namn som Tobias, Jonas etc.
+      'kan': 'kan', 'non': 'kan', 'fin': 'fint', 'line': 'linje', 'horr': 'hörru', 'herru': 'hörru' // Lägg till vanliga fel
+      // Utöka med fler från dina loggar
     };
     function correctNamesInQuery(q){
       const words = q.split(/\s+/);
       let changed=false;
       const out = words.map(w=>{
         const bare = LC(w.replace(/[^A-Za-zÅÄÖåäö\-]/g,''));
-        if (bare.length<3) return w;
+        if (bare.length<3 || !PERSON_INDEX.first.has(bare) && !PERSON_INDEX.last.has(bare) && !closestFirstName(bare)) return w; // Skippa om inte namnlika
         const misspelled = COMMON_MISSPELLS[bare];
         if (misspelled) { changed = true; return w.replace(bare, misspelled.charAt(0).toUpperCase() + misspelled.slice(1)); }
         const c = closestFirstName(bare);
@@ -221,6 +222,17 @@
       });
       if (changed) append(pill(`🎤 Namn-korrigering: "${q}" → "${out.join(' ')}"`));
       return out.join(' ');
+    }
+    // Post-process för svenska ASR-fel
+    function swedishPostProcess(text) {
+      // Enkel dict för vanliga ASR-fel (utöka baserat på dina loggar)
+      const fixes = {
+        'Non': 'kan',
+        'Line': 'linje',
+        'hörru': 'hörru', // Normalisera
+        'sortbyte': 'sortbyte' // Bevara domain-termer
+      };
+      return text.split(/\s+/).map(w => fixes[w] || w).join(' ');
     }
     // ===== mic viz =====
     let micAnalyser, micData;
@@ -260,7 +272,7 @@
       const status=t=>$('#rtStatus').textContent=t;
       try{
         rt.mic = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, noiseSuppression: true, echoCancellation: true, autoGainControl: false, sampleRate: 48000 }
+          audio: { channelCount: 1, noiseSuppression: false, echoCancellation: true, autoGainControl: false, sampleRate: 16000 }
         });
         setupMicViz(rt.mic);
         const memInit=await fetchJSON('/api/memory-init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:localStorage.getItem('operator_id')||'kevin'})});
@@ -280,7 +292,7 @@
             session:{
               voice:'verse',
               modalities:['audio','text'],
-              turn_detection:{ type:'server_vad', threshold: 0.6, silence_duration_ms: 550, prefix_padding_ms: 200 },
+              turn_detection:{ type:'server_vad', threshold: 0.5, silence_duration_ms: 700, prefix_padding_ms: 200 },
               input_audio_transcription: { model: "gpt-4o-transcribe", language: "sv" },
               tool_choice:'auto',
               instructions:`
@@ -451,6 +463,7 @@ Du är Coach Assistant för Linje 65. För ALLA frågor relaterade till personal
         if (full){
           console.log('Raw transkript:', full);
           full = correctNamesInQuery(full);
+          full = swedishPostProcess(full);
           console.log('Korrigerad query:', full);
           rt._lastUserText = full; rt._liveUserBuf = '';
           append(bubble(full,'user')); logMsg('user',full,'voice',msg);
@@ -598,10 +611,11 @@ Du är Coach Assistant för Linje 65. För ALLA frågor relaterade till personal
       const headingHint = personQ ? 'Personal' : null;
       const minSimBase = (typeof args.minSim==='number' ? args.minSim : (args.voice ? VOICE_MIN_SIM : TEXT_MIN_SIM));
       const minSim = personQ ? Math.min(minSimBase, args.voice ? 0.25 : PERSON_MIN_SIM) : minSimBase;
-      if (personQ && args.voice) {
-        q = `${q} personal roll chef kontakt ansvar organisation linje 65 ledning struktur`; // Matchar dina chunks
+      if (personQ && args.voice && q.split(/\s+/).length < 10) {
+        q = `${q} personal roll chef kontakt ansvar organisation linje 65 ledning struktur`;
         append(pill(`🎤 Röst-augment: "${q}"`));
       }
+      console.log('Query efter process:', q);
       const {hits, meta} = await manualSearchCascade({ query:q, k, minSim, headingHint });
       append(pill(`RAG: count=${hits.length}${meta.fallback?' (fallback)':''} • top1=${(hits[0]?.score??0).toFixed(2)}${meta.heading?` • rubrik="${meta.heading}" match:${meta.priCount}`:''} • q="${q.slice(0,32)}${q.length>32?'…':''}"`));
       let strict='', bestSent='', numeric=null;
