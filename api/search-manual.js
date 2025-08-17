@@ -1,7 +1,9 @@
-// /api/search-manual.js – v3 (ren JavaScript, personläge + rubrik-normalisering + debug)
-// - Konsekvent cosine (<=>) i score & sortering
+// /api/search-manual.js – v4 (JS) — HYBRID (vector + trigram) + RRF + rubrik-normalisering + debug
+// - Konsekvent cosine (<=>) i score & sortering (embeddings)
+// - Lexikal sökning via pg_trgm på chunk/heading/title
+// - RRF-fusion av vector + lexikal
 // - Rubrikfilter mot heading + title
-// - Personläge: extrahera namn från frågan och sänk minSim
+// - Personläge: extrahera namn från frågan och sänk minSim (bibehållet för bakåtkomp.)
 // - Normalisera rubrik mot kända rubriker i tabellen
 // - Extra debug-fält i svaret
 
@@ -125,7 +127,7 @@ async function getKnownHeadings(schema, table, headingCol) {
     SELECT DISTINCT LOWER(${quoteIdent(headingCol)}) AS h
     FROM ${quoteIdent(schema)}.${quoteIdent(table)}
     WHERE ${quoteIdent(headingCol)} IS NOT NULL AND ${quoteIdent(headingCol)} <> ''
-    LIMIT 500
+    LIMIT 1000
   `;
   const { rows } = await pool.query(q);
   __knownHeadings = rows.map(r => String(r.h).trim()).filter(Boolean);
@@ -224,6 +226,7 @@ export default async function handler(req, res) {
     const restrict = !!effectiveHeading && (restrictRequested || personMode);
     const minScoreEff = personMode ? Math.min(minScore, 0.35) : minScore;
 
+    // ===== 1) Embedding-sök =====
     const embedText = nameOnly || q;
     const { embedding, dims } = await embedQuery(embedText);
     const vecLiteral = '[' + embedding.map((x) => Number(x).toFixed(6)).join(',') + ']';
@@ -256,6 +259,89 @@ export default async function handler(req, res) {
       rows = r2.rows || [];
     }
 
+    // ===== 2) Lexikal (pg_trgm) =====
+    const qLower = q.toLowerCase();
+    const lexK = Math.max(K, 8);
+    const lexParams = [qLower, lexK];
+    let lexWhere = ` (lower(c.${quoteIdent(map.textCol)}) % $1`;
+    if (map.headingCol) lexWhere += ` OR lower(c.${quoteIdent(map.headingCol)}) % $1`;
+    lexWhere += `)`;
+    let lexHeadingParamIndex = 3;
+    if (effectiveHeading && restrict) {
+      lexWhere += ` AND (COALESCE(${map.headingCol ? `c.${quoteIdent(map.headingCol)}` : `' '`}, '') ILIKE $${lexHeadingParamIndex})`;
+      lexParams.push(`%${effectiveHeading}%`);
+      lexHeadingParamIndex++;
+    }
+
+    const lexSQL = `
+      SELECT
+        ${map.docIdCol ? `c.${quoteIdent(map.docIdCol)} AS doc_id,` : `NULL AS doc_id,`}
+        ${map.idxCol ? `c.${quoteIdent(map.idxCol)} AS idx,` : `NULL AS idx,`}
+        ${map.headingCol ? `c.${quoteIdent(map.headingCol)} AS heading,` : `NULL AS heading,`}
+        ${map.join.exists && map.join.titleCol ? `d.${quoteIdent(map.join.titleCol)} AS title,` : `NULL AS title,`}
+        c.${quoteIdent(map.textCol)} AS chunk,
+        GREATEST(
+          similarity(lower(c.${quoteIdent(map.textCol)}), $1),
+          ${map.headingCol ? `similarity(lower(c.${quoteIdent(map.headingCol)}), $1)` : '0'}
+        ) AS lex_score
+      FROM ${quoteIdent(map.schema)}.${quoteIdent(map.chunksTable)} c
+      ${map.join.exists && map.docIdCol ? `LEFT JOIN ${quoteIdent(map.join.schema)}.${quoteIdent(map.join.table)} d ON d.${quoteIdent(map.join.idCol)} = c.${quoteIdent(map.docIdCol)}` : ''}
+      WHERE ${lexWhere}
+      ORDER BY lex_score DESC
+      LIMIT $2
+    `;
+    let lexRows = [];
+    try {
+      const rLex = await pool.query(lexSQL, lexParams);
+      lexRows = rLex.rows || [];
+    } catch (e) {
+      // pg_trgm kanske saknas – gå vidare utan lex
+      lexRows = [];
+    }
+
+    // ===== 3) RRF-fusion =====
+    // key: doc_id|idx|heading|chunkStart(24)
+    const keyOf = (r) => `${r.doc_id ?? ''}|${r.idx ?? ''}|${r.heading ?? ''}|${String(r.chunk||'').slice(0,24)}`;
+    const rrf = (list, isLex) => {
+      const m = new Map();
+      list.forEach((it, i) => m.set(keyOf(it), 1 / (60 + i))); // k=60
+      return m;
+    };
+    const r1 = rrf(rows, false);
+    const r2 = rrf(lexRows, true);
+
+    const mergedScore = new Map();
+    for (const [k,v] of r1) mergedScore.set(k, (mergedScore.get(k)||0) + v);
+    for (const [k,v] of r2) mergedScore.set(k, (mergedScore.get(k)||0) + v);
+
+    const byKey = new Map();
+    rows.forEach(r => byKey.set(keyOf(r), {
+      doc_id: r.doc_id ?? null,
+      title: r.title ?? null,
+      idx: r.idx ?? null,
+      heading: r.heading ?? null,
+      score: Number((r.score ?? 0).toFixed(4)),
+      text: r.chunk
+    }));
+    lexRows.forEach(r => {
+      const k = keyOf(r);
+      if (!byKey.has(k)) {
+        byKey.set(k, {
+          doc_id: r.doc_id ?? null,
+          title: r.title ?? null,
+          idx: r.idx ?? null,
+          heading: r.heading ?? null,
+          score: Number((r.lex_score ?? 0).toFixed(4)),
+          text: r.chunk
+        });
+      }
+    });
+
+    const fused = [...mergedScore.entries()]
+      .sort((a,b)=> b[1]-a[1])
+      .map(([k]) => byKey.get(k))
+      .slice(0, K);
+
     return res.status(200).end(JSON.stringify({
       ok: true,
       query: rawQ,
@@ -267,14 +353,8 @@ export default async function handler(req, res) {
       effective_heading: effectiveHeading || null,
       person_mode: !!personMode,
       query_used_for_embed: embedText,
-      snippets: rows.map((r) => ({
-        doc_id: r.doc_id ?? null,
-        title: r.title ?? null,
-        idx: r.idx ?? null,
-        heading: r.heading ?? null,
-        score: Number((r.score ?? 0).toFixed(4)),
-        text: r.chunk,
-      })),
+      fusion: { vec_count: rows.length, lex_count: lexRows.length },
+      snippets: fused
     }));
   } catch (err) {
     console.error('search-manual 500', err);
@@ -286,8 +366,17 @@ export default async function handler(req, res) {
 SQL att köra (en gång) för prestanda:
 
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 -- ALTER TABLE public.manual_chunks ALTER COLUMN embedding TYPE vector(1536);
 CREATE INDEX IF NOT EXISTS manual_chunks_emb_cos_idx
   ON public.manual_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+-- Trigram-index för snabb textmatch
+CREATE INDEX IF NOT EXISTS manual_chunks_chunk_trgm_idx
+  ON public.manual_chunks USING GIN ((lower(chunk)) gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS manual_chunks_heading_trgm_idx
+  ON public.manual_chunks USING GIN ((lower(heading)) gin_trgm_ops);
+
 ANALYZE public.manual_chunks;
 */
