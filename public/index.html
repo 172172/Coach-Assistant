@@ -247,6 +247,69 @@ ${factsList}
       }));
     }
 
+    // ===== Quick Sortbyte Pallet Calculator (NY) =====
+    const quickCalc = {
+      active:false, expecting:null, buffer_hl:null, can_liters:null,
+
+      reset(){ this.active=false; this.expecting=null; this.buffer_hl=null; this.can_liters=null; },
+
+      detect(q){
+        const s = (q||'').toLowerCase();
+        const hlMatch = s.match(/(\d+(?:[.,]\d+)?)\s*hl\b/);
+        const asksPallets = /\b(hur\s*många\s*pallar|pallar\s*kan\s*jag\s*(?:köra|få)|how\s+many\s+pallets|antal\s*pallar)\b/.test(s) || s.includes('pall');
+        if (!hlMatch || !asksPallets) return null;
+        const amount = parseFloat(hlMatch[1].replace(',','.'));
+        const size =
+          /\b(33\s*cl|0\.?33)\b/.test(s) ? 0.33 :
+          /\b(50\s*cl|0\.?5)\b/.test(s)  ? 0.50 : null;
+        return { amount, size };
+      },
+
+      start({amount,size}){
+        this.active=true; this.buffer_hl=amount; this.can_liters=size; this.expecting=null;
+        if (!this.can_liters){
+          this.expecting='can_liters';
+          const prompt='Kör ni 33 cl eller 50 cl?';
+          speakGrounded({ query: prompt, facts:[prompt] });
+          append(bubble('❓ '+prompt,'assistant'));
+          return true;
+        }
+        return this.finish();
+      },
+
+      handle(raw){
+        if (!this.active) return false;
+        const u = (raw||'').toLowerCase();
+        if (this.expecting==='can_liters'){
+          if (/\b(33|33cl|0\.?33)\b/.test(u)) { this.can_liters=0.33; this.expecting=null; return this.finish(); }
+          if (/\b(50|50cl|0\.?5)\b/.test(u))  { this.can_liters=0.50; this.expecting=null; return this.finish(); }
+          const prompt='33 cl eller 50 cl?';
+          speakGrounded({ query: prompt, facts:[prompt] });
+          return true;
+        }
+        return false;
+      },
+
+      finish(){
+        const line_hl = (this.can_liters >= 0.5) ? 55 : 36;
+        const net_hl = Math.max(0, (this.buffer_hl + 37 - line_hl));
+        const pallets_float = net_hl / 30;
+        const pallets = Math.max(0, Math.floor(pallets_float));
+
+        const facts = [
+          'Regel: (buffert_hl + 37 − line_hl) / 30 = pallar',
+          'line_hl = 55 hl vid 50 cl, 36 hl vid 33 cl',
+          `Dina värden: buffert_hl=${this.buffer_hl}, line_hl=${line_hl}`
+        ];
+        const msg = `Med ${this.buffer_hl} hl i tanken och ${(this.can_liters*100).toFixed(0)} cl: netto ≈ ${net_hl.toFixed(1)} hl → ${pallets_float.toFixed(2)} pallar ≈ ${pallets} hela pallar.`;
+
+        speakGrounded({ query: msg, facts });
+        append(bubble(msg,'assistant'));
+        this.reset();
+        return true;
+      }
+    };
+
     // ===== Realtime connect =====
     $('#rtBtn').addEventListener('click', connectRealtime);
     $('#rtHangup').addEventListener('click', hangupRealtime);
@@ -473,7 +536,7 @@ För övrigt: Använd verktyget "search_manual". Sammanfatta coachigt och naturl
       return best;
     }
 
-    // ===== Ordagrant (behålls för fel-/fallback-lägen) =====
+    // ===== Ordagrant (fallback) =====
     function speakVerbatim(text){
       const toSay=`LÄS UPP EXAKT (ordagrant) och utan tillägg: """${text}"""`;
       rt.skipCancelForNextCreate=true;
@@ -511,7 +574,7 @@ För övrigt: Använd verktyget "search_manual". Sammanfatta coachigt och naturl
         rt._ragBusy=false; clearTimeout(ragTimer); return;
       }
 
-      // Router: Personfrågor → People-lookup (ingen embeddingsök här)
+      // Router: Personfrågor → People-lookup
       if (isPersonnelQuery(q)) {
         append(pill('ROUTER: People-KB'));
         await handlePeopleQuery(q, tc.tool_call_id, tc.response_id);
@@ -544,7 +607,6 @@ För övrigt: Använd verktyget "search_manual". Sammanfatta coachigt och naturl
 
         append(pill(`RAG: count=${hits.length}${data.fallback?' (fallback)':''} • top1=${(hits[0]?.score??0).toFixed(2)} • q="${q.slice(0,32)}${q.length>32?'…':''}"`));
 
-        // No source → No answer
         if (!hits.length){
           const msg = 'Jag hittar inte det i manualen.';
           if (tc.tool_call_id){
@@ -558,7 +620,7 @@ För övrigt: Använd verktyget "search_manual". Sammanfatta coachigt och naturl
           return;
         }
 
-        // Numerisk fråga
+        // Numerisk fråga (exempel: givare i tappen)
         const isNum = isNumericQuestion(q);
         if(isNum){
           const bestNum = extractNumericAnswer(hits,['givare','sensor'],['tapp']);
@@ -636,7 +698,10 @@ För övrigt: Använd verktyget "search_manual". Sammanfatta coachigt och naturl
     $('#quickText').addEventListener('keydown', e => { if(e.key==='Enter') sendQuickText(); });
     function sendQuickText(){
       const t=$('#quickText').value.trim(); if(!t) return;
-      $('#quickText').value=''; append(bubble('➤ '+t,'user')); rt._lastUserText=t; sendTextToRealtime(t);
+      $('#quickText').value=''; append(bubble('➤ '+t,'user')); rt._lastUserText=t;
+      // 🔹 Intercepta lokalt först (QuickCalc / Procedur)
+      if (handleUserUtterance(t)) return;
+      sendTextToRealtime(t);
     }
     function sendTextToRealtime(text){
       if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
@@ -710,6 +775,7 @@ För övrigt: Använd verktyget "search_manual". Sammanfatta coachigt och naturl
           if (utext){
             rt._lastUserText = normalizeTranscript(utext); rt._liveUserBuf = '';
             append(bubble(utext,'user')); logMsg('user',utext,'voice',msg);
+            // (Vi låter slutligt transcript nedan fånga QuickCalc/Runner för att undvika dubblering)
           }
         }
         const atext = extractAssistantTextFromItem(msg.item);
@@ -727,6 +793,10 @@ För övrigt: Använd verktyget "search_manual". Sammanfatta coachigt och naturl
           const norm = normalizeTranscript(full);
           rt._lastUserText = norm; rt._liveUserBuf = '';
           append(bubble(full,'user')); logMsg('user',full,'voice',msg);
+
+          // 🔹 Intercepta lokalt först (QuickCalc / Procedur)
+          if (handleUserUtterance(norm)) return;
+
           if (isLinjeRelated(norm) && !rt._ragBusy && norm!==rt._lastQuery){
             rt._ragBusy=true; rt._lastQuery=norm; rt.cancelAutos=true; clearTimeout(ragTimer);
             ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
@@ -809,185 +879,184 @@ För övrigt: Använd verktyget "search_manual". Sammanfatta coachigt och naturl
         clearTimeout(ragTimer); return;
       }
     }
-// ===== Procedure Runner (Sortbyte / generiskt) =====
-const runner = {
-  active: false,
-  slug: null,
-  steps: [],
-  idx: 0,
-  vars: {},
-  awaiting: null
-};
 
-async function startProcedure(slug){
-  try{
-    const { procedure } = await fetchJSON('/api/procedure-get', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ slug })
-    });
-    runner.active = true;
-    runner.slug = slug;
-    runner.vars = {};
-    runner.idx = 0;
-    runner.awaiting = null;
-    runner.steps = (procedure.recipe?.steps) || [];
-    const intro = procedure.recipe?.intro || `Startar procedur: ${procedure.title}`;
-    if (typeof speakGrounded === 'function') {
-      speakGrounded({ query: intro, facts:[intro], askFollowup:false });
-    } else {
-      speakVerbatim(intro);
-    }
-    append(bubble('▶ '+procedure.title,'assistant'));
-    runNextStep();
-  }catch(e){
-    append(errorBubble('Kunde inte starta proceduren: '+(e?.message||e)));
-  }
-}
+    // ===== Procedure Runner (Sortbyte / generiskt) =====
+    const runner = {
+      active: false,
+      slug: null,
+      steps: [],
+      idx: 0,
+      vars: {},
+      awaiting: null
+    };
 
-function runNextStep(){
-  if (!runner.active) return;
-  if (runner.idx >= runner.steps.length){
-    const done = 'Proceduren är klar.';
-    if (typeof speakGrounded === 'function') speakGrounded({ query: done, facts:[done], askFollowup:false });
-    else speakVerbatim(done);
-    append(bubble('✅ Proceduren är klar.','assistant'));
-    runner.active = false; return;
-  }
-  const st = runner.steps[runner.idx];
-  switch (st.type){
-    case 'say': {
-      sayCoach(st.text);
-      runner.idx++; break;
-    }
-    case 'await_confirm': {
-      runner.awaiting = { kind:'confirm', ok_words: st.ok_words || ['klar','nästa','redo'] };
-      append(pill('Väntar på bekräftelse: '+runner.awaiting.ok_words.join('/')));
-      runner.idx++; break;
-    }
-    case 'ask_number': {
-      runner.awaiting = { kind:'number', var: st.var, prompt: st.prompt };
-      sayCoach(st.prompt);
-      append(bubble('🧮 '+st.prompt,'assistant'));
-      runner.idx++; break;
-    }
-    case 'ask_choice': {
-      runner.awaiting = { kind:'choice', var: st.var, prompt: st.prompt, choices: st.choices||[] };
-      sayCoach(st.prompt);
-      append(bubble('❓ '+st.prompt,'assistant'));
-      runner.idx++; break;
-    }
-    case 'calc': {
+    async function startProcedure(slug){
       try{
-        const ctx = { ...runner.vars, floor: Math.floor };
-        for (const a of (st.assign||[])){
-          const v = safeEvalExpr(a.expr, ctx);
-          runner.vars[a.name] = v;
-          ctx[a.name] = v;
+        const { procedure } = await fetchJSON('/api/procedure-get', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ slug })
+        });
+        runner.active = true;
+        runner.slug = slug;
+        runner.vars = {};
+        runner.idx = 0;
+        runner.awaiting = null;
+        runner.steps = (procedure.recipe?.steps) || [];
+        const intro = procedure.recipe?.intro || `Startar procedur: ${procedure.title}`;
+        if (typeof speakGrounded === 'function') {
+          speakGrounded({ query: intro, facts:[intro], askFollowup:false });
+        } else {
+          speakVerbatim(intro);
         }
+        append(bubble('▶ '+procedure.title,'assistant'));
+        runNextStep();
       }catch(e){
-        append(errorBubble('Beräkningsfel: '+(e?.message||e)));
-      }
-      runner.idx++; break;
-    }
-    case 'say_vars': {
-      const msg = (st.template||'').replace(/~([a-z0-9_]+)~/gi, (_,k)=> String(runner.vars[k] ?? '?'));
-      sayCoach(msg);
-      runner.idx++; break;
-    }
-    default: {
-      runner.idx++; break;
-    }
-  }
-  if (!runner.awaiting && runner.active) runNextStep();
-}
-
-function sayCoach(text){
-  if (!text) return;
-  if (typeof speakGrounded === 'function') speakGrounded({ query: text, facts:[text], askFollowup:false });
-  else speakVerbatim(text);
-  append(bubble(text,'assistant'));
-}
-
-// SÄKER evaluator (stöd för + - * / ( ) floor och ?:), variabler ur ctx
-function safeEvalExpr(expr, ctx){
-  const illegal = /[^0-9a-zA-Z_+\-*/().?:\s]/;  // tillåt ?: för villkor
-  if (illegal.test(expr)) throw new Error('Otillåtna tecken i uttryck: '+expr);
-  const replaced = String(expr).replace(/[a-zA-Z_][a-zA-Z0-9_]*/g, (m)=>{
-    if (m==='floor') return 'Math.floor';
-    if (!(m in ctx)) throw new Error('Okänd variabel: '+m);
-    return String(ctx[m]);
-  });
-  // eslint-disable-next-line no-new-func
-  return Function('"use strict"; return ('+replaced+');')();
-}
-
-// Tolkning av användarens yttrande (text/ASR)
-function handleUserUtterance(raw){
-  const u = (raw||'').toLowerCase().trim();
-  // Trigga proceduren
-  if (!runner.active && /starta\s+sortbyte.*öl.*öl/.test(u)) { startProcedure('sortbyte-ol-ol'); return true; }
-
-  if (!runner.active) return false;
-  if (u==='avsluta' || u==='stoppa'){ runner.active=false; append(pill('🛑 Procedur stoppad')); return true; }
-
-  if (runner.awaiting){
-    const a = runner.awaiting;
-
-    if (a.kind==='confirm'){
-      const ok = (a.ok_words||[]).some(w => u.includes(w));
-      if (ok){ runner.awaiting=null; runNextStep(); return true; }
-      return true;
-    }
-
-    if (a.kind==='number'){
-      const m = u.match(/(\d+(?:[.,]\d+)?)/);
-      if (m){
-        const val = Number(m[1].replace(',','.'));
-        runner.vars[a.var] = val;
-        append(pill(`${a.var} = ${val}`));
-        runner.awaiting=null; runNextStep(); return true;
-      } else {
-        sayCoach(`Jag hörde inget tal. ${a.prompt}`);
-        return true;
+        append(errorBubble('Kunde inte starta proceduren: '+(e?.message||e)));
       }
     }
 
-    if (a.kind==='choice'){
-      const hit = (a.choices||[]).find(c => {
-        const lbl = String(c.label||'').toLowerCase();
-        const aliases = (c.aliases||[]).map(x=>String(x).toLowerCase());
-        return u.includes(lbl) || aliases.some(x=>u.includes(x));
+    function runNextStep(){
+      if (!runner.active) return;
+      if (runner.idx >= runner.steps.length){
+        const done = 'Proceduren är klar.';
+        if (typeof speakGrounded === 'function') speakGrounded({ query: done, facts:[done], askFollowup:false });
+        else speakVerbatim(done);
+        append(bubble('✅ Proceduren är klar.','assistant'));
+        runner.active = false; return;
+      }
+      const st = runner.steps[runner.idx];
+      switch (st.type){
+        case 'say': {
+          sayCoach(st.text);
+          runner.idx++; break;
+        }
+        case 'await_confirm': {
+          runner.awaiting = { kind:'confirm', ok_words: st.ok_words || ['klar','nästa','redo'] };
+          append(pill('Väntar på bekräftelse: '+runner.awaiting.ok_words.join('/')));
+          runner.idx++; break;
+        }
+        case 'ask_number': {
+          runner.awaiting = { kind:'number', var: st.var, prompt: st.prompt };
+          sayCoach(st.prompt);
+          append(bubble('🧮 '+st.prompt,'assistant'));
+          runner.idx++; break;
+        }
+        case 'ask_choice': {
+          runner.awaiting = { kind:'choice', var: st.var, prompt: st.prompt, choices: st.choices||[] };
+          sayCoach(st.prompt);
+          append(bubble('❓ '+st.prompt,'assistant'));
+          runner.idx++; break;
+        }
+        case 'calc': {
+          try{
+            const ctx = { ...runner.vars, floor: Math.floor };
+            for (const a of (st.assign||[])){
+              const v = safeEvalExpr(a.expr, ctx);
+              runner.vars[a.name] = v;
+              ctx[a.name] = v;
+            }
+          }catch(e){
+            append(errorBubble('Beräkningsfel: '+(e?.message||e)));
+          }
+          runner.idx++; break;
+        }
+        case 'say_vars': {
+          const msg = (st.template||'').replace(/~([a-z0-9_]+)~/gi, (_,k)=> String(runner.vars[k] ?? '?'));
+          sayCoach(msg);
+          runner.idx++; break;
+        }
+        default: {
+          runner.idx++; break;
+        }
+      }
+      if (!runner.awaiting && runner.active) runNextStep();
+    }
+
+    function sayCoach(text){
+      if (!text) return;
+      if (typeof speakGrounded === 'function') speakGrounded({ query: text, facts:[text], askFollowup:false });
+      else speakVerbatim(text);
+      append(bubble(text,'assistant'));
+    }
+
+    // SÄKER evaluator (stöd för + - * / ( ) floor och ?:), variabler ur ctx
+    function safeEvalExpr(expr, ctx){
+      const illegal = /[^0-9a-zA-Z_+\-*/().?:\s]/;  // tillåt ?: för villkor
+      if (illegal.test(expr)) throw new Error('Otillåtna tecken i uttryck: '+expr);
+      const replaced = String(expr).replace(/[a-zA-Z_][a-zA-Z0-9_]*/g, (m)=>{
+        if (m==='floor') return 'Math.floor';
+        if (!(m in ctx)) throw new Error('Okänd variabel: '+m);
+        return String(ctx[m]);
       });
-      if (hit){
-        runner.vars[a.var] = hit.value;
-        append(pill(`${a.var} = ${hit.label||hit.value}`));
-        runner.awaiting=null; runNextStep(); return true;
-      } else {
-        sayCoach(`Jag uppfattade inte valet. ${a.prompt}`);
+      // eslint-disable-next-line no-new-func
+      return Function('"use strict"; return ('+replaced+');')();
+    }
+
+    // ===== Tolkning av användarens yttrande (QuickCalc + Procedur) =====
+    function handleUserUtterance(raw){
+      const original = (raw||'').trim();
+      const u = normalizeTranscript(original).toLowerCase();
+
+      // 0) QuickCalc: "150 hl ... hur många pallar?"
+      const det = quickCalc.detect(u);
+      if (det){ quickCalc.start(det); return true; }
+      if (quickCalc.active){ if (quickCalc.handle(u)) return true; }
+
+      // 1) Starta procedur: "starta sortbyte öl till öl"
+      if (!runner.active && /starta\s+sortbyte.*öl.*öl/i.test(u)) { startProcedure('sortbyte-ol-ol'); return true; }
+
+      // 2) Styr ord för pågående procedur
+      if (!runner.active) return false;
+      if (u==='avsluta' || u==='stoppa'){ runner.active=false; append(pill('🛑 Procedur stoppad')); return true; }
+
+      if (runner.awaiting){
+        const a = runner.awaiting;
+
+        if (a.kind==='confirm'){
+          const ok = (a.ok_words||[]).some(w => u.includes(w));
+          if (ok){ runner.awaiting=null; runNextStep(); return true; }
+          return true;
+        }
+
+        if (a.kind==='number'){
+          const m = u.match(/(\d+(?:[.,]\d+)?)/);
+          if (m){
+            const val = Number(m[1].replace(',','.'));
+            runner.vars[a.var] = val;
+            append(pill(`${a.var} = ${val}`));
+            runner.awaiting=null; runNextStep(); return true;
+          } else {
+            sayCoach(`Jag hörde inget tal. ${a.prompt}`);
+            return true;
+          }
+        }
+
+        if (a.kind==='choice'){
+          const hit = (a.choices||[]).find(c => {
+            const lbl = String(c.label||'').toLowerCase();
+            const aliases = (c.aliases||[]).map(x=>String(x).toLowerCase());
+            return u.includes(lbl) || aliases.some(x=>u.includes(x));
+          });
+          if (hit){
+            runner.vars[a.var] = hit.value;
+            append(pill(`${a.var} = ${hit.label||hit.value}`));
+            runner.awaiting=null; runNextStep(); return true;
+          } else {
+            sayCoach(`Jag uppfattade inte valet. ${a.prompt}`);
+            return true;
+          }
+        }
+      }
+
+      if (u==='nästa' || u==='klar' || u==='redo'){ runNextStep(); return true; }
+      if (u==='upprepa'){
+        const back = Math.max(0, runner.idx-1);
+        const st = runner.steps[back];
+        if (st?.type==='say' && st.text) sayCoach('(upprepar) '+st.text);
         return true;
       }
+      return false;
     }
-  }
-
-  if (u==='nästa' || u==='klar' || u==='redo'){ runNextStep(); return true; }
-  if (u==='upprepa'){
-    const back = Math.max(0, runner.idx-1);
-    const st = runner.steps[back];
-    if (st?.type==='say' && st.text) sayCoach('(upprepar) '+st.text);
-    return true;
-  }
-  return false;
-}
-
-/* === KOPPLA IN (två rader) =========================================
-1) I din sendQuickText() – innan du skickar till modellen:
-   if (handleUserUtterance(t)) return;
-
-2) I din röstloop (handleRealtimeMessage), när du fångar utext:
-   if (handleUserUtterance(utext)) return;
-===================================================================== */
-</script>
-
   </script>
 </body>
 </html>
