@@ -60,7 +60,7 @@
       </div>
 
       <div class="row" style="margin-top:10px">
-        <input id="manualQuery" type="search" placeholder="Testa manual-sök (t.ex. 'rubrik sortbyte', 'hur många givare har tappen')" style="flex:1" />
+        <input id="manualQuery" type="search" placeholder="Testa manual-sök (t.ex. 'vem är vår processingenjör', 'arbetsuppgifter skiftledare')" style="flex:1" />
         <button class="ghost" id="manualBtn">Testa manual</button>
       </div>
 
@@ -83,10 +83,11 @@
     const append = el => { $('#output').appendChild(el); el.scrollIntoView({behavior:'smooth',block:'end'}); };
 
     // ===== Konfig-flaggor =====
-    const RAG_ON_CREATED = false; // Kör inte RAG på tidiga created-events (gäller röst)
-    const STRICT_RAG = false;     // Sätt true om du vill låsa svarsvägen hårdare efter tool-output
-    const VOICE_MIN_SIM = 0.40;   // Lite snällare för röst
-    const TEXT_MIN_SIM  = 0.45;   // Normalt för text
+    const RAG_ON_CREATED = false;
+    const STRICT_RAG = false;
+    const VOICE_MIN_SIM = 0.40;
+    const TEXT_MIN_SIM  = 0.45;
+    const PERSON_MIN_SIM = 0.35; // lite snällare för Personal
 
     // ===== Operator =====
     const operatorInput = $('#operatorId');
@@ -107,17 +108,57 @@
     const WAIT_FOR_QUERY_MS = 2000;
     let ragTimer = null;
 
-    // Linje 65 keywords (inkl. stavningsvarianter)
+    // Linje 65 keywords (inkl. person/rollord)
     const linjeKeywords = [
       'linje','manual','tapp','givare','sensor','ocme','okme','åcme',
       'felsök','format','karusell','ventil','carlsberg','person','anställd',
       'operatör','chef','namn','medarbetare','sortbyte','byte','produktion',
-      'kister','kistler'
+      'kister','kistler','processingenjör','kvalitet','underhåll','skiftledare',
+      'kontakt','telefon','mail','email','roll','ansvar','arbetsuppgift','personal'
     ];
 
     function isLinjeRelated(query) {
       const lowerQuery = (query||'').toLowerCase();
       return linjeKeywords.some(kw => lowerQuery.includes(kw));
+    }
+
+    // ===== Personfråge-detektor =====
+    const ROLE_SYNONYMS = {
+      'processingenjör': ['processingenjör','process ingenjör','process engineer'],
+      'produktionschef': ['produktionschef','production manager','prodchef','line manager','linjechef'],
+      'skiftledare':     ['skiftledare','skiftchef','team lead','teamleader'],
+      'underhållschef':  ['underhållschef','maintenance manager','uh-chef','underhåll'],
+      'kvalitetstekniker':['kvalitetstekniker','quality engineer','qa','kvalitet'],
+      'operatör':        ['operatör','operator'],
+      'tekniker':        ['tekniker','technician','service'],
+      'process':         ['process','processansvarig']
+    };
+    const PERSON_TRIGGERS = [
+      'vem är','vilken','vilka är','ansvarar','arbetsuppgift','arbetsuppgifter','roll','chef','personal','kontakt','telefon','mail','email'
+    ];
+    function normStr(s){ return (s||'').toString().normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+    function extractHeadingHint(q){
+      const rx = /(?:rubrik|rubriken|heading|sektion|avsnitt)\s*(?:som\s+heter|heter|:|=)?\s*["“”']?([a-z0-9åäö \-\/]{2,80})["“”']?/i;
+      const m = (q||'').match(rx);
+      if (m && m[1]) return m[1].trim();
+      const qQuote = (q||'').match(/["“”']([^"“”']{2,80})["“”']/);
+      if (qQuote && qQuote[1]) return qQuote[1].trim();
+      return null;
+    }
+    function roleTokensFor(q){
+      const low = normStr(q);
+      const tokens = [];
+      for (const [role, syns] of Object.entries(ROLE_SYNONYMS)){
+        if (syns.some(s => low.includes(normStr(s)))) tokens.push(role);
+      }
+      return tokens;
+    }
+    function isPersonnelQuery(q){
+      const low = normStr(q);
+      const trigger = PERSON_TRIGGERS.some(t => low.includes(normStr(t)));
+      const hasRole = roleTokensFor(q).length>0;
+      const looksLikeName = /\b[A-ZÅÄÖ][a-zåäö]+(?:\s+[A-ZÅÄÖ][a-zåäö]+)+\b/.test(q); // Förnamn Efternamn
+      return trigger || hasRole || looksLikeName || low.includes('personal');
     }
 
     // mic viz
@@ -176,9 +217,7 @@
         rt.conversation_id=memInit.conversation_id; $('#memStatus').textContent='Minne: laddat';
 
         rt.pc=new RTCPeerConnection();
-        // Nedströms ljud (modellens TTS)
         rt.pc.addTransceiver('audio', { direction:'recvonly' });
-        // Skicka mikrofon uppströms
         rt.mic.getTracks().forEach(t=>rt.pc.addTrack(t,rt.mic));
 
         rt.remoteAudio=new Audio();
@@ -205,25 +244,19 @@
               input_audio_transcription: { model: "gpt-4o-transcribe", language: "sv" },
               tool_choice:'auto',
               instructions:`
-Du är Coach Assistant för Linje 65, som Jarvis från Iron Man – hjälpsam, kvick, social och vänlig. Svara kort, tydligt och på svenska.
-Var naturlig i samtal: Svara vänligt på hälsningar (t.ex. "Hej! Hur mår du idag?"), småprat, mattematik (t.ex. "5*7 är 35"), allmänna produktionsfrågor eller annat utan verktyg.
-För off-topic frågor (t.ex. "vem är Donald Trump") redirecta vänligt: "Jag är skapad för att hjälpa med Linje 65 och dagliga tasks – inte politik eller kändisar. Vad kan jag assistera med på linjen?"
-Använd punktlistor för arbetssteg. Förebygg faror och slöseri.
-Använd verktyget "search_manual" ALLTID för frågor om Linje 65, manualer, procedurer, tekniska detaljer, sortbyte, produktion, personer på linjen eller Carlsberg – aldrig hitta på egna lösningar.
-VÄNTA på ett final transkript innan du kallar verktyget.
-Basa ditt svar enbart på resultat från verktyget – hitta inte på information. Om inget resultat: Säg "Jag har tyvärr inte lärt mig det ännu från manualen – kan du förtydliga eller fråga om något annat på linjen?"
-För personer: Om relaterat till Linje 65 (t.ex. omnämnda i manualen som operatörer, chefer eller anställda), använd verktyg och svara baserat på resultat; annars redirecta som off-topic.
-Allt gällande personal finns i manualens exakta rubrik "Personal" – sök alltid där för namn, roller och uppgifter.
-Huvuduppgift: Undervisa operatörer i day-to-day tasks på Linje 65, alltid baserat på manualen för att undvika fel.
-Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är kvadratroten av 16" – "4! Något mer matte eller linje-fråga?" För "hur gör jag sortbyte" – använd verktyg och svara enbart från resultat. För "vem är operatör X på linjen" – använd verktyg om i manual. För "vem är Elon Musk" – redirecta.
+Du är Coach Assistant för Linje 65, som Jarvis – hjälpsam, kvick, vänlig. Svara kort och på svenska.
+För personfrågor (namn, roller, arbetsuppgifter): Sök ENBART i rubriken "Personal". Om inget hittas där, svara att du inte har lärt dig det – gissa aldrig namn.
+Använd verktyget "search_manual" ALLTID för manuella detaljer. Vänta på finalt transkript innan du kallar verktyget. Baserar du dig på manualen – läs upp exakt.
 `.trim(),
               tools:[
                 { type:'function', name:'search_manual',
-                  description:`Sök i Linje65-manualdatabasen efter relevant information. Använd detta ALLTID för frågor som rör manualer, procedurer eller tekniska detaljer om Linje 65, inklusive sortbyte, produktion och personer relaterade till linjen.`,
+                  description:`Sök i Linje65-manualdatabasen (inkl. rubrikfilter t.ex. "Personal").`,
                   parameters:{ type:'object', properties:{
-                    query:{type:'string',description:'Sökfrågan på svenska, baserat på användarens fråga. För personal, inkludera "Personal" i queryn.'},
-                    k:{type:'integer',description:'Antal resultat att hämta (default 5).',default:5},
-                    minSim:{type:'number',description:'Minsta likhetspoäng (default 0.45).',default:0.45}
+                    query:{type:'string'},
+                    k:{type:'integer',default:5},
+                    minSim:{type:'number',default:0.45},
+                    heading:{type:'string',description:'Rubrik/sektion, t.ex. "Personal"'},
+                    restrictToHeading:{type:'boolean',description:'Om true, bara träffar inom rubriken'}
                   }, required:['query'] }
                 },
                 { type:'function', name:'save_memory',
@@ -266,7 +299,6 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
       $('#rtBtn').style.display='inline-block'; $('#rtHangup').style.display='none'; $('#rtStatus').textContent='Inte ansluten'; append(pill('Samtal avslutat.'));
     }
 
-    // ===== Realtime events =====
     function isTranscriptFinalType(t){
       return t && (
         /^input_audio_buffer\.transcript\.(done|completed)$/.test(t) ||
@@ -310,18 +342,7 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
       return '';
     }
 
-    // ====== Heading-hjälpare (rubrik-hint + re-rank) ======
-    function normStr(s){
-      return (s || '').toString().normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
-    }
-    function extractHeadingHint(q){
-      const rx = /(?:rubrik|rubriken|heading|sektion|avsnitt)\s*(?:som\s+heter|heter|:|=)?\s*["“”']?([a-z0-9åäö \-\/]{2,80})["“”']?/i;
-      const m = (q||'').match(rx);
-      if (m && m[1]) return m[1].trim();
-      const qQuote = (q||'').match(/["“”']([^"“”']{2,80})["“”']/);
-      if (qQuote && qQuote[1]) return qQuote[1].trim();
-      return null;
-    }
+    // Rerank på rubrik
     function rerankByHeading(snippets, heading){
       const h = normStr(heading);
       const pri=[], sec=[];
@@ -334,9 +355,40 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
       return { hits: [...pri, ...sec], priCount: pri.length };
     }
 
-    function handleRealtimeMessage(msg){
-      console.log('Mottaget event:', msg.type, msg);
+    // Plocka ut namn/roll ur rad/mening
+    function extractPersonAnswer(snippets, roleTokens=[]){
+      const rolesLow = roleTokens.map(normStr);
+      let best=null;
 
+      function scoreLine(line, baseScore){
+        const L = normStr(line);
+        let sc = baseScore || 0;
+        for (const rt of rolesLow) if (rt && L.includes(rt)) sc += 0.15;
+        if (/ansvar|uppgift/.test(L)) sc += 0.05;
+        if (/\b[A-ZÅÄÖ][a-zåäö]+(?:\s+[A-ZÅÄÖ][a-zåäö]+)+\b/.test(line)) sc += 0.12; // Namn finns
+        if (line.length<18) sc -= 0.05;
+        return sc;
+      }
+
+      for (const sn of (snippets||[])){
+        const base = sn.score || 0;
+        // Dela upp i rader (tabell-liknande) + meningar
+        const lines = (sn.text||'').split(/\n+/).concat((sn.text||'').split(/(?<=[\.\!\?:;])\s+/));
+        for (const ln of lines){
+          const sc = scoreLine(ln, base);
+          if (!best || sc>best.sc) best={line:ln.trim(), sn, sc};
+        }
+      }
+
+      if (!best) return null;
+
+      const sent = best.line.replace(/\s+/g,' ').trim();
+      const m = sent.match(/\b([A-ZÅÄÖ][a-zåäö]+(?:\s+[A-ZÅÄÖ][a-zåäö]+)+)\b/);
+      const name = m ? m[1] : null;
+      return { sentence: sent, name, src: best.sn };
+    }
+
+    function handleRealtimeMessage(msg){
       if (msg.type==='conversation.item.created'){
         if (msg.item?.role==='user'){
           const utext = extractUserTextFromItem(msg.item).trim();
@@ -453,7 +505,6 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
       }
     }
 
-    // ===== Pending tool orchestration =====
     function parkPendingTool({id,argsText,response_id}){
       rt._pendingTool = {
         id, argsText, response_id,
@@ -496,6 +547,7 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
     function parseArgsSafe(s){ try{ return JSON.parse(s||'{}'); }catch{ return {}; } }
     function isNumericQuestion(q){ const s=(q||'').toLowerCase(); return /\b(hur många|antal(?:et)?|how many|number of|count)\b/.test(s); }
     function hasAll(words,text){ const low=text.toLowerCase(); return words.every(w=>low.includes(w.toLowerCase())); }
+
     function extractNumericAnswer(snippets, keywordsAny=[], keywordsMust=[]){
       let best=null;
       for(const sn of (snippets||[])){
@@ -512,7 +564,8 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
       }
       return best;
     }
-    const DOMAIN_BOOST=['tapp','givare','sensor','ocme','felsök','format','karusell','ventil', 'personal', 'personer', 'anställd', 'operatör', 'chef'];
+
+    const DOMAIN_BOOST=['tapp','givare','sensor','ocme','felsök','format','karusell','ventil','personal','chef','operatör','ingenjör'];
     function pickBestSentence(snippets, query){
       const q=(query||'').toLowerCase(); const tokens=q.split(/[^a-zåäö0-9]+/i).filter(t=>t.length>2);
       let best={s:'',score:-1,src:null};
@@ -549,7 +602,6 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
       const args=parseArgsSafe(tc.argsText);
       const k=args.k??5;
       const q=resolveQueryFromState(args);
-      const headingHint = extractHeadingHint(q);
 
       if(!q){
         if(tc.tool_call_id){
@@ -566,11 +618,21 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
         rt._ragBusy=false; clearTimeout(ragTimer); return;
       }
 
+      const headingFromUser = extractHeadingHint(q);
+      const personQ = isPersonnelQuery(q);
+      const roles = roleTokensFor(q);
+
+      const headingHint = headingFromUser || (personQ ? 'Personal' : null);
+      const restrict = !!headingHint || personQ;
+
+      const minSimBase = (typeof args.minSim==='number' ? args.minSim : (args.voice ? VOICE_MIN_SIM : TEXT_MIN_SIM));
+      const minSim = personQ ? Math.min(minSimBase, PERSON_MIN_SIM) : minSimBase;
+
       const body={
         query:q, k, topK:k,
-        minSim: (typeof args.minSim==='number' ? args.minSim : (args.voice ? VOICE_MIN_SIM : TEXT_MIN_SIM)),
-        heading: headingHint || null,
-        restrictToHeading: !!headingHint
+        minSim,
+        heading: headingHint,
+        restrictToHeading: restrict
       };
 
       try{
@@ -593,18 +655,31 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
         append(pill(`RAG: count=${hits.length}${data.fallback?' (fallback)':''} • top1=${(hits[0]?.score??0).toFixed(2)}${headingHint?` • rubrik="${headingHint}" match:${priCount}`:''} • q="${q.slice(0,32)}${q.length>32?'…':''}"`));
 
         let strict='', bestSent='', numeric=null;
-        if ((hits.length||0)>0){
+
+        // ===== Personfråga → extrahera namn/roll ur Personal =====
+        if (personQ && hits.length){
+          const person = extractPersonAnswer(hits, roles);
+          if (person?.sentence){
+            strict = `Enligt manualen (Personal): ${person.sentence}`;
+          }
+        }
+
+        // ===== Annars standardbeteende
+        if (!strict){
           if (isNumericQuestion(q)){
             const hit=extractNumericAnswer(hits, ['givare','sensor'], ['tapp']);
             if (hit?.sent){ strict=`Enligt manualen: ${hit.sent}`; bestSent=hit.sent; numeric={value:Number((hit.num||'').replace(',','.')), sentence:hit.sent}; }
           }
-          if (!strict){
-            const pick=pickBestSentence(hits,q);
-            bestSent=(pick.s || (hits[0].text||'').replace(/\s+/g,' ').trim()).slice(0,500);
-            strict=`Enligt manualen: ${bestSent}`;
-          }
-        } else {
-          strict = 'Jag har tyvärr inte lärt mig om den personen/ämnet ännu från manualen – är det relaterat till linjen? Kan du förtydliga?';
+        }
+        if (!strict && hits.length){
+          const pick=pickBestSentence(hits,q);
+          bestSent=(pick.s || (hits[0].text||'').replace(/\s+/g,' ').trim()).slice(0,500);
+          strict=`Enligt manualen: ${bestSent}`;
+        }
+        if (!strict){
+          strict = personQ
+            ? 'Jag hittar ingen uppgift om den personen/rollen under "Personal" i manualen.'
+            : 'Jag har tyvärr inte lärt mig det ännu från manualen – kan du förtydliga?';
         }
 
         const sources=(hits||[]).slice(0,5).map(s=>({title:s.title||'manual',idx:s.idx,score:s.score}));
@@ -619,11 +694,9 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
           rt.dc?.send(JSON.stringify({ type:'response.create' }));
           append(pill('📤 Skickade tool-output till modellen'));
         } else {
+          speakVerbatim(out.strict_answer || 'Jag kan inte verifiera det i manualen just nu.');
           if (out.strict_answer){
-            speakVerbatim(out.strict_answer);
             const s0=sources[0]||{}; append(bubble(`${out.strict_answer}\nHämtat från: ${(s0.title||'manual')} • idx:${s0.idx??'?'} • score:${(s0.score??0).toFixed(2)}`,'assistant'));
-          } else {
-            speakVerbatim('Jag kan inte verifiera det i manualen just nu. Specificera rubrik/sektion eller felkod så letar jag exakt.');
           }
         }
       }catch(err){
@@ -697,8 +770,17 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
       const q=$('#manualQuery').value.trim(); if(!q){ append(pill('Skriv en fråga för manualen.')); return; }
       append(bubble('🔎 Manual: '+q,'user'));
       try{
-        const headingHint = extractHeadingHint(q);
-        const data=await fetchJSON('/api/search-manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,k:5,topK:5,minSim:TEXT_MIN_SIM, heading:headingHint||null, restrictToHeading:!!headingHint})});
+        const headingFromUser = extractHeadingHint(q);
+        const personQ = isPersonnelQuery(q);
+        const roles = roleTokensFor(q);
+        const headingHint = headingFromUser || (personQ ? 'Personal' : null);
+        const restrict = !!headingHint || personQ;
+
+        const data=await fetchJSON('/api/search-manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+          query:q,k:5,topK:5,minSim: personQ?PERSON_MIN_SIM:TEXT_MIN_SIM,
+          heading:headingHint||null, restrictToHeading:restrict
+        })});
+
         let hits = data.snippets || [];
         let priCount = 0;
         if (headingHint){
@@ -710,7 +792,18 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
           }
         }
         append(pill(`RAG: count=${hits.length}${data.fallback?' (fallback)':''} • top1=${(hits[0]?.score??0).toFixed(2)}${headingHint?` • rubrik="${headingHint}" match:${priCount}`:''}`));
-        if(!hits.length){ append(bubble('Inga träffar i manualen.','assistant')); return; }
+        if(!hits.length){ append(bubble(personQ?'Inget under "Personal" för den rollen/namnet.':'Inga träffar i manualen.','assistant')); return; }
+
+        if (personQ){
+          const person = extractPersonAnswer(hits, roles);
+          if (person?.sentence){
+            append(bubble(`Enligt manualen (Personal): ${person.sentence}`,'assistant'));
+            return;
+          }
+          append(bubble('Hittar ingen tydlig rad med namn + roll i "Personal".','assistant'));
+          return;
+        }
+
         const isNum=/\b(hur många|antal(?:et)?|how many|number of|count)\b/i.test(q);
         if(isNum){
           const hit=extractNumericAnswer(hits,['givare','sensor'],['tapp']);
