@@ -86,9 +86,9 @@
     // ===== Konfig-flaggor =====
     const RAG_ON_CREATED = false;
     const STRICT_RAG = false;
-    const VOICE_MIN_SIM = 0.40;
+    const VOICE_MIN_SIM = 0.38;
     const TEXT_MIN_SIM  = 0.45;
-    const PERSON_MIN_SIM = 0.35; // lite snällare för Personal
+    const PERSON_MIN_SIM = 0.30; // lite snällare för Personal
 
     // ===== Operator =====
     const operatorInput = $('#operatorId');
@@ -118,9 +118,14 @@
       'kontakt','telefon','mail','email','roll','ansvar','arbetsuppgift','personal'
     ];
 
+    const QUESTION_WORDS = ['hur','vad','var','vem','vilken','vilka','när','varför','hur många','antal','finns','kan jag','behöver jag'];
+
     function isLinjeRelated(query) {
-      const lowerQuery = (query||'').toLowerCase();
-      return linjeKeywords.some(kw => lowerQuery.includes(kw));
+      const q = (query||'').toLowerCase();
+      const kwHit = linjeKeywords.some(kw => q.includes(kw));
+      const qwHit = (typeof QUESTION_WORDS!=='undefined') && QUESTION_WORDS.some(qw => q.includes(qw));
+      const hasTechHints = /\b(tapp|ocme|jones|kister|givare|sensor|felsök|manual|format|personal|chef|skift|underhåll)\b/i.test(q);
+      return kwHit || qwHit || hasTechHints;
     }
 
     // ===== Personfråge-detektor =====
@@ -238,9 +243,9 @@
               modalities:['audio','text'],
               turn_detection:{
                 type:'server_vad',
-                threshold: 0.6,
-                silence_duration_ms: 550,
-                prefix_padding_ms: 200
+                threshold: 0.55,
+                silence_duration_ms: 700,
+                prefix_padding_ms: 300
               },
               input_audio_transcription: { model: "gpt-4o-transcribe", language: "sv" },
               tool_choice:'auto',
@@ -248,6 +253,9 @@
 Du är Coach Assistant för Linje 65, som Jarvis – hjälpsam, kvick, vänlig. Svara kort och på svenska.
 För personfrågor (namn, roller, arbetsuppgifter): Sök ENBART i rubriken "Personal". Om inget hittas där, svara att du inte har lärt dig det – gissa aldrig namn.
 Använd verktyget "search_manual" ALLTID för manuella detaljer. Vänta på finalt transkript innan du kallar verktyget. Baserar du dig på manualen – läs upp exakt.
+Om frågan rör Linje 65 eller någon roll/uppgift:
+- Använd alltid verktyget "search_manual" först och vänta på function_call_output.
+- Om ingen källa hittas i manualen, säg tydligt "Jag hittar inte det i manualen" och ge ett kort förslag på hur frågan kan preciseras. Gissa aldrig.
 `.trim(),
               tools:[
                 { type:'function', name:'search_manual',
