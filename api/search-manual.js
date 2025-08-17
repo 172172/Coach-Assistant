@@ -1,6 +1,9 @@
-// /api/search-manual.js – v2 (ren JavaScript, inga TypeScript-annotationer)
-// För Next.js/Vercel Node runtime. Sök i manual med pgvector (cosine).
-// Fixar troliga 500-fel: tog bort TS-typer, tydligare fel, robust rubrikfilter.
+// /api/search-manual.js – v3 (ren JavaScript, personläge + rubrik-normalisering + debug)
+// - Konsekvent cosine (<=>) i score & sortering
+// - Rubrikfilter mot heading + title
+// - Personläge: extrahera namn från frågan och sänk minSim
+// - Normalisera rubrik mot kända rubriker i tabellen
+// - Extra debug-fält i svaret
 
 import { Pool } from 'pg';
 
@@ -113,6 +116,50 @@ async function getMappings() {
   return { schema, chunksTable, textCol, embCol, idxCol, headingCol, docIdCol, join };
 }
 
+// ---- Rubrik-normalisering + persondetektion ----
+let __knownHeadings = null;
+async function getKnownHeadings(schema, table, headingCol) {
+  if (__knownHeadings) return __knownHeadings;
+  if (!headingCol) { __knownHeadings = []; return __knownHeadings; }
+  const q = `
+    SELECT DISTINCT LOWER(${quoteIdent(headingCol)}) AS h
+    FROM ${quoteIdent(schema)}.${quoteIdent(table)}
+    WHERE ${quoteIdent(headingCol)} IS NOT NULL AND ${quoteIdent(headingCol)} <> ''
+    LIMIT 500
+  `;
+  const { rows } = await pool.query(q);
+  __knownHeadings = rows.map(r => String(r.h).trim()).filter(Boolean);
+  return __knownHeadings;
+}
+
+function normalizeHeading(raw, known) {
+  if (!raw) return null;
+  const s = String(raw).toLowerCase().replace(/["'`]/g,'').trim();
+  if (!s) return null;
+  for (const h of known) {
+    if (s.includes(h)) return h;
+  }
+  const toks = s.split(/[^a-zåäö0-9]+/i).filter(w => w.length > 2);
+  let best = null, bestScore = 0;
+  for (const h of known) {
+    const hs = h.split(/[^a-zåäö0-9]+/i);
+    const overlap = hs.reduce((acc,w)=> acc + (toks.includes(w) ? 1 : 0), 0);
+    if (overlap > bestScore) { best = h; bestScore = overlap; }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+function extractPersonName(q) {
+  const m = q.match(/vem\s+(?:är|heter)\s+([A-ZÅÄÖ][A-Za-zÅÄÖåäö\-]+(?:\s+[A-ZÅÄÖ][A-Za-zÅÄÖåäö\-]+)?)/i);
+  if (m) return m[1].trim();
+  const candidates = q.match(/\b[A-ZÅÄÖ][A-Za-zÅÄÖåäö\-]+(?:\s+[A-ZÅÄÖ][A-Za-zÅÄÖåäö\-]+)?/g);
+  if (candidates && candidates.length) {
+    candidates.sort((a,b)=>b.length - a.length);
+    return candidates[0].trim();
+  }
+  return null;
+}
+
 function buildSQL(map, { filtered, heading, restrict }) {
   const sel = [];
   sel.push(map.join.exists ? (map.join.titleCol ? `d.${quoteIdent(map.join.titleCol)} AS title` : `NULL AS title`) : `NULL AS title`);
@@ -156,22 +203,34 @@ export default async function handler(req, res) {
 
   try {
     const body = readJsonBody(req);
-    const q = (body.query || '').trim();
+    const rawQ = (body.query || '').trim();
     const K = Math.min(Math.max(parseInt(body.k || body.topK || 5, 10) || 5, 1), 20);
     const minScore = typeof body.minSim === 'number' ? body.minSim : 0.4;
-    const heading = body.heading ? String(body.heading).trim() : null;
-    const restrict = !!body.restrictToHeading;
+    const rawHeading = body.heading ? String(body.heading).trim() : null;
+    const restrictRequested = !!body.restrictToHeading;
 
-    if (!q) return res.status(400).end(JSON.stringify({ ok: false, error: 'Tom query' }));
+    const personMode = /\bvem\b/i.test(rawQ) || /\b(vem|vilka|vilken)\b.*\b(är|heter)\b/i.test(rawQ);
+    const nameOnly = personMode ? extractPersonName(rawQ) : null;
 
-    const { embedding, dims } = await embedQuery(q);
-    const vecLiteral = '[' + embedding.map((x) => Number(x).toFixed(6)).join(',') + ']';
+    const q = (rawQ || nameOnly || '').trim();
+    if (!q) return res.status(422).end(JSON.stringify({ ok:false, error:'Empty query (no text or name extracted)' }));
 
     const map = await getMappings();
+    const known = await getKnownHeadings(map.schema, map.chunksTable, map.headingCol);
+    let effectiveHeading = rawHeading ? normalizeHeading(rawHeading, known) : null;
+    if (personMode && !effectiveHeading && known.includes('personal')) {
+      effectiveHeading = 'personal';
+    }
+    const restrict = !!effectiveHeading && (restrictRequested || personMode);
+    const minScoreEff = personMode ? Math.min(minScore, 0.35) : minScore;
 
-    let sql = buildSQL(map, { filtered: true, heading, restrict });
-    let params = [vecLiteral, K, minScore];
-    if (heading && restrict) params.push(`%${heading}%`);
+    const embedText = nameOnly || q;
+    const { embedding, dims } = await embedQuery(embedText);
+    const vecLiteral = '[' + embedding.map((x) => Number(x).toFixed(6)).join(',') + ']';
+
+    let sql = buildSQL(map, { filtered: true, heading: effectiveHeading, restrict });
+    let params = [vecLiteral, K, minScoreEff];
+    if (effectiveHeading && restrict) params.push(`%${effectiveHeading}%`);
 
     let rows = [];
     try {
@@ -190,21 +249,24 @@ export default async function handler(req, res) {
     let usedFallback = false;
     if (!rows.length) {
       usedFallback = true;
-      sql = buildSQL(map, { filtered: false, heading, restrict });
+      sql = buildSQL(map, { filtered: false, heading: effectiveHeading, restrict });
       params = [vecLiteral, K];
-      if (heading && restrict) params.push(`%${heading}%`);
+      if (effectiveHeading && restrict) params.push(`%${effectiveHeading}%`);
       const r2 = await pool.query(sql, params);
       rows = r2.rows || [];
     }
 
     return res.status(200).end(JSON.stringify({
       ok: true,
-      query: q,
+      query: rawQ,
       k: K,
       dims,
-      heading: heading || null,
+      heading: rawHeading || null,
       restricted: restrict,
       fallback: usedFallback,
+      effective_heading: effectiveHeading || null,
+      person_mode: !!personMode,
+      query_used_for_embed: embedText,
       snippets: rows.map((r) => ({
         doc_id: r.doc_id ?? null,
         title: r.title ?? null,
