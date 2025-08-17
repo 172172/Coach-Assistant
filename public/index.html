@@ -87,7 +87,7 @@
     const STRICT_RAG = false;
     const VOICE_MIN_SIM = 0.40;
     const TEXT_MIN_SIM  = 0.45;
-    const PERSON_MIN_SIM = 0.25; // (behövs ej när vi routar People, men kvar för bakåtkomp.)
+    const PERSON_MIN_SIM = 0.25; // behåll för bakåtkomp om du vill
 
     // ===== Små normaliseringar för ASR-stavfel =====
     function normalizeTranscript(q){
@@ -167,6 +167,17 @@
       return trigger || hasRole || looksLikeName || low.includes('personal');
     }
 
+    // === NAMN-EXTRAKTION till People-API ===
+    function extractNameClient(q){
+      const cleaned = String(q||'').trim().replace(/[?!.\s]+$/,'')
+        .replace(/^(vem\s+(är|heter)\s+|who\s+is\s+|vad\s+heter\s+)/i,'')
+        .trim();
+      const m = cleaned.match(/[A-ZÅÄÖ][A-Za-zÅÄÖåäö\-]+(?:\s+[A-ZÅÄÖ][A-Za-zÅÄÖåäö\-]+)?/);
+      if (m) return m[0].trim();
+      const toks = cleaned.split(/\s+/).filter(Boolean);
+      return toks.slice(0,2).join(' ').trim() || cleaned;
+    }
+
     // mic viz
     let micAnalyser, micData;
     function setupMicViz(stream){
@@ -198,6 +209,42 @@
             .then(()=>$('#memStatus').textContent='Minne: uppdaterat').catch(()=>{});
         }
       }catch(e){ console.warn('LOGGNING FEL:', e?.message||e); }
+    }
+
+    // ====== Coach-röst: grounded sammanfattning ======
+    function truncate(s, n){ s = String(s||'').replace(/\s+/g,' ').trim(); return s.length>n ? s.slice(0,n-1)+'…' : s; }
+
+    /**
+     * Pratar i "coach"-stil men får bara använda KÄLLFAKTA (snippets).
+     * - Kort, naturligt, operativt.
+     * - Inga påhitt: allt måste kunna härledas till facts.
+     * - Avsluta gärna med en erbjudan-fråga (kan stängas av).
+     */
+    function speakGrounded({ query, facts, style='coach', askFollowup=true }) {
+      const factsList = (facts||[]).map(f => `- ${truncate(f, 220)}`).join('\n');
+      const ask = askFollowup ? '\nAvsluta med en kort erbjudan-fråga, t.ex. "Vill du att jag går igenom detaljerna?"' : '';
+      const instructions = `
+Du är Coach Assistant för Linje 65. Tala kort, tydligt och naturligt på svenska.
+Får ENDAST använda fakta i avsnittet KÄLLFAKTA. PARAfrasera och strukturera svaret.
+Förbjudet: anta, gissa, eller lägga till externa fakta. Om fakta ej räcker: säg att manualen inte räcker.
+
+Uppgift: "${truncate(query, 180)}"
+${ask}
+
+Svara så här:
+- Om "hur": ge 3–5 steg i punktform (kort, operativt).
+- Om "vem/roll": namn + roll + 1–2 huvudansvar (1–2 meningar).
+- Om siffra: ge svaret rakt och nämn kontexten (t.ex. "tappen har 31 givare").
+
+KÄLLFAKTA:
+${factsList}
+`.trim();
+
+      rt.skipCancelForNextCreate = true;
+      rt.dc?.send(JSON.stringify({
+        type:'response.create',
+        response:{ modalities:['audio','text'], instructions, metadata:{source:'rag-grounded'} }
+      }));
     }
 
     // ===== Realtime connect =====
@@ -252,7 +299,7 @@
               instructions:`
 Du är Coach Assistant för Linje 65, som Jarvis – hjälpsam, kvick, vänlig. Svara kort och på svenska.
 För personfrågor (namn, roller, arbetsuppgifter): använd alltid People-uppslag. Om inget hittas där, säg att du inte hittar det i manualen – gissa aldrig.
-För övrigt: Använd verktyget "search_manual". Vänta på finalt transkript innan du kallar verktyget. Läs upp exakt från källan.
+För övrigt: Använd verktyget "search_manual". Sammanfatta coachigt och naturligt baserat på källfakta (inga påhitt eller externa fakta).
 `.trim(),
               tools:[
                 { type:'function', name:'search_manual',
@@ -353,34 +400,32 @@ För övrigt: Använd verktyget "search_manual". Vänta på finalt transkript in
       return { hits: [...pri, ...sec], priCount: pri.length };
     }
 
-    // ===== People router =====
+    // ===== People router (coach-svar) =====
     async function handlePeopleQuery(q, toolCallId=null, responseId=null){
       try{
-        const nameOnly = q; // servern/SQL klarar även full fråga
-        const resp = await fetchJSON('/api/people-lookup', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ q: nameOnly, topk: 3, minScore: 0.72 }) });
+        const nameOnly = extractNameClient(q);
+        const resp = await fetchJSON('/api/people-lookup', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ q: nameOnly, topk: 5, minScore: 0.68 })
+        });
+
         if (resp?.ok && resp.rows?.length){
           const p = resp.rows[0];
-          const spoken = `Enligt manualen: ${p.full_name} – ${p.role || 'roll saknas'}.`;
-          if (toolCallId){
-            const out = { ok:true, strict_answer:spoken, source:{ doc:p.source_doc||'Manual', section:p.section||'Personal', idx:p.idx } };
-            rt.dc?.send(JSON.stringify({ type:'conversation.item.create', item:{ type:'function_call_output', call_id:toolCallId, output: JSON.stringify(out) } }));
-            rt.skipCancelForNextCreate = true;
-            rt.dc?.send(JSON.stringify({ type:'response.create' }));
-          } else {
-            speakVerbatim(spoken);
-            append(bubble(`${spoken}\nHämtat från: ${(p.source_doc||'Manual')} • ${p.section||'Personal'} • idx:${p.idx??'?'}`,'assistant'));
-          }
+          const facts = [
+            `${p.full_name} – ${p.role || 'roll saknas'}.`,
+            p.unit ? `Enhet/område: ${p.unit}.` : null
+          ].filter(Boolean);
+
+          speakGrounded({ query: q, facts, style:'coach' });
+          append(bubble(
+            `${facts[0]}\nHämtat från: ${(p.source_doc||'Manual')} • ${p.section||'Personal'} • idx:${p.idx??'?'}`,
+            'assistant'
+          ));
         } else {
           const spoken = 'Jag hittar inte den personen i manualens Personal.';
-          if (toolCallId){
-            const out = { ok:false, strict_answer:spoken, source:null };
-            rt.dc?.send(JSON.stringify({ type:'conversation.item.create', item:{ type:'function_call_output', call_id:toolCallId, output: JSON.stringify(out) } }));
-            rt.skipCancelForNextCreate = true;
-            rt.dc?.send(JSON.stringify({ type:'response.create' }));
-          } else {
-            speakVerbatim(spoken);
-            append(bubble(spoken,'assistant'));
-          }
+          speakGrounded({ query:q, facts:[spoken], askFollowup:false });
+          append(bubble(spoken,'assistant'));
         }
       } catch (e){
         append(errorBubble('People-lookup fel: '+(e?.message||e)));
@@ -428,6 +473,7 @@ För övrigt: Använd verktyget "search_manual". Vänta på finalt transkript in
       return best;
     }
 
+    // ===== Ordagrant (behålls för fel-/fallback-lägen) =====
     function speakVerbatim(text){
       const toSay=`LÄS UPP EXAKT (ordagrant) och utan tillägg: """${text}"""`;
       rt.skipCancelForNextCreate=true;
@@ -472,7 +518,7 @@ För övrigt: Använd verktyget "search_manual". Vänta på finalt transkript in
         return;
       }
 
-      const headingFromUser = null; // vill du låta användaren styra rubrik kan du plocka ut här
+      const headingFromUser = null;
       const headingHint = headingFromUser || null;
       const restrict = !!headingHint;
 
@@ -491,7 +537,6 @@ För övrigt: Använd verktyget "search_manual". Vänta på finalt transkript in
         if (data && ("fusion" in data)) { console.debug("RAG fusion", data.fusion); }
         let hits = data.snippets || [];
 
-        // Rubrik-rerank om headingHint finns
         if (headingHint){
           const rr = rerankByHeading(hits, headingHint);
           hits = rr.hits;
@@ -513,26 +558,31 @@ För övrigt: Använd verktyget "search_manual". Vänta på finalt transkript in
           return;
         }
 
-        // Numerik fråga (ex. givare i tappen)
+        // Numerisk fråga
         const isNum = isNumericQuestion(q);
         if(isNum){
           const bestNum = extractNumericAnswer(hits,['givare','sensor'],['tapp']);
           if (bestNum?.sent){
             const src = bestNum.sn || hits[0];
-            const text = `Enligt manualen: ${bestNum.sent}`;
-            speakVerbatim(text);
-            append(bubble(`${text}\nHämtat från: ${(src.title||'manual')} • idx:${src.idx??'?'} • score:${(src.score??0).toFixed(2)}`,'assistant'));
+            const facts = [bestNum.sent];
+            speakGrounded({ query:q, facts, style:'coach' });
+            append(bubble(
+              `Enligt manualen: ${bestNum.sent}\nHämtat från: ${(src.title||'manual')} • idx:${src.idx??'?'} • score:${(src.score??0).toFixed(2)}`,
+              'assistant'
+            ));
             return;
           }
         }
 
-        // Annars: välj bästa mening
-        const pick=pickBestSentence(hits,q);
-        const top=pick.src||hits[0];
-        const chosen=(pick.s||(top.text||'').replace(/\s+/g,' ').trim()).slice(0,500);
-        const say=`Enligt manualen: ${chosen}`;
-        speakVerbatim(say);
-        append(bubble(`${say}\nHämtat från: ${(top.title||'manual')} • idx:${top.idx??'?'} • score:${(top.score??0).toFixed(2)}`,'assistant'));
+        // Generellt fall – sammanfatta toppsnuttar coachigt
+        const topFacts = (hits||[]).slice(0,3).map(sn => sn.text);
+        speakGrounded({ query:q, facts: topFacts, style:'coach' });
+
+        const top=hits[0];
+        append(bubble(
+          `${truncate(top.text, 500)}\nHämtat från: ${(top.title||'manual')} • idx:${top.idx??'?'} • score:${(top.score??0).toFixed(2)}`,
+          'assistant'
+        ));
 
       }catch(err){
         console.error('search-manual error',err); append(errorBubble('Manual-sök fel: '+(err?.message||err)));
@@ -619,25 +669,30 @@ För övrigt: Använd verktyget "search_manual". Vänta på finalt transkript in
         })});
 
         let hits = data.snippets || [];
-
         append(pill(`RAG: count=${hits.length}${data.fallback?' (fallback)':''} • top1=${(hits[0]?.score??0).toFixed(2)}`));
         if(!hits.length){ append(bubble('Jag hittar inte det i manualen.','assistant')); return; }
 
         const isNum=/\b(hur många|antal(?:et)?|how many|number of|count)\b/i.test(q);
         if(isNum){
           const hit=extractNumericAnswer(hits,['givare','sensor'],['tapp']);
-          if(hit?.sent){ append(bubble(`Enligt manualen: ${hit.sent}\nHämtat från: ${(hit.sn?.title||'manual')} • idx:${hit.sn?.idx??'?'} • score:${(hit.sn?.score??0).toFixed(2)}`,'assistant')); }
-          else { append(bubble('Kan inte verifiera exakt antal i manualen för denna fråga. Specificera del/område eller felkod så söker jag igen.','assistant')); }
+          if(hit?.sent){
+            const facts=[hit.sent];
+            speakGrounded({ query:q, facts, style:'coach' });
+            append(bubble(`Enligt manualen: ${hit.sent}\nHämtat från: ${(hit.sn?.title||'manual')} • idx:${hit.sn?.idx??'?'} • score:${(hit.sn?.score??0).toFixed(2)}`,'assistant'));
+          } else {
+            append(bubble('Kan inte verifiera exakt antal i manualen för denna fråga. Specificera del/område eller felkod så söker jag igen.','assistant'));
+          }
         }else{
-          const pick=pickBestSentence(hits,q);
-          const top=pick.src||hits[0];
-          const chosen=(pick.s||(top.text||'').replace(/\s+/g,' ').trim()).slice(0,500);
-          append(bubble(`${chosen}\nHämtat från: ${(top.title||'manual')} • idx:${top.idx??'?'} • score:${(top.score??0).toFixed(2)}`,'assistant'));
+          const topFacts = hits.slice(0,3).map(sn=>sn.text);
+          speakGrounded({ query:q, facts: topFacts, style:'coach' });
+
+          const top=hits[0];
+          append(bubble(`${truncate(top.text, 500)}\nHämtat från: ${(top.title||'manual')} • idx:${top.idx??'?'} • score:${(top.score??0).toFixed(2)}`,'assistant'));
         }
       }catch(e){ append(errorBubble('Manual-sök fel: '+e.message)); }
     }
 
-    // ===== Realtime handlers (oförändrat förutom resolveQueryFromState & router via runToolSearchManual) =====
+    // ===== Realtime handlers =====
     $('#rtBtn'); $('#rtHangup');
     function isTranscriptFinalType(t){
       return t && (
@@ -722,10 +777,7 @@ För övrigt: Använd verktyget "search_manual". Vänta på finalt transkript in
 
         if (tc.name==='search_manual'){
           const qNow=resolveQueryFromState(args);
-          if (!qNow){
-            // Väntar på transkript-hantering finns redan i din kod, vi förenklar här till direkt-körning
-            return;
-          }
+          if (!qNow) return;
           if (rt._ragBusy || tc.launched) return;
           tc.launched=true; toolCalls.set(id,tc);
           rt.cancelAutos=true; if (tc.response_id) rt.allowedResponseIds.add(tc.response_id);
