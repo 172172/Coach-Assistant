@@ -1,4 +1,11 @@
 // /api/search-manual.js
+// Hybrid-sök för manualen: embeddings + Postgres fulltext + heading-filter + "must"-termer + granne-expansion.
+// Kräver pgvector. Rekommenderat: aktivera även pg_trgm (valfritt).
+//
+// Tips (kör en gång i databasen):
+//   CREATE EXTENSION IF NOT EXISTS vector;
+//   CREATE EXTENSION IF NOT EXISTS pg_trgm;   -- valfritt men ger bättre fuzzy-lexikalt
+
 import { Pool } from 'pg';
 
 const pool =
@@ -21,14 +28,12 @@ function readJsonBody(req){
     if(!req.body) return {};
     if(typeof req.body==='string') return JSON.parse(req.body);
     return req.body;
-  }catch{
-    return {};
-  }
+  }catch{ return {}; }
 }
 
 async function embedQuery(q){
   if(!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY saknas (env)');
-  const model = process.env.EMBED_MODEL || 'text-embedding-3-small'; // dims 1536
+  const model = process.env.EMBED_MODEL || 'text-embedding-3-small'; // 1536
   const r = await fetch('https://api.openai.com/v1/embeddings', {
     method:'POST',
     headers:{ Authorization:`Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type':'application/json' },
@@ -74,9 +79,7 @@ async function getMappings(){
   const textCol    = pick('MANUAL_TEXT_COL', ['chunk','content','text','body','raw','paragraph']);
   const embCol     = pick('MANUAL_EMB_COL',  ['embedding','vector','emb','embedding_1536','embed']);
   const idxCol     = pick('MANUAL_IDX_COL',  ['idx','chunk_index','position','ord','i']);
-  const headingCol = pick('MANUAL_HEADING_COL', ['heading','section','h1','h2','rubrik']);
-  const hPathCol   = pick('MANUAL_HPATH_COL',   ['h_path','path','section_path','heading_path','hpath']); // valfri "rubrikstig"
-  const tsvCol     = pick('MANUAL_TSV_COL',     ['tsv','text_tsv','search_tsv','ts']); // valfri pre-beräknad tsvector
+  const headingCol = pick('MANUAL_HEADING_COL', ['heading','section','h1','h2','h_path','path']);
   const docIdCol   = pick('MANUAL_DOCID_COL', ['doc_id','document_id','docid','source_id','doc']);
 
   if(!textCol) throw new Error('Kunde inte hitta textkolumn i manual_chunks (provat: chunk/content/text/body/raw/paragraph). Sätt MANUAL_TEXT_COL.');
@@ -95,122 +98,82 @@ async function getMappings(){
     if (docsIdCol) join = { exists:true, schema, table:docsTable, idCol:docsIdCol, titleCol:docsTitleCol||null };
   }
 
-  return { schema, chunksTable, textCol, embCol, idxCol, headingCol, hPathCol, tsvCol, docIdCol, join };
+  return { schema, chunksTable, textCol, embCol, idxCol, headingCol, docIdCol, join };
 }
 
-// Bygger ett heading-matchuttryck beroende på vilka kolumner som faktiskt finns
-function headingMatchExpr(map){
-  const parts=[];
-  if (map.headingCol) parts.push(`LOWER(c.${id(map.headingCol)}) LIKE $5`);
-  if (map.hPathCol)   parts.push(`LOWER(c.${id(map.hPathCol)}) LIKE $5`);
-  if (map.join.exists && map.join.titleCol) parts.push(`LOWER(d.${id(map.join.titleCol)}) LIKE $5`);
-  return parts.length ? `(${parts.join(' OR ')})` : `FALSE`;
-}
+function buildHybridSQL(map, opts){
+  const {
+    filtered,           // bool: använd minSim-filter
+    useLex,             // bool: med fulltext rank
+    heading,            // string|null
+    restrictToHeading,  // bool
+    mustTokens          // array<string>
+  } = opts;
 
-// Hybrid-sökning: 1) ta topp-N på vektor (index) 2) reranka med ts_rank + heading-boost
-function buildSQLHybrid(map, { filtered, restrictToHeading }){
-  // Kolumnlistor
-  const selBase = [
-    map.join.exists ? (map.join.titleCol ? `d.${id(map.join.titleCol)} AS title` : `NULL AS title`) : `NULL AS title`,
-    map.docIdCol ? `c.${id(map.docIdCol)} AS doc_id` : `NULL AS doc_id`,
-    map.idxCol ? `c.${id(map.idxCol)} AS idx` : `NULL AS idx`,
-    map.headingCol ? `c.${id(map.headingCol)} AS heading` : `NULL AS heading`,
-    map.hPathCol ? `c.${id(map.hPathCol)} AS h_path` : `NULL AS h_path`,
-    `c.${id(map.textCol)} AS chunk`,
-    // vec_score separat i kandidater
-    `1 - (c.${id(map.embCol)} <=> (SELECT emb FROM q)) AS vec_score`
-  ];
-
-  const fromJoin = map.join.exists && map.docIdCol
-    ? `FROM ${id(map.schema)}.${id(map.chunksTable)} c
-       LEFT JOIN ${id(map.join.schema)}.${id(map.join.table)} d
-         ON d.${id(map.join.idCol)} = c.${id(map.docIdCol)}`
-    : `FROM ${id(map.schema)}.${id(map.chunksTable)} c`;
-
-  const headingExpr = headingMatchExpr(map);
-
-  // WHERE-del i kandidat-steget
-  const whereParts = [];
-  if (filtered){
-    // minSim ($3) används på vec_score
-    whereParts.push(`1 - (c.${id(map.embCol)} <=> (SELECT emb FROM q)) >= $3`);
-  }
-  // headingberoende filter
-  // $5 = heading LIKE-mönster, t.ex. '%sortbyte%'
-  if (restrictToHeading){
-    // hårt filter om $5 finns, annars inga heading-krav
-    whereParts.push(`($5 IS NULL OR ${headingExpr})`);
-  } else {
-    // mjukt: inga krav i kandidatsteget (vi boostar i reranking), men behåller optional guard om $5 är NULL
-    // (dvs lägg inte till något, för indexvänlig kandidatinsamling)
-  }
-  const whereSQL = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : ``;
-
-  // tsvector-uttryck (precompute-kolumn om finns, annars on-the-fly)
-  const tsvExpr = map.tsvCol
-    ? `c.${id(map.tsvCol)}`
-    : `to_tsvector('simple', c.${id(map.textCol)})`;
-
-  // Huvud-sql:
-  // $1: emb vector
-  // $2: slutligt LIMIT K
-  // $3: minScore (vec)
-  // $4: qtext (för tsquery)
-  // $5: headingLike (t.ex. %sortbyte%)
-  // $6: candidateK (hur många topp-vec innan rerank)
-  return `
-    WITH
-      q AS (SELECT $1::vector AS emb),
-      t AS (SELECT $4::text AS qtext, plainto_tsquery('simple', $4::text) AS tsq),
-      cand AS (
-        SELECT
-          ${selBase.join(',\n          ')}
-        ${fromJoin}
-        ${whereSQL}
-        ORDER BY c.${id(map.embCol)} <-> (SELECT emb FROM q)
-        LIMIT $6
-      )
-    SELECT
-      title, doc_id, idx, heading, h_path, chunk,
-      -- clampa ts_rank och räkna slutscore (0..1)
-      vec_score,
-      LEAST(ts_rank_cd(${tsvExpr}, (SELECT tsq FROM t)), 1.0) AS ts_score,
-      CASE WHEN ${headingExpr.replaceAll('c.', 'cand.').replaceAll('d.', 'cand.')} THEN 0.08 ELSE 0.0 END AS heading_boost,
-      ROUND( (0.75*vec_score + 0.23*LEAST(ts_rank_cd(${tsvExpr.replaceAll('c.', 'cand.')}, (SELECT tsq FROM t)),1.0) + 
-             CASE WHEN ${headingExpr.replaceAll('c.', 'cand.').replaceAll('d.', 'cand.')} THEN 0.02 ELSE 0.0 END)::numeric, 6) AS score
-    FROM cand
-    ORDER BY score DESC
-    LIMIT $2
-  `;
-}
-
-// Fallback (enkel vektor-rank, din gamla väg)
-function buildSQLVectorOnly(map, { filtered }){
+  // SELECT list
   const sel = [];
   sel.push(map.join.exists ? (map.join.titleCol ? `d.${id(map.join.titleCol)} AS title` : `NULL AS title`) : `NULL AS title`);
   sel.push(map.docIdCol ? `c.${id(map.docIdCol)} AS doc_id` : `NULL AS doc_id`);
   sel.push(map.idxCol ? `c.${id(map.idxCol)} AS idx` : `NULL AS idx`);
   sel.push(map.headingCol ? `c.${id(map.headingCol)} AS heading` : `NULL AS heading`);
-  sel.push(map.hPathCol ? `c.${id(map.hPathCol)} AS h_path` : `NULL AS h_path`);
   sel.push(`c.${id(map.textCol)} AS chunk`);
-  sel.push(`1 - (c.${id(map.embCol)} <=> (SELECT emb FROM q)) AS score`);
 
+  const vecSim = `1 - (c.${id(map.embCol)} <=> (SELECT emb FROM q))`; // 0..1
+  const lexRank = useLex ? `ts_rank(to_tsvector('simple', c.${id(map.textCol)}), plainto_tsquery('simple', $4))` : `0`;
+
+  // extra boost om heading/titel matchar
+  const headingLike = heading ? `(
+      lower(c.${id(map.headingCol)}) like lower($5)
+      OR ${map.join.exists && map.join.titleCol ? `lower(d.${id(map.join.titleCol)}) like lower($5)` : `false`}
+    )` : `false`;
+
+  const headBoost = heading ? `CASE WHEN ${headingLike} THEN 0.12 ELSE 0 END` : `0`;
+
+  // slutscore
+  sel.push(`${vecSim} AS vec_score`);
+  sel.push(`${useLex ? lexRank : '0'} AS lex_score`);
+  sel.push(`${vecSim}*0.75 + (${useLex ? lexRank : '0'})*0.25 + ${headBoost} AS score`);
+
+  // FROM
   const fromJoin = map.join.exists && map.docIdCol
     ? `FROM ${id(map.schema)}.${id(map.chunksTable)} c
        LEFT JOIN ${id(map.join.schema)}.${id(map.join.table)} d
          ON d.${id(map.join.idCol)} = c.${id(map.docIdCol)}`
     : `FROM ${id(map.schema)}.${id(map.chunksTable)} c`;
 
-  const where = filtered
-    ? `WHERE 1 - (c.${id(map.embCol)} <=> (SELECT emb FROM q)) >= $3`
-    : ``;
+  // WHERE
+  const where = [];
+  if (filtered) where.push(`${vecSim} >= $3`);
+
+  // heading-lås
+  if (heading && restrictToHeading){
+    const like = `lower($5)`;
+    const conds = [];
+    if (map.headingCol) conds.push(`lower(c.${id(map.headingCol)}) like ${like}`);
+    if (map.join.exists && map.join.titleCol) conds.push(`lower(d.${id(map.join.titleCol)}) like ${like}`);
+    if (conds.length) where.push(`(${conds.join(' OR ')})`);
+  }
+
+  // must-termer (enkelt ILIKE OCH-villkor)
+  // Läggs som: (c.text ILIKE $N OR c.heading ILIKE $N OR d.title ILIKE $N)
+  const mustClauses = [];
+  (mustTokens||[]).forEach((_,i)=>{
+    const p = `$${6+i}`; // efter $1:$5
+    const parts = [`c.${id(map.textCol)} ILIKE ${p}`];
+    if (map.headingCol) parts.push(`c.${id(map.headingCol)} ILIKE ${p}`);
+    if (map.join.exists && map.join.titleCol) parts.push(`d.${id(map.join.titleCol)} ILIKE ${p}`);
+    mustClauses.push(`(${parts.join(' OR ')})`);
+  });
+  if (mustClauses.length) where.push(mustClauses.join(' AND '));
+
+  const whereSQL = where.length ? `WHERE ${where.join(' AND ')}` : ``;
 
   return `
     WITH q AS (SELECT $1::vector AS emb)
     SELECT ${sel.join(',\n           ')}
     ${fromJoin}
-    ${where}
-    ORDER BY c.${id(map.embCol)} <-> (SELECT emb FROM q)
+    ${whereSQL}
+    ORDER BY score DESC
     LIMIT $2
   `;
 }
@@ -224,85 +187,104 @@ export default async function handler(req,res){
     const query = String((body.query||'')).trim();
     if (!query) return res.status(400).end(JSON.stringify({ok:false,error:'Missing query'}));
 
-    const K = Number(body.k ?? body.topK ?? 5);
+    const K = Math.max(1, Number(body.k ?? body.topK ?? 5));
     const minScore = Number(body.minSim ?? 0);
-    const headingRaw = (body.heading ?? '').toString().trim();
-    const heading = headingRaw ? headingRaw.toLowerCase() : null;
-    const restrictToHeading = Boolean(body.restrictToHeading ?? false);
-    const candidateK = Math.max(30, Number(body.candidateK ?? (K*12))); // topp-N för rerank
+    const heading  = (body.heading ?? null) ? String(body.heading).trim() : null;
+    const restrictToHeading = !!body.restrictToHeading;
+    const mustTokens = Array.isArray(body.must) ? body.must.filter(Boolean).map(String) : [];
+    const expandNeighbours = Math.max(0, Number(body.expandNeighbours ?? 1)); // hur många chunk åt varje håll
 
     const { embedding, model, dims } = await embedQuery(query);
     const vecLiteral = `[${embedding.join(',')}]`;
 
     const map = await getMappings();
 
-    // Förbered parametrar
-    const params = [
-      vecLiteral,     // $1 :: vector
-      K,              // $2 :: final limit
-      minScore,       // $3 :: minSim
-      query,          // $4 :: qtext (tsquery)
-      heading ? `%${heading}%` : null, // $5 :: heading LIKE
-      candidateK      // $6 :: kandidat-limit
-    ];
+    // 1) Hybrid med minSim + lex
+    let sql = buildHybridSQL(map, {
+      filtered: true, useLex: true,
+      heading, restrictToHeading, mustTokens
+    });
 
-    let rows = [];
-    let fallback = false;
+    const params = [vecLiteral, K, minScore];
+    // $4 = plainto_tsquery text
+    params.push(query);
+    // $5 = heading pattern  (om ej används → sätt något)
+    params.push(heading ? `%${heading}%` : `%`);
+    // $6.. = must tokens som %tok%
+    mustTokens.forEach(tok => params.push(`%${tok}%`));
 
-    // 1) Hybrid med kandidat-rerank (filtrerad på minSim). Respektera restrictToHeading i kandidat WHERE.
+    let rows;
     try{
-      const sqlHybrid = buildSQLHybrid(map, { filtered:true, restrictToHeading });
-      const r = await pool.query(sqlHybrid, params);
+      const r = await pool.query(sql, params);
       rows = r.rows || [];
-    }catch(dbErr){
-      // Vanligaste felet: pgvector/tsvector saknas – vi faller tillbaka på enkel vektorväg
-      // Det här bevarar din tidigare funktionalitet.
+    } catch (dbErr){
       const msg = String(dbErr?.message || dbErr);
       if (msg.includes('<->') || msg.includes('<=>')) throw new Error('pgvector saknas/ej aktiverad. Kör: CREATE EXTENSION IF NOT EXISTS vector;');
       if (msg.includes('dimension mismatch')) throw new Error('Dimensionsfel: vektordimension matchar inte modellen (text-embedding-3-small = vector(1536)).');
-      // Annars försök vektor-only
-      const sqlVec = buildSQLVectorOnly(map, { filtered:true });
-      const r2 = await pool.query(sqlVec, [vecLiteral, K, minScore]);
+      // Om ts_rank/plainto_tsquery skulle saknas i setup → kör om utan lex
+      sql = buildHybridSQL(map, { filtered:true, useLex:false, heading, restrictToHeading, mustTokens });
+      const r2 = await pool.query(sql, [vecLiteral, K, minScore, query, heading ? `%${heading}%` : `%`, ...mustTokens.map(t=>`%${t}%`)]);
       rows = r2.rows || [];
     }
 
-    // 2) Fallbacks om tomt
-    if (rows.length === 0){
-      // 2a) Hybrid utan minSim (bredda) – respektera restrictToHeading
-      try{
-        const sqlHybridWide = buildSQLHybrid(map, { filtered:false, restrictToHeading });
-        const rW = await pool.query(sqlHybridWide, params);
-        rows = rW.rows || [];
-      }catch{
-        // 2b) Vektor-only utan minSim
-        const sqlVecWide = buildSQLVectorOnly(map, { filtered:false });
-        const r2 = await pool.query(sqlVecWide, [vecLiteral, K]);
-        rows = r2.rows || [];
-      }
+    let fallback = false;
+    if (rows.length === 0) {
+      // 2) Fallback utan minSim, men behåll heading/must
       fallback = true;
+      sql = buildHybridSQL(map, { filtered:false, useLex:true, heading, restrictToHeading, mustTokens });
+      const r2 = await pool.query(sql, [vecLiteral, K, 0, query, heading ? `%${heading}%` : `%`, ...mustTokens.map(t=>`%${t}%`)]);
+      rows = r2.rows || [];
     }
 
-    // 3) Om användaren krävde heading och vi fortfarande inte hittar något – returnera tomt (ingen "tvingad" fallback till andra ämnen)
-    if (restrictToHeading && (heading?.length>0) && rows.length===0){
-      return res.status(200).end(JSON.stringify({
-        ok:true, count: 0, model, dims, fallback: false, // medvetet false: vi valde att inte lämna ämnet
-        snippets: []
-      }));
+    // 3) Grann-expansion (±N chunks) för att få hel mening, om idx & doc_id finns
+    if (expandNeighbours>0 && map.idxCol && map.docIdCol && rows.length){
+      const uniq = new Map();
+      for (const r of rows) uniq.set(`${r.doc_id}#${r.idx}`, r);
+      const need = [];
+      for (const r of rows){
+        if (r.doc_id==null || r.idx==null) continue;
+        for (let d=1; d<=expandNeighbours; d++){
+          need.push({ doc_id: r.doc_id, idx: r.idx - d });
+          need.push({ doc_id: r.doc_id, idx: r.idx + d });
+        }
+      }
+      // batcha en sekundär query
+      if (need.length){
+        // bygg IN-lista
+        const vals = [];
+        const tuples = need.map((p,i)=> {
+          vals.push(p.doc_id, p.idx);
+          return `($${vals.length-1+1}, $${vals.length+0})`;
+        });
+        const q2 = `
+          SELECT ${map.docIdCol ? `c.${id(map.docIdCol)} AS doc_id` : `NULL AS doc_id`},
+                 ${map.idxCol ? `c.${id(map.idxCol)} AS idx` : `NULL AS idx`},
+                 ${map.headingCol ? `c.${id(map.headingCol)} AS heading` : `NULL AS heading`},
+                 c.${id(map.textCol)} AS chunk,
+                 ${map.join.exists ? (map.join.titleCol ? `d.${id(map.join.titleCol)} AS title` : `NULL AS title`) : `NULL AS title`},
+                 0.0 AS vec_score, 0.0 AS lex_score, 0.0 AS score
+          FROM ${id(map.schema)}.${id(map.chunksTable)} c
+          ${map.join.exists && map.docIdCol
+            ? `LEFT JOIN ${id(map.join.schema)}.${id(map.join.table)} d ON d.${id(map.join.idCol)} = c.${id(map.docIdCol)}`
+            : ``}
+          WHERE (${map.docIdCol ? `c.${id(map.docIdCol)}` : 'NULL'}, ${map.idxCol ? `c.${id(map.idxCol)}` : 'NULL'}) IN (${tuples.join(',')})
+        `;
+        const r2 = await pool.query(q2, vals);
+        for (const rr of (r2.rows||[])) uniq.set(`${rr.doc_id}#${rr.idx}`, rr);
+      }
+      rows = Array.from(uniq.values());
+      // Behåll topp K först i ordning score DESC, sedan grannar efter doc/idx
+      rows.sort((a,b)=> (Number(b.score??0) - Number(a.score??0)) || (Number(a.doc_id??0)-Number(b.doc_id??0)) || (Number(a.idx??0)-Number(b.idx??0)));
     }
 
-    // 4) Svar
     res.status(200).end(JSON.stringify({
-      ok:true,
-      count: rows.length,
-      model, dims,
-      fallback,
+      ok:true, count: rows.length, model, dims, fallback,
       snippets: rows.map(r => ({
         doc_id:  r.doc_id ?? null,
         title:   r.title ?? null,
         idx:     r.idx ?? null,
         heading: r.heading ?? null,
-        h_path:  r.h_path ?? null,
-        score:   Number((r.score ?? r.vec_score ?? 0).toFixed(4)),
+        score:   Number((r.score ?? 0).toFixed(4)),
         text:    r.chunk
       }))
     }));
