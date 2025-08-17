@@ -102,7 +102,7 @@
     let ragTimer = null;
 
     // Linje 65 keywords for fallback trigger
-    const linjeKeywords = ['linje', 'manual', 'tapp', 'givare', 'sensor', 'ocme', 'felsök', 'format', 'karusell', 'ventil', 'carlsberg', 'person', 'anställd', 'operatör', 'chef', 'namn', 'medarbetare'];
+    const linjeKeywords = ['linje', 'manual', 'tapp', 'givare', 'sensor', 'ocme', 'felsök', 'format', 'karusell', 'ventil', 'carlsberg', 'person', 'anställd', 'operatör', 'chef', 'namn', 'medarbetare', 'personnel', 'personer'];
 
     // Check if query is Linje-related
     function isLinjeRelated(query) {
@@ -190,7 +190,8 @@ Använd punktlistor för arbetssteg. Förebygg faror och slöseri.
 Använd verktyget "search_manual" ENDAST för specifika frågor om Linje 65, manualer, procedurer, tekniska detaljer, personer på linjen eller Carlsberg – aldrig för småprat, math eller irrelevant.
 VÄNTA på ett final transkript innan du kallar verktyget.
 Basa ditt svar enbart på resultat från verktyget när det används – hitta inte på information. Om inget resultat från manualen: Säg "Jag har tyvärr inte lärt mig om den personen/ämnet ännu från manualen – är det relaterat till linjen? Kan du förtydliga?"
-För personer: Om relaterat till Linje 65 (t.ex. omnämnda i manualen som operatörer, chefer eller anställda), använd verktyg och rubriken i manualen ": "Carlsberg Linje 65 personal personer"" och svara baserat på resultat; annars redirecta som off-topic.
+För personer: Om relaterat till Linje 65 (t.ex. omnämnda i manualen som operatörer, chefer eller anställda), använd verktyg och svara baserat på resultat; annars redirecta som off-topic.
+Allt gällande personal finns i manualens exakta rubrik "Personal" – sök alltid där för namn, roller och uppgifter.
 Huvuduppgift: Undervisa operatörer i day-to-day tasks på Linje 65.
 Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är kvadratroten av 16" – "4! Något mer matte eller linje-fråga?" För "hur felsöker jag tapp" – använd verktyg. För "vem är operatör X på linjen" – använd verktyg om i manual. För "vem är Elon Musk" – redirecta.
 `.trim(),
@@ -198,7 +199,7 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
                 { type:'function', name:'search_manual',
                   description:`Sök i Linje65-manualdatabasen efter relevant information. Använd detta ENDAST för frågor som rör manualer, procedurer eller tekniska detaljer om Linje 65, inklusive personer relaterade till linjen.`,
                   parameters:{ type:'object', properties:{
-                    query:{type:'string',description:'Sökfrågan på svenska, baserat på användarens fråga.'},
+                    query:{type:'string',description:'Sökfrågan på svenska, baserat på användarens fråga. För personal, inkludera "Personal" i queryn.'},
                     k:{type:'integer',description:'Antal resultat att hämta (default 5).',default:5},
                     minSim:{type:'number',description:'Minsta likhetspoäng (default 0.45).',default:0.45}
                   }, required:['query'] }
@@ -475,7 +476,7 @@ Exempel: För "hej" – "Hej! Redo att hjälpa med Linje 65 idag?" För "vad är
       }
       return best;
     }
-    const DOMAIN_BOOST=['tapp','givare','sensor','ocme','felsök','format','karusell','ventil'];
+    const DOMAIN_BOOST=['tapp','givare','sensor','ocme','felsök','format','karusell','ventil', 'personal', 'personer', 'anställd', 'operatör', 'chef'];
     function pickBestSentence(snippets, query){
       const q=(query||'').toLowerCase(); const tokens=q.split(/[^a-zåäö0-9]+/i).filter(t=>t.length>2);
       let best={s:'',score:-1,src:null};
