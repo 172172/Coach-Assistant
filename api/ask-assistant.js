@@ -2,7 +2,7 @@
 import OpenAI from "openai";
 
 export const config = { runtime: "nodejs" };
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY1 });
 const ASSISTANT_ID = process.env.ASSISTANT_ID;
 
 // Hjälp: plocka ut ren text från assistantens senaste meddelande
