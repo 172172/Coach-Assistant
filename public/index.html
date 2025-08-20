@@ -1,152 +1,1064 @@
-<!doctype html>
+
+<!DOCTYPE html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Coach Assistant – Realtime + Assistants Tool (Manual)</title>
+  <title>Coach Assistant – Linje 65 (Realtime)</title>
   <style>
-    body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0b0f19;color:#eef;display:flex;flex-direction:column;align-items:center;margin:0;padding:24px;gap:16px}
-    .card{width:min(920px,95vw);background:#11182a;border:1px solid #1c2540;border-radius:16px;box-shadow:0 8px 28px rgba(0,0,0,.35);padding:16px}
-    h1{margin:8px 0 0;font-weight:600} .sub{opacity:.8;margin:0 0 16px}
-    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-    button{background:#2b5cff;border:0;color:#fff;padding:10px 14px;border-radius:12px;font-weight:600;cursor:pointer}
-    button.secondary{background:#233055}
-    .log{height:240px;overflow:auto;background:#0c1222;border-radius:12px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace}
-    .pill{display:inline-block;padding:4px 8px;border:1px solid #2a355a;border-radius:999px;margin-right:6px;font-size:12px}
-    .small{font-size:12px;opacity:.8}
+    :root{--bg:#0b0f14;--panel:#121821;--text:#e6edf3;--muted:#9fb0c3;--accent:#5eead4;--danger:#f87171;--ok:#86efac;--pill:#182232}
+    html,body{height:100%}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Noto Sans","Helvetica Neue",Arial;background:radial-gradient(1200px 600px at 20% 0%,#0e1621,#0b0f14 75%);color:var(--text)}
+    .wrap{max-width:980px;margin:0 auto;padding:24px}
+    header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}
+    header .title{font-size:20px;font-weight:700;letter-spacing:.3px}
+    .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+    button{appearance:none;border:none;padding:10px 14px;border-radius:12px;cursor:pointer;font-weight:600}
+    .primary{background:var(--accent);color:#0a0f14}
+    .ghost{background:#0d1520;color:var(--text);border:1px solid #233146}
+    .danger{background:var(--danger);color:#111}
+    .muted{color:var(--muted);font-size:13px}
+    .row{display:flex;gap:10px;align-items:center}
+    input[type="text"],input[type="search"]{background:#0d1622;color:var(--text);border:1px solid #243244;border-radius:10px;padding:10px 12px}
+    .pill{background:var(--pill);color:var(--text);padding:8px 12px;border-radius:999px;display:inline-block;margin:6px 6px 0 0;font-size:12px;border:1px solid #26364a}
+    .panel{background:var(--panel);border:1px solid #233146;border-radius:16px;padding:14px}
+    #output{display:flex;flex-direction:column;gap:10px;margin-top:14px}
+    .bubble{background:#0f1722;border:1px solid #213145;border-radius:16px;padding:12px 14px;white-space:pre-wrap;line-height:1.45}
+    .bubble.user{background:#0f1a27;border-color:#24415a}
+    .bubble.assistant{background:#0f1823;border-color:#2c3f57}
+    .bubble.error{background:#1b0f12;border-color:#4a1f2a}
+    .vis{height:10px;background:#0e1420;border-radius:9999px;overflow:hidden;border:1px solid #213145}
+    .vis>b{display:block;height:100%;width:6%;background:linear-gradient(90deg,#85f3d5,#4dd4ff);transition:width .08s linear}
+    footer{margin-top:24px;color:var(--muted);font-size:12px}
+    .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Coach Assistant – Linje 65</h1>
-    <p class="sub">Realtime röst + verktyg: <span class="pill">search_manual</span> (Assistants-liknande flöde)</p>
-    <div class="row">
-      <button id="btnConnect">Anslut</button>
-      <button id="btnMic" disabled>Starta/Stoppa Mic</button>
-      <button id="btnHang" class="secondary" disabled>Lägg på</button>
+  <div class="wrap">
+    <header>
+      <div class="title">🦾 Coach Assistant – Linje 65 (Realtime)</div>
+      <div class="controls">
+        <div class="row">
+          <label class="muted" for="operatorId">Operatör:</label>
+          <input id="operatorId" type="text" placeholder="t.ex. kevin" style="width:140px" />
+          <button class="ghost" id="saveIdBtn">Spara</button>
+        </div>
+        <button class="primary" id="rtBtn">Anslut Realtime</button>
+        <button class="ghost" id="rtHangup" style="display:none">Lägg på</button>
+      </div>
+    </header>
+
+    <div class="panel">
+      <div class="flex">
+        <div id="rtStatus" class="pill">Inte ansluten</div>
+        <div id="memStatus" class="pill">Minne: —</div>
+        <div class="vis" style="flex:1 1 220px; min-width:220px"><b id="micBar"></b></div>
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <input id="quickText" type="search" placeholder="Skicka text till assistenten (enter)" style="flex:1" />
+        <button class="ghost" id="sendTextBtn">Skicka</button>
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <input id="manualQuery" type="search" placeholder="Testa manual-sök (t.ex. 'vem är vår processingenjör', 'arbetsuppgifter skiftledare')" style="flex:1" />
+        <button class="ghost" id="manualBtn">Testa manual</button>
+      </div>
+
+      <div id="output"></div>
     </div>
-    <div class="row small">
-      <span id="status">Status: frånkopplad</span>
-    </div>
-    <div class="log" id="log"></div>
+
+    <footer>
+      Linje65: Byggd av galningar, driven av AI, älskad av... tja, vi får se!
+    </footer>
   </div>
 
-<script>
-const logEl = document.getElementById('log');
-function log(...args){
-  const line = document.createElement('div');
-  line.textContent = args.map(a => typeof a==='string'?a:JSON.stringify(a)).join(' ');
-  logEl.appendChild(line); logEl.scrollTop = logEl.scrollHeight;
-}
+  <script>
+    // ===== Helpers =====
+    const $ = s => document.querySelector(s);
+    const $$ = s => Array.from(document.querySelectorAll(s));
+    async function fetchJSON(url, opts){ const r=await fetch(url,opts); const t=await r.text(); let j; try{j=JSON.parse(t)}catch{throw new Error(`${r.status} ${r.statusText}: ${t.slice(0,200)}`)} if(!r.ok||j?.ok===false) throw new Error(j?.error||j?.message||`${r.status} ${r.statusText}`); return j; }
+    const pill = t => { const d=document.createElement('div'); d.className='pill'; d.textContent=t; return d; };
+    const bubble = (t,role='assistant') => { const d=document.createElement('div'); d.className='bubble '+role; d.textContent=t; return d; };
+    const errorBubble = t => { const d=document.createElement('div'); d.className='bubble error'; d.textContent=t; return d; };
+    const append = el => { $('#output').appendChild(el); el.scrollIntoView({behavior:'smooth',block:'end'}); };
 
-let pc, dc, micStream, tokenTimer;
-let sessionId = null;
-let pendingToolCalls = new Map(); // tool_call_id -> { name, args }
+    // ===== Konfig-flaggor =====
+    const RAG_ON_CREATED = false;
+    const STRICT_RAG = false;
+    const VOICE_MIN_SIM = 0.40;
+    const TEXT_MIN_SIM  = 0.45;
+    const PERSON_MIN_SIM = 0.25; // behåll för bakåtkomp om du vill
 
-async function getRtToken(){
-  const res = await fetch('/api/rt-token');
-  if(!res.ok){ throw new Error('rt-token fail'); }
-  return res.json(); // { client_secret, url }
-}
+    // ===== Små normaliseringar för ASR-stavfel =====
+    function normalizeTranscript(q){
+      let s = (q||'');
+      const map = {
+        'softbyte': 'sortbyte',
+        'soptipet': 'sortbyte',
+        'sopbety': 'sortbyte',
+        'ocne': 'OCME',
+        'okme': 'OCME'
+      };
+      for (const [k,v] of Object.entries(map)) s = s.replace(new RegExp(`\\b${k}\\b`,'ig'), v);
+      return s;
+    }
 
-async function connect(){
-  const { client_secret, url } = await getRtToken();
-  sessionId = crypto.randomUUID();
+    // ===== Operator =====
+    const operatorInput = $('#operatorId');
+    operatorInput.value = localStorage.getItem('operator_id') || 'kevin';
+    $('#saveIdBtn').onclick = () => { localStorage.setItem('operator_id', operatorInput.value.trim() || 'kevin'); append(pill('Operatör sparad: '+localStorage.getItem('operator_id'))); };
 
-  pc = new RTCPeerConnection();
-  dc = pc.createDataChannel('oai-events');
-  dc.onmessage = onMessage;
+    // ===== RT state =====
+    let rt = {
+      pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
+      conversation_id:null, _msgCount:0,
+      _ragBusy:false, _lastQuery:"", _lastToolCallId:null,
+      cancelAutos:false, skipCancelForNextCreate:false, allowedResponseIds:new Set(),
+      _lastUserText:"", _liveUserBuf:"",
+      _pendingTool:null
+    };
+    const toolCalls = new Map();
+    const RAG_TIMEOUT_MS = 8000;
+    const WAIT_FOR_QUERY_MS = 2000;
+    let ragTimer = null;
 
-  // Spela upp TTS från Realtime
-  const audio = document.createElement('audio');
-  audio.autoplay = true;
-  pc.ontrack = e => { audio.srcObject = e.streams[0]; };
+    // Linje 65 keywords (inkl. person/rollord)
+    const linjeKeywords = [
+      'linje','manual','tapp','givare','sensor','ocme','okme','åcme',
+      'felsök','format','karusell','ventil','carlsberg','person','anställd',
+      'operatör','chef','namn','medarbetare','sortbyte','byte','produktion',
+      'kister','kistler','processingenjör','kvalitet','underhåll','skiftledare',
+      'kontakt','telefon','mail','email','roll','ansvar','arbetsuppgift','personal'
+    ];
 
-  // Lokalt mic-spår
-  micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
+    function isLinjeRelated(query) {
+      const lowerQuery = (query||'').toLowerCase();
+      return linjeKeywords.some(kw => lowerQuery.includes(kw));
+    }
 
-  // Skicka offer
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
+    // ===== Personfråge-detektor =====
+    const ROLE_SYNONYMS = {
+      'processingenjör': ['processingenjör','process ingenjör','process engineer'],
+      'produktionschef': ['produktionschef','production manager','prodchef','line manager','linjechef'],
+      'skiftledare':     ['skiftledare','skiftchef','team lead','teamleader'],
+      'underhållschef':  ['underhållschef','maintenance manager','uh-chef','underhåll'],
+      'kvalitetstekniker':['kvalitetstekniker','quality engineer','qa','kvalitet'],
+      'operatör':        ['operatör','operator'],
+      'tekniker':        ['tekniker','technician','service'],
+      'process':         ['process','processansvarig']
+    };
+    const PERSON_TRIGGERS = [
+      'vem är','vilken','vilka är','ansvarar','arbetsuppgift','arbetsuppgifter','roll','chef','personal','kontakt','telefon','mail','email'
+    ];
+    function normStr(s){ return (s||'').toString().normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+    function roleTokensFor(q){
+      const low = normStr(q);
+      const tokens = [];
+      for (const [role, syns] of Object.entries(ROLE_SYNONYMS)){
+        if (syns.some(s => low.includes(normStr(s)))) tokens.push(role);
+      }
+      return tokens;
+    }
+    function isPersonnelQuery(q){
+      const low = normStr(q);
+      const trigger = PERSON_TRIGGERS.some(t => low.includes(normStr(t)));
+      const hasRole = roleTokensFor(q).length>0;
+      const looksLikeName = /\b[A-ZÅÄÖ][a-zåäö]+(?:\s+[A-ZÅÄÖ][a-zåäö]+)+\b/.test(q); // Förnamn Efternamn
+      return trigger || hasRole || looksLikeName || low.includes('personal');
+    }
 
-  const baseHeaders = { 'Authorization': `Bearer ${client_secret}`, 'Content-Type':'application/sdp' };
-  const sdpRes = await fetch(url, { method:'POST', body:offer.sdp, headers: baseHeaders });
-  const answer = { type:'answer', sdp: await sdpRes.text() };
-  await pc.setRemoteDescription(answer);
+    // === NAMN-EXTRAKTION till People-API ===
+    function extractNameClient(q){
+      const cleaned = String(q||'').trim().replace(/[?!.\s]+$/,'')
+        .replace(/^(vem\s+(är|heter)\s+|who\s+is\s+|vad\s+heter\s+)/i,'')
+        .trim();
+      const m = cleaned.match(/[A-ZÅÄÖ][A-Za-zÅÄÖåäö\-]+(?:\s+[A-ZÅÄÖ][A-Za-zÅÄÖåäö\-]+)?/);
+      if (m) return m[0].trim();
+      const toks = cleaned.split(/\s+/).filter(Boolean);
+      return toks.slice(0,2).join(' ').trim() || cleaned;
+    }
 
-  // Håll token vid liv (förläng om din server gör det möjligt)
-  log('Ansluten till Realtime.');
-  document.getElementById('status').textContent='Status: ansluten';
-  document.getElementById('btnMic').disabled=false;
-  document.getElementById('btnHang').disabled=false;
-
-  // Init-instruktioner (samma policy som rt-token skickar)
-  send({ type:'session.update', session:{
-    instructions: `Du är Coach Assistant för Linje 65. Du MÅSTE använda verktyget search_manual när frågan gäller processer/maskiner/inställningar. Vänta alltid på tool_result innan du svarar. Om manual_context saknas: säg "Oklar information – behöver uppdaterad manual."` ,
-    modalities:["audio","text"],
-    input_audio_transcription:{ model:"whisper-1" },
-    turn_detection:{ type:"server_vad", threshold:0.5, silence_duration_ms:600 }
-  }});
-}
-
-function hang(){
-  if (pc) pc.close();
-  if (micStream) micStream.getTracks().forEach(t=>t.stop());
-  pc=null; micStream=null; sessionId=null;
-  pendingToolCalls.clear();
-  document.getElementById('status').textContent='Status: frånkopplad';
-  document.getElementById('btnMic').disabled=true;
-  document.getElementById('btnHang').disabled=true;
-}
-
-function send(payload){ if (dc && dc.readyState==='open') dc.send(JSON.stringify(payload)); }
-
-// Mic toggle
-let micOn=false;
-function toggleMic(){
-  if(!micStream) return;
-  micOn=!micOn;
-  micStream.getAudioTracks().forEach(t=> t.enabled = micOn);
-  document.getElementById('btnMic').textContent = micOn? 'Stoppa Mic' : 'Starta Mic';
-}
-
-// Viktigt: 1 styrning – modellen anropar verktyg, vi svarar ALLTID med function_call_output
-async function onMessage(evt){
-  const m = JSON.parse(evt.data);
-  if(m.type==='response.created'){ log('response.created'); }
-  if(m.type==='response.output_text.delta'){ /* streaming text */ }
-  if(m.type==='response.completed'){ log('response.completed'); }
-
-  if(m.type==='response.function_call'){ // modellens tool-call
-    const call = m.function_call;
-    const { id: tool_call_id, name, arguments:args } = call;
-    pendingToolCalls.set(tool_call_id, { name, args });
-    log('Tool call:', name);
-
-    if(name === 'search_manual'){
+    // mic viz
+    let micAnalyser, micData;
+    function setupMicViz(stream){
       try{
-        const res = await fetch('/api/search-manual', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ query: args.query ?? '', session: { line: 65 } })
-        });
-        const data = await res.json();
+        const ctx=new (window.AudioContext||window.webkitAudioContext)();
+        const src=ctx.createMediaStreamSource(stream);
+        micAnalyser=ctx.createAnalyser(); micAnalyser.fftSize=512; micAnalyser.smoothingTimeConstant=0.8;
+        src.connect(micAnalyser); micData=new Uint8Array(micAnalyser.frequencyBinCount);
+        const bar=$('#micBar');
+        (function loop(){
+          if(!micAnalyser) return;
+          micAnalyser.getByteTimeDomainData(micData);
+          let peak=0; for(let i=0;i<micData.length;i++){ const v=Math.abs(micData[i]-128)/128; if(v>peak) peak=v; }
+          bar.style.width=Math.min(98,(peak*100*1.6)+6)+'%';
+          requestAnimationFrame(loop);
+        })();
+      }catch{}
+    }
 
-        // ALLTID returnera function_call_output – även vid succé
-        send({ type:'response.function_call_output', function_call_id: tool_call_id, output: data });
-        log('Tool result skickat (chunks:', (data?.chunks?.length||0), ')');
-      }catch(e){
-        send({ type:'response.function_call_output', function_call_id: tool_call_id, output: { error: String(e) } });
-        log('Tool error returnerat');
+    // logging (tyst)
+    async function logMsg(role, content, modality='voice', payload=null){
+      if(!rt.conversation_id) return;
+      try{
+        const res=await fetch('/api/memory-log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conversation_id:rt.conversation_id,role,content,modality,payload})});
+        if(!res.ok) console.warn('LOGGNING FEL:', await res.text());
+        rt._msgCount=(rt._msgCount||0)+1;
+        if(rt._msgCount%8===0){
+          fetch('/api/memory-summarize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({conversation_id:rt.conversation_id})})
+            .then(()=>$('#memStatus').textContent='Minne: uppdaterat').catch(()=>{});
+        }
+      }catch(e){ console.warn('LOGGNING FEL:', e?.message||e); }
+    }
+
+    // ====== Coach-röst: grounded sammanfattning ======
+    function truncate(s, n){ s = String(s||'').replace(/\s+/g,' ').trim(); return s.length>n ? s.slice(0,n-1)+'…' : s; }
+
+    /**
+     * Pratar i "coach"-stil men får bara använda KÄLLFAKTA (snippets).
+     * - Kort, naturligt, operativt.
+     * - Inga påhitt: allt måste kunna härledas till facts.
+     * - Avsluta gärna med en erbjudan-fråga (kan stängas av).
+     */
+    function speakGrounded({ query, facts, style='coach', askFollowup=true }) {
+      const factsList = (facts||[]).map(f => `- ${truncate(f, 220)}`).join('\n');
+      const ask = askFollowup ? '\nAvsluta med en kort erbjudan-fråga, t.ex. "Vill du att jag går igenom detaljerna?"' : '';
+      const instructions = `
+Du är Coach Assistant för Linje 65. Tala kort, tydligt och naturligt på svenska.
+Får ENDAST använda fakta i avsnittet KÄLLFAKTA. PARAfrasera och strukturera svaret.
+Förbjudet: anta, gissa, eller lägga till externa fakta. Om fakta ej räcker: säg att manualen inte räcker.
+Du ska pedagogiskt utbilda operatörerna så dom förstår vad dom gör.
+
+Uppgift: "${truncate(query, 180)}"
+${ask}
+
+Svara så här:
+- Om "hur": ge 3–5 steg i punktform (kort, operativt).
+- Om "vem/roll": namn + roll + 1–2 huvudansvar (1–2 meningar).
+- Om siffra: ge svaret rakt och nämn kontexten (t.ex. "tappen har 31 givare").
+
+KÄLLFAKTA:
+${factsList}
+`.trim();
+
+      rt.skipCancelForNextCreate = true;
+      rt.dc?.send(JSON.stringify({
+        type:'response.create',
+        response:{ modalities:['audio','text'], instructions, metadata:{source:'rag-grounded'} }
+      }));
+    }
+
+    // ===== Quick Sortbyte Pallet Calculator (NY) =====
+    const quickCalc = {
+      active:false, expecting:null, buffer_hl:null, can_liters:null,
+
+      reset(){ this.active=false; this.expecting=null; this.buffer_hl=null; this.can_liters=null; },
+
+      detect(q){
+        const s = (q||'').toLowerCase();
+        const hlMatch = s.match(/(\d+(?:[.,]\d+)?)\s*hl\b/);
+        const asksPallets = /\b(hur\s*många\s*pallar|pallar\s*kan\s*jag\s*(?:köra|få)|how\s+many\s+pallets|antal\s*pallar)\b/.test(s) || s.includes('pall');
+        if (!hlMatch || !asksPallets) return null;
+        const amount = parseFloat(hlMatch[1].replace(',','.'));
+        const size =
+          /\b(33\s*cl|0\.?33)\b/.test(s) ? 0.33 :
+          /\b(50\s*cl|0\.?5)\b/.test(s)  ? 0.50 : null;
+        return { amount, size };
+      },
+
+      start({amount,size}){
+        this.active=true; this.buffer_hl=amount; this.can_liters=size; this.expecting=null;
+        if (!this.can_liters){
+          this.expecting='can_liters';
+          const prompt='Kör ni 33 cl eller 50 cl?';
+          speakGrounded({ query: prompt, facts:[prompt] });
+          append(bubble('❓ '+prompt,'assistant'));
+          return true;
+        }
+        return this.finish();
+      },
+
+      handle(raw){
+        if (!this.active) return false;
+        const u = (raw||'').toLowerCase();
+        if (this.expecting==='can_liters'){
+          if (/\b(33|33cl|0\.?33)\b/.test(u)) { this.can_liters=0.33; this.expecting=null; return this.finish(); }
+          if (/\b(50|50cl|0\.?5)\b/.test(u))  { this.can_liters=0.50; this.expecting=null; return this.finish(); }
+          const prompt='33 cl eller 50 cl?';
+          speakGrounded({ query: prompt, facts:[prompt] });
+          return true;
+        }
+        return false;
+      },
+
+      finish(){
+        const line_hl = (this.can_liters >= 0.5) ? 55 : 36;
+        const net_hl = Math.max(0, (this.buffer_hl + 37 - line_hl));
+        const pallets_float = net_hl / 30;
+        const pallets = Math.max(0, Math.floor(pallets_float));
+
+        const facts = [
+          'Regel: (buffert_hl + 37 − line_hl) / 30 = pallar',
+          'line_hl = 55 hl vid 50 cl, 36 hl vid 33 cl',
+          `Dina värden: buffert_hl=${this.buffer_hl}, line_hl=${line_hl}`
+        ];
+        const msg = `Med ${this.buffer_hl} hl i tanken och ${(this.can_liters*100).toFixed(0)} cl: netto ≈ ${net_hl.toFixed(1)} hl → ${pallets_float.toFixed(2)} pallar ≈ ${pallets} hela pallar.`;
+
+        speakGrounded({ query: msg, facts });
+        append(bubble(msg,'assistant'));
+        this.reset();
+        return true;
+      }
+    };
+
+    // ===== Realtime connect =====
+    $('#rtBtn').addEventListener('click', connectRealtime);
+    $('#rtHangup').addEventListener('click', hangupRealtime);
+
+    async function connectRealtime(){
+      const status=t=>$('#rtStatus').textContent=t;
+      try{
+        // Bättre ljud in till ASR
+        rt.mic = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            noiseSuppression: true,
+            echoCancellation: true,
+            autoGainControl: false,
+            sampleRate: 48000
+          }
+        });
+        setupMicViz(rt.mic);
+
+        const memInit=await fetchJSON('/api/memory-init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:localStorage.getItem('operator_id')||'kevin'})});
+        rt.conversation_id=memInit.conversation_id; $('#memStatus').textContent='Minne: laddat';
+
+        rt.pc=new RTCPeerConnection();
+        rt.pc.addTransceiver('audio', { direction:'recvonly' });
+        rt.mic.getTracks().forEach(t=>rt.pc.addTrack(t,rt.mic));
+
+        rt.remoteAudio=new Audio();
+        rt.remoteAudio.autoplay=true; rt.remoteAudio.playsInline=true; rt.remoteAudio.muted=false;
+        rt.pc.ontrack=e=>{
+          rt.remoteAudio.srcObject=e.streams[0];
+          rt.remoteAudio.play().catch(()=>{});
+          append(pill('🔊 Mottar röst från assistenten'));
+        };
+
+        rt.dc=rt.pc.createDataChannel('oai-events');
+        rt.dc.onopen=()=>{ 
+          rt.dc.send(JSON.stringify({
+            type:'session.update',
+            session:{
+              voice:'verse',
+              modalities:['audio','text'],
+              turn_detection:{
+                type:'server_vad',
+                threshold: 0.6,
+                silence_duration_ms: 550,
+                prefix_padding_ms: 200
+              },
+              input_audio_transcription: { model: "gpt-4o-transcribe", language: "sv" },
+              tool_choice:'auto',
+              instructions:`
+Du är Coach Assistant för Linje 65, som Jarvis – hjälpsam, kvick, vänlig. Svara kort och på svenska.
+För personfrågor (namn, roller, arbetsuppgifter): använd alltid People-uppslag. Om inget hittas där, säg att du inte hittar det i manualen – gissa aldrig.
+För övrigt: Använd verktyget "search_manual". Sammanfatta coachigt och naturligt baserat på källfakta (inga påhitt eller externa fakta).
+`.trim(),
+              tools:[
+                { type:'function', name:'search_manual',
+                  description:`Sök i Linje65-manualdatabasen (inkl. rubrikfilter t.ex. "Personal").`,
+                  parameters:{ type:'object', properties:{
+                    query:{type:'string'},
+                    k:{type:'integer',default:5},
+                    minSim:{type:'number',default:0.45},
+                    heading:{type:'string',description:'Rubrik/sektion, t.ex. "Personal"'},
+                    restrictToHeading:{type:'boolean',description:'Om true, bara träffar inom rubriken'}
+                  }, required:['query'] }
+                },
+                { type:'function', name:'save_memory',
+                  description:'Spara stabil fakta/inställning i långtidsminne.',
+                  parameters:{ type:'object', properties:{key:{type:'string'}, value:{type:'string'}}, required:['key','value']}
+                }
+              ]
+            }
+          }));
+          append(pill('Realtime ansluten. Prata när som helst.'));
+        };
+        rt.dc.onmessage=(e)=>{ try{ handleRealtimeMessage(JSON.parse(e.data)); }catch{} };
+
+        const {token, model}=await fetchJSON('/api/rt-token');
+        append(pill('Realtime modell: '+model));
+        const offer=await rt.pc.createOffer(); await rt.pc.setLocalDescription(offer);
+        const sdp=await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`,{
+          method:'POST',
+          headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/sdp','OpenAI-Beta':'realtime=v1'},
+          body:offer.sdp
+        }).then(r=>r.text());
+        await rt.pc.setRemoteDescription({type:'answer', sdp});
+
+        rt.connected=true; $('#rtBtn').style.display='none'; $('#rtHangup').style.display='inline-block'; status('Realtime ansluten');
+      }catch(e){ console.error(e); $('#rtStatus').textContent=`Realtime misslyckades: ${e?.message||e}`; append(errorBubble('Fel vid anslutning: '+(e?.message||e))); }
+    }
+
+    async function hangupRealtime(){
+      try{
+        rt.dc?.close();
+        rt.pc?.getSenders()?.forEach(s=>s.track?.stop());
+        rt.pc?.close(); rt.mic?.getTracks()?.forEach(t=>t.stop());
+        micAnalyser=null;
+      }catch{}
+      rt={ pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
+           conversation_id:rt.conversation_id, _msgCount:rt._msgCount,
+           _ragBusy:false, _lastQuery:"", _lastToolCallId:null,
+           cancelAutos:false, skipCancelForNextCreate:false, allowedResponseIds:new Set(),
+           _lastUserText:"", _liveUserBuf:"", _pendingTool:null };
+      $('#rtBtn').style.display='inline-block'; $('#rtHangup').style.display='none'; $('#rtStatus').textContent='Inte ansluten'; append(pill('Samtal avslutat.'));
+    }
+
+    function resolveQueryFromState(args){
+      let q=(args?.query||'').trim();
+      if(!q && (rt._liveUserBuf||'').trim()) q=rt._liveUserBuf.trim();
+      if(!q && (rt._lastUserText||'').trim()) q=rt._lastUserText.trim();
+      if(!q && (rt._lastQuery||'').trim())    q=rt._lastQuery.trim();
+      return normalizeTranscript(q || '');
+    }
+
+    function extractUserTextFromItem(item){
+      try{
+        if(!item || item.type!=='message' || item.role!=='user') return '';
+        const parts=item.content||[];
+        for(const p of parts){
+          if (p?.type==='input_text' && typeof p.text==='string') return p.text;
+          if (p?.type==='text' && typeof p.text==='string') return p.text;
+          if (p?.type==='input_audio_transcription' && typeof p.text==='string') return p.text;
+          if (typeof p?.transcript==='string') return p.transcript;
+        }
+      }catch{}
+      return '';
+    }
+
+    function extractAssistantTextFromItem(item){
+      try{
+        if(!item || item.type!=='message' || item.role!=='assistant') return '';
+        const parts=item.content||[];
+        for(const p of parts){
+          if(p?.type==='output_text' && p?.text) return p.text;
+          if(p?.type==='text' && p?.text) return p.text;
+        }
+      }catch{}
+      return '';
+    }
+
+    // Rerank på rubrik
+    function normStrLocal(s){ return (s||'').toString().normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+    function rerankByHeading(snippets, heading){
+      const h = normStrLocal(heading);
+      const pri=[], sec=[];
+      for (const sn of (snippets||[])){
+        const title = normStrLocal(sn.title||'');
+        const text  = normStrLocal(sn.text||'');
+        const head  = normStrLocal(sn.heading||sn.h_path||sn.section||'');
+        (title.includes(h) || head.includes(h) || text.includes(h)) ? pri.push(sn) : sec.push(sn);
+      }
+      return { hits: [...pri, ...sec], priCount: pri.length };
+    }
+
+    // ===== People router (coach-svar) =====
+    async function handlePeopleQuery(q, toolCallId=null, responseId=null){
+      try{
+        const nameOnly = extractNameClient(q);
+        const resp = await fetchJSON('/api/people-lookup', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ q: nameOnly, topk: 5, minScore: 0.68 })
+        });
+
+        if (resp?.ok && resp.rows?.length){
+          const p = resp.rows[0];
+          const facts = [
+            `${p.full_name} – ${p.role || 'roll saknas'}.`,
+            p.unit ? `Enhet/område: ${p.unit}.` : null
+          ].filter(Boolean);
+
+          speakGrounded({ query: q, facts, style:'coach' });
+          append(bubble(
+            `${facts[0]}\nHämtat från: ${(p.source_doc||'Manual')} • ${p.section||'Personal'} • idx:${p.idx??'?'}`,
+            'assistant'
+          ));
+        } else {
+          const spoken = 'Jag hittar inte den personen i manualens Personal.';
+          speakGrounded({ query:q, facts:[spoken], askFollowup:false });
+          append(bubble(spoken,'assistant'));
+        }
+      } catch (e){
+        append(errorBubble('People-lookup fel: '+(e?.message||e)));
+      } finally {
+        rt._ragBusy=false; rt.cancelAutos=false; clearTimeout(ragTimer);
       }
     }
-  }
-}
 
-// UI
-document.getElementById('btnConnect').onclick = connect;
-document.getElementById('btnMic').onclick = toggleMic;
-document.getElementById('btnHang').onclick = hang;
-</script>
+    function isNumericQuestion(q){ const s=(q||'').toLowerCase(); return /\b(hur många|antal(?:et)?|how many|number of|count)\b/.test(s); }
+    function hasAll(words,text){ const low=text.toLowerCase(); return words.every(w=>low.includes(w.toLowerCase())); }
+
+    function extractNumericAnswer(snippets, keywordsAny=[], keywordsMust=[]){
+      let best=null;
+      for(const sn of (snippets||[])){
+        const text=(sn.text||'').replace(/\s+/g,' ').trim();
+        const sentences=text.split(/(?<=[\.\!\?:;])\s+/);
+        for(const sent of sentences){
+          const m=sent.match(/\b\d{1,4}(?:[.,]\d+)?\b/); if(!m) continue;
+          if (keywordsMust.length && !hasAll(keywordsMust,sent)) continue;
+          let sc=(sn.score||0); const low=sent.toLowerCase();
+          for(const kw of keywordsAny) if(low.includes(kw.toLowerCase())) sc+=0.03;
+          if (sent.length<20) sc-=0.1;
+          if(!best || sc>best.sc) best={sent:sent.trim(), num:m[0], sn, sc};
+        }
+      }
+      return best;
+    }
+
+    const DOMAIN_BOOST=['tapp','givare','sensor','ocme','felsök','format','karusell','ventil','personal','chef','operatör','ingenjör'];
+    function pickBestSentence(snippets, query){
+      const q=(query||'').toLowerCase(); const tokens=q.split(/[^a-zåäö0-9]+/i).filter(t=>t.length>2);
+      let best={s:'',score:-1,src:null};
+      for(const sn of (snippets||[])){
+        const text=(sn.text||'').replace(/\s+/g,' ').trim();
+        const sentences=text.split(/(?<=[\.\!\?:;])\s+/);
+        for(const sent of sentences){
+          let sc=(sn.score||0); const low=sent.toLowerCase();
+          if(/\d/.test(sent)) sc+=0.15;
+          for(const t of tokens) if(low.includes(t)) sc+=0.04;
+          for(const d of DOMAIN_BOOST) if(low.includes(d)) sc+=0.05;
+          if(sent.length<25) sc-=0.1;
+          if(sc>best.score) best={s:sent.trim(),score:sc,src:sn};
+        }
+      }
+      return best;
+    }
+
+    // ===== Ordagrant (fallback) =====
+    function speakVerbatim(text){
+      const toSay=`LÄS UPP EXAKT (ordagrant) och utan tillägg: """${text}"""`;
+      rt.skipCancelForNextCreate=true;
+      const response = {
+        modalities:['audio','text'],
+        instructions:toSay,
+        metadata:{source:'rag'}
+      };
+      if (STRICT_RAG){
+        response.tool_choice = { type:'function', name:'search_manual' };
+      }
+      rt.dc?.send(JSON.stringify({ type:'response.create', response }));
+    }
+
+    // ===== RAG tool-run =====
+    function parseArgsSafe(s){ try{ return JSON.parse(s||'{}'); }catch{ return {}; } }
+
+    async function runToolSearchManual(tc){
+      const args=parseArgsSafe(tc.argsText);
+      const k=args.k??5;
+      const q=resolveQueryFromState(args);
+
+      if(!q){
+        if(tc.tool_call_id){
+          rt.dc?.send(JSON.stringify({
+            type:'conversation.item.create',
+            item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify({ok:false,error:'missing_query',need_user:true}) }
+          }));
+          rt.skipCancelForNextCreate = true;
+          rt.dc?.send(JSON.stringify({ type:'response.create' }));
+          append(pill('⚠️ search_manual: tom query → be om förtydligande'));
+        }else{
+          speakVerbatim('Jag uppfattade inte frågan. Kan du säga den igen?');
+        }
+        rt._ragBusy=false; clearTimeout(ragTimer); return;
+      }
+
+      // Router: Personfrågor → People-lookup
+      if (isPersonnelQuery(q)) {
+        append(pill('ROUTER: People-KB'));
+        await handlePeopleQuery(q, tc.tool_call_id, tc.response_id);
+        return;
+      }
+
+      const headingFromUser = null;
+      const headingHint = headingFromUser || null;
+      const restrict = !!headingHint;
+
+      const minSimBase = (typeof args.minSim==='number' ? args.minSim : (args.voice ? VOICE_MIN_SIM : TEXT_MIN_SIM));
+      const minSim = minSimBase;
+
+      const body={
+        query:q, k, topK:k,
+        minSim,
+        heading: headingHint,
+        restrictToHeading: restrict
+      };
+
+      try{
+        const data=await fetchJSON('/api/search-manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        if (data && ("fusion" in data)) { console.debug("RAG fusion", data.fusion); }
+        let hits = data.snippets || [];
+
+        if (headingHint){
+          const rr = rerankByHeading(hits, headingHint);
+          hits = rr.hits;
+        }
+
+        append(pill(`RAG: count=${hits.length}${data.fallback?' (fallback)':''} • top1=${(hits[0]?.score??0).toFixed(2)} • q="${q.slice(0,32)}${q.length>32?'…':''}"`));
+
+        if (!hits.length){
+          const msg = 'Jag hittar inte det i manualen.';
+          if (tc.tool_call_id){
+            rt.dc?.send(JSON.stringify({ type:'conversation.item.create', item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify({ ok:false, strict_answer: msg }) } }));
+            rt.skipCancelForNextCreate = true;
+            rt.dc?.send(JSON.stringify({ type:'response.create' }));
+          } else {
+            speakVerbatim(msg);
+            append(bubble(msg,'assistant'));
+          }
+          return;
+        }
+
+        // Numerisk fråga (exempel: givare i tappen)
+        const isNum = isNumericQuestion(q);
+        if(isNum){
+          const bestNum = extractNumericAnswer(hits,['givare','sensor'],['tapp']);
+          if (bestNum?.sent){
+            const src = bestNum.sn || hits[0];
+            const facts = [bestNum.sent];
+            speakGrounded({ query:q, facts, style:'coach' });
+            append(bubble(
+              `Enligt manualen: ${bestNum.sent}\nHämtat från: ${(src.title||'manual')} • idx:${src.idx??'?'} • score:${(src.score??0).toFixed(2)}`,
+              'assistant'
+            ));
+            return;
+          }
+        }
+
+        // Generellt fall – sammanfatta toppsnuttar coachigt
+        const topFacts = (hits||[]).slice(0,3).map(sn => sn.text);
+        speakGrounded({ query:q, facts: topFacts, style:'coach' });
+
+        const top=hits[0];
+        append(bubble(
+          `${truncate(top.text, 500)}\nHämtat från: ${(top.title||'manual')} • idx:${top.idx??'?'} • score:${(top.score??0).toFixed(2)}`,
+          'assistant'
+        ));
+
+      }catch(err){
+        console.error('search-manual error',err); append(errorBubble('Manual-sök fel: '+(err?.message||err)));
+        if(!tc.tool_call_id){ speakVerbatim('Kunde inte nå manual-sök just nu. Försök igen strax.'); }
+        else {
+          rt.dc?.send(JSON.stringify({
+            type:'conversation.item.create',
+            item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify({ ok:false, error:'search-manual failed' }) }
+          }));
+          rt.skipCancelForNextCreate = true;
+          rt.dc?.send(JSON.stringify({ type:'response.create' }));
+        }
+      }finally{
+        rt._ragBusy=false; rt.cancelAutos=false;
+        clearTimeout(ragTimer);
+      }
+    }
+
+    async function runToolSaveMemory(tc){
+      const args = (function(){ try{ return JSON.parse(tc.argsText||'{}'); }catch{return{};} })();
+      try{
+        await fetch('/api/save-memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:localStorage.getItem('operator_id')||'kevin',key:args.key,value:args.value})});
+        if (tc.tool_call_id){
+          rt.dc?.send(JSON.stringify({
+            type:'conversation.item.create',
+            item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify({ ok:true }) }
+          }));
+          rt.skipCancelForNextCreate = true;
+          rt.dc?.send(JSON.stringify({ type:'response.create' }));
+        } else {
+          rt.skipCancelForNextCreate=true;
+          rt.dc?.send(JSON.stringify({ type:'response.create', response:{ modalities:['audio','text'], instructions:`Noterat. Jag sparade minnet: ${args.key} = ${args.value}.`, metadata:{source:'rag'} } }));
+        }
+      }catch(e){
+        if (tc.tool_call_id){
+          rt.dc?.send(JSON.stringify({
+            type:'conversation.item.create',
+            item:{ type:'function_call_output', call_id:tc.tool_call_id, output: JSON.stringify({ ok:false, error: e?.message||String(e) }) }
+          }));
+          rt.skipCancelForNextCreate = true;
+          rt.dc?.send(JSON.stringify({ type:'response.create' }));
+        } else {
+          rt.skipCancelForNextCreate=true;
+          rt.dc?.send(JSON.stringify({ type:'response.create', response:{ modalities:['audio','text'], instructions:`Jag kunde inte spara minnet just nu.`, metadata:{source:'rag'} } }));
+        }
+      }
+    }
+
+    // ===== Manual text send =====
+    $('#sendTextBtn').onclick = sendQuickText;
+    $('#quickText').addEventListener('keydown', e => { if(e.key==='Enter') sendQuickText(); });
+    function sendQuickText(){
+      const t=$('#quickText').value.trim(); if(!t) return;
+      $('#quickText').value=''; append(bubble('➤ '+t,'user')); rt._lastUserText=t;
+      // 🔹 Intercepta lokalt först (QuickCalc / Procedur)
+      if (handleUserUtterance(t)) return;
+      sendTextToRealtime(t);
+    }
+    function sendTextToRealtime(text){
+      if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
+      const norm = normalizeTranscript(text);
+      rt.dc.send(JSON.stringify({type:'input_text', text:norm}));
+      if (isLinjeRelated(norm) && !rt._ragBusy && norm!==rt._lastQuery){
+        rt._ragBusy=true; rt._lastQuery=norm; rt.cancelAutos=true; clearTimeout(ragTimer);
+        ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
+        runToolSearchManual({tool_call_id:null,response_id:null,argsText:JSON.stringify({query:norm,k:5,minSim:TEXT_MIN_SIM, voice:false})}).finally(()=>{});
+      }
+    }
+
+    // ===== Manual test UI =====
+    $('#manualBtn').addEventListener('click', testManualSearch);
+    $('#manualQuery').addEventListener('keydown', e => { if(e.key==='Enter') testManualSearch(); });
+    async function testManualSearch(){
+      const raw=$('#manualQuery').value.trim(); if(!raw){ append(pill('Skriv en fråga för manualen.')); return; }
+      const q = normalizeTranscript(raw);
+      append(bubble('🔎 Manual: '+q,'user'));
+
+      // Router: People-KB om personfråga
+      if (isPersonnelQuery(q)){
+        await handlePeopleQuery(q);
+        return;
+      }
+
+      try{
+        const data=await fetchJSON('/api/search-manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+          query:q,k:5,topK:5,minSim: TEXT_MIN_SIM, heading:null, restrictToHeading:false
+        })});
+
+        let hits = data.snippets || [];
+        append(pill(`RAG: count=${hits.length}${data.fallback?' (fallback)':''} • top1=${(hits[0]?.score??0).toFixed(2)}`));
+        if(!hits.length){ append(bubble('Jag hittar inte det i manualen.','assistant')); return; }
+
+        const isNum=/\b(hur många|antal(?:et)?|how many|number of|count)\b/i.test(q);
+        if(isNum){
+          const hit=extractNumericAnswer(hits,['givare','sensor'],['tapp']);
+          if(hit?.sent){
+            const facts=[hit.sent];
+            speakGrounded({ query:q, facts, style:'coach' });
+            append(bubble(`Enligt manualen: ${hit.sent}\nHämtat från: ${(hit.sn?.title||'manual')} • idx:${hit.sn?.idx??'?'} • score:${(hit.sn?.score??0).toFixed(2)}`,'assistant'));
+          } else {
+            append(bubble('Kan inte verifiera exakt antal i manualen för denna fråga. Specificera del/område eller felkod så söker jag igen.','assistant'));
+          }
+        }else{
+          const topFacts = hits.slice(0,3).map(sn=>sn.text);
+          speakGrounded({ query:q, facts: topFacts, style:'coach' });
+
+          const top=hits[0];
+          append(bubble(`${truncate(top.text, 500)}\nHämtat från: ${(top.title||'manual')} • idx:${top.idx??'?'} • score:${(top.score??0).toFixed(2)}`,'assistant'));
+        }
+      }catch(e){ append(errorBubble('Manual-sök fel: '+e.message)); }
+    }
+
+    // ===== Realtime handlers =====
+    $('#rtBtn'); $('#rtHangup');
+    function isTranscriptFinalType(t){
+      return t && (
+        /^input_audio_buffer\.transcript\.(done|completed)$/.test(t) ||
+        /^input_text\.(done|completed)$/.test(t) ||
+        /^conversation\.item\.input_audio_transcription\.completed$/.test(t) ||
+        /^input_audio_buffer\.committed$/.test(t)
+      );
+    }
+
+    function handleRealtimeMessage(msg){
+      if (msg.type==='conversation.item.created'){
+        if (msg.item?.role==='user'){
+          const utext = extractUserTextFromItem(msg.item).trim();
+          if (utext){
+            rt._lastUserText = normalizeTranscript(utext); rt._liveUserBuf = '';
+            append(bubble(utext,'user')); logMsg('user',utext,'voice',msg);
+            // (Vi låter slutligt transcript nedan fånga QuickCalc/Runner för att undvika dubblering)
+          }
+        }
+        const atext = extractAssistantTextFromItem(msg.item);
+        if (atext){ append(bubble(atext,'assistant')); logMsg('assistant',atext,'voice',msg); }
+      }
+
+      if (msg.type==='conversation.item.input_audio_transcription.delta'){
+        const chunk = msg.delta || msg.text || msg.transcript || '';
+        if (chunk) rt._liveUserBuf = (rt._liveUserBuf||'') + chunk;
+        return;
+      }
+      if (msg.type==='conversation.item.input_audio_transcription.completed'){
+        const full = (msg.transcript?.text || msg.text || msg.transcript || '').trim();
+        if (full){
+          const norm = normalizeTranscript(full);
+          rt._lastUserText = norm; rt._liveUserBuf = '';
+          append(bubble(full,'user')); logMsg('user',full,'voice',msg);
+
+          // 🔹 Intercepta lokalt först (QuickCalc / Procedur)
+          if (handleUserUtterance(norm)) return;
+
+          if (isLinjeRelated(norm) && !rt._ragBusy && norm!==rt._lastQuery){
+            rt._ragBusy=true; rt._lastQuery=norm; rt.cancelAutos=true; clearTimeout(ragTimer);
+            ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
+            runToolSearchManual({tool_call_id:null,response_id:null,argsText:JSON.stringify({query:norm,k:5,minSim:VOICE_MIN_SIM, voice:true})}).finally(()=>{});
+          }
+        }
+        return;
+      }
+
+      try{
+        const t=msg?.type||"";
+        if (/(input_audio_buffer|input_text)\.transcript\.(started|start)$/.test(t)) rt._liveUserBuf="";
+        if (/(input_audio_buffer|input_text)\.transcript\.delta$/.test(t)) {
+          const chunk=msg.delta||msg.text||"";
+          if (chunk) rt._liveUserBuf=(rt._liveUserBuf||"")+chunk;
+        }
+      }catch{}
+
+      if (msg.type==='response.function_call_arguments.delta'){
+        const id=msg.id||msg.tool_call_id||msg.response_id||'unknown';
+        const prev=toolCalls.get(id)||{name:msg.name,argsText:''};
+        prev.argsText+=(msg.delta||msg.arguments_delta||'');
+        prev.name=prev.name||msg.name;
+        if (msg.response_id) prev.response_id=msg.response_id;
+        toolCalls.set(id,prev);
+        return;
+      }
+
+      if (msg.type==='response.created'){
+        const rid=msg.response?.id||msg.response_id;
+        if (rid && rt.allowedResponseIds.has(rid)) return;
+        if (rt._ragBusy || rt.cancelAutos){
+          if (rid){
+            rt.dc?.send(JSON.stringify({type:'response.cancel', response_id:rid}));
+            append(pill('🛑 Auto-respons stoppad'));
+            return;
+          }
+        }
+        return;
+      }
+
+      if (msg.type==='response.function_call_arguments.done'){
+        const id=msg.id||msg.tool_call_id||'unknown';
+        const tc=toolCalls.get(id)||{name:msg.name,argsText:''};
+        if (msg.response_id){ tc.response_id=msg.response_id; toolCalls.set(id,tc); }
+        let args={}; try{ args=JSON.parse(tc.argsText||'{}'); }catch{}
+        if (tc.name){ const shown=(args.query||'').slice(0,32); append(pill(`TOOL CALL → ${tc.name} q="${shown}${(args.query||'').length>32?'…':''}"`)); }
+
+        if (tc.name==='search_manual'){
+          const qNow=resolveQueryFromState(args);
+          if (!qNow) return;
+          if (rt._ragBusy || tc.launched) return;
+          tc.launched=true; toolCalls.set(id,tc);
+          rt.cancelAutos=true; if (tc.response_id) rt.allowedResponseIds.add(tc.response_id);
+          rt._ragBusy=true; rt._lastToolCallId=id; clearTimeout(ragTimer);
+          ragTimer=setTimeout(()=>{ rt._ragBusy=false; rt.cancelAutos=false; }, RAG_TIMEOUT_MS);
+          const patchedArgs=JSON.stringify({...args, query:qNow});
+          return runToolSearchManual({tool_call_id:id,response_id:tc.response_id,argsText:patchedArgs}).finally(()=>{});
+        }
+
+        if (tc.name==='save_memory'){
+          if (tc.launched) return;
+          tc.launched=true; toolCalls.set(id,tc);
+          return runToolSaveMemory(tc);
+        }
+        return;
+      }
+
+      if (msg.type==='response.output_text.done'){
+        const text=msg.output_text||msg.text||'';
+        if (text?.trim()){ append(bubble(text,'assistant')); logMsg('assistant',text,'voice',msg); }
+        rt._ragBusy=false; rt.cancelAutos=false; rt.skipCancelForNextCreate=false;
+        if (msg.response_id) rt.allowedResponseIds.delete(msg.response_id);
+        clearTimeout(ragTimer); return;
+      }
+
+      if (msg.type==='response.completed' || msg.type==='response.error' || msg.type==='error'){
+        rt._ragBusy=false; rt.cancelAutos=false; rt.skipCancelForNextCreate=false;
+        if (msg.response_id) rt.allowedResponseIds.delete(msg.response_id);
+        clearTimeout(ragTimer); return;
+      }
+    }
+
+    // ===== Procedure Runner (Sortbyte / generiskt) =====
+    const runner = {
+      active: false,
+      slug: null,
+      steps: [],
+      idx: 0,
+      vars: {},
+      awaiting: null
+    };
+
+    async function startProcedure(slug){
+      try{
+        const { procedure } = await fetchJSON('/api/procedure-get', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ slug })
+        });
+        runner.active = true;
+        runner.slug = slug;
+        runner.vars = {};
+        runner.idx = 0;
+        runner.awaiting = null;
+        runner.steps = (procedure.recipe?.steps) || [];
+        const intro = procedure.recipe?.intro || `Startar procedur: ${procedure.title}`;
+        if (typeof speakGrounded === 'function') {
+          speakGrounded({ query: intro, facts:[intro], askFollowup:false });
+        } else {
+          speakVerbatim(intro);
+        }
+        append(bubble('▶ '+procedure.title,'assistant'));
+        runNextStep();
+      }catch(e){
+        append(errorBubble('Kunde inte starta proceduren: '+(e?.message||e)));
+      }
+    }
+
+    function runNextStep(){
+      if (!runner.active) return;
+      if (runner.idx >= runner.steps.length){
+        const done = 'Proceduren är klar.';
+        if (typeof speakGrounded === 'function') speakGrounded({ query: done, facts:[done], askFollowup:false });
+        else speakVerbatim(done);
+        append(bubble('✅ Proceduren är klar.','assistant'));
+        runner.active = false; return;
+      }
+      const st = runner.steps[runner.idx];
+      switch (st.type){
+        case 'say': {
+          sayCoach(st.text);
+          runner.idx++; break;
+        }
+        case 'await_confirm': {
+          runner.awaiting = { kind:'confirm', ok_words: st.ok_words || ['klar','nästa','redo'] };
+          append(pill('Väntar på bekräftelse: '+runner.awaiting.ok_words.join('/')));
+          runner.idx++; break;
+        }
+        case 'ask_number': {
+          runner.awaiting = { kind:'number', var: st.var, prompt: st.prompt };
+          sayCoach(st.prompt);
+          append(bubble('🧮 '+st.prompt,'assistant'));
+          runner.idx++; break;
+        }
+        case 'ask_choice': {
+          runner.awaiting = { kind:'choice', var: st.var, prompt: st.prompt, choices: st.choices||[] };
+          sayCoach(st.prompt);
+          append(bubble('❓ '+st.prompt,'assistant'));
+          runner.idx++; break;
+        }
+        case 'calc': {
+          try{
+            const ctx = { ...runner.vars, floor: Math.floor };
+            for (const a of (st.assign||[])){
+              const v = safeEvalExpr(a.expr, ctx);
+              runner.vars[a.name] = v;
+              ctx[a.name] = v;
+            }
+          }catch(e){
+            append(errorBubble('Beräkningsfel: '+(e?.message||e)));
+          }
+          runner.idx++; break;
+        }
+        case 'say_vars': {
+          const msg = (st.template||'').replace(/~([a-z0-9_]+)~/gi, (_,k)=> String(runner.vars[k] ?? '?'));
+          sayCoach(msg);
+          runner.idx++; break;
+        }
+        default: {
+          runner.idx++; break;
+        }
+      }
+      if (!runner.awaiting && runner.active) runNextStep();
+    }
+
+    function sayCoach(text){
+      if (!text) return;
+      if (typeof speakGrounded === 'function') speakGrounded({ query: text, facts:[text], askFollowup:false });
+      else speakVerbatim(text);
+      append(bubble(text,'assistant'));
+    }
+
+    // SÄKER evaluator (stöd för + - * / ( ) floor och ?:), variabler ur ctx
+    function safeEvalExpr(expr, ctx){
+      const illegal = /[^0-9a-zA-Z_+\-*/().?:\s]/;  // tillåt ?: för villkor
+      if (illegal.test(expr)) throw new Error('Otillåtna tecken i uttryck: '+expr);
+      const replaced = String(expr).replace(/[a-zA-Z_][a-zA-Z0-9_]*/g, (m)=>{
+        if (m==='floor') return 'Math.floor';
+        if (!(m in ctx)) throw new Error('Okänd variabel: '+m);
+        return String(ctx[m]);
+      });
+      // eslint-disable-next-line no-new-func
+      return Function('"use strict"; return ('+replaced+');')();
+    }
+
+    // ===== Tolkning av användarens yttrande (QuickCalc + Procedur) =====
+    function handleUserUtterance(raw){
+      const original = (raw||'').trim();
+      const u = normalizeTranscript(original).toLowerCase();
+
+      // 0) QuickCalc: "150 hl ... hur många pallar?"
+      const det = quickCalc.detect(u);
+      if (det){ quickCalc.start(det); return true; }
+      if (quickCalc.active){ if (quickCalc.handle(u)) return true; }
+
+      // 1) Starta procedur: "starta sortbyte öl till öl"
+      if (!runner.active && /starta\s+sortbyte.*öl.*öl/i.test(u)) { startProcedure('sortbyte-ol-ol'); return true; }
+
+      // 2) Styr ord för pågående procedur
+      if (!runner.active) return false;
+      if (u==='avsluta' || u==='stoppa'){ runner.active=false; append(pill('🛑 Procedur stoppad')); return true; }
+
+      if (runner.awaiting){
+        const a = runner.awaiting;
+
+        if (a.kind==='confirm'){
+          const ok = (a.ok_words||[]).some(w => u.includes(w));
+          if (ok){ runner.awaiting=null; runNextStep(); return true; }
+          return true;
+        }
+
+        if (a.kind==='number'){
+          const m = u.match(/(\d+(?:[.,]\d+)?)/);
+          if (m){
+            const val = Number(m[1].replace(',','.'));
+            runner.vars[a.var] = val;
+            append(pill(`${a.var} = ${val}`));
+            runner.awaiting=null; runNextStep(); return true;
+          } else {
+            sayCoach(`Jag hörde inget tal. ${a.prompt}`);
+            return true;
+          }
+        }
+
+        if (a.kind==='choice'){
+          const hit = (a.choices||[]).find(c => {
+            const lbl = String(c.label||'').toLowerCase();
+            const aliases = (c.aliases||[]).map(x=>String(x).toLowerCase());
+            return u.includes(lbl) || aliases.some(x=>u.includes(x));
+          });
+          if (hit){
+            runner.vars[a.var] = hit.value;
+            append(pill(`${a.var} = ${hit.label||hit.value}`));
+            runner.awaiting=null; runNextStep(); return true;
+          } else {
+            sayCoach(`Jag uppfattade inte valet. ${a.prompt}`);
+            return true;
+          }
+        }
+      }
+
+      if (u==='nästa' || u==='klar' || u==='redo'){ runNextStep(); return true; }
+      if (u==='upprepa'){
+        const back = Math.max(0, runner.idx-1);
+        const st = runner.steps[back];
+        if (st?.type==='say' && st.text) sayCoach('(upprepar) '+st.text);
+        return true;
+      }
+      return false;
+    }
+  </script>
 </body>
 </html>
