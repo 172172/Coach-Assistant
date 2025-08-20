@@ -50,7 +50,7 @@ function send(payload){
   if (dc && dc.readyState==='open') {
     dc.send(JSON.stringify(payload));
   } else {
-    console.warn('DataChannel is not open yet; dropping payload:', payload?.type);
+    console.warn('DataChannel not open; dropping:', payload?.type);
   }
 }
 
@@ -60,8 +60,6 @@ async function connect(){
   pc = new RTCPeerConnection();
   dc = pc.createDataChannel('oai-events');
   dc.onmessage = onMessage;
-
-  // När DataChannel är öppen: registrera tools + policy
   dc.onopen = () => {
     log('DataChannel open – skickar session.update');
     send({ type:'session.update', session:{
