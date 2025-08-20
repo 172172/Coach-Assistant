@@ -38,8 +38,7 @@ function log(...args){
 }
 
 let pc, dc, micStream;
-// Återanvänd thread per samtal (lägre latens + bibehållen kontext)
-let threadId = null;
+let threadId = null; // återanvänds under samtalet
 
 async function getRtToken(){
   const res = await fetch('/api/rt-token');
@@ -47,7 +46,13 @@ async function getRtToken(){
   return res.json(); // { url, client_secret, instructions }
 }
 
-function send(payload){ if (dc && dc.readyState==='open') dc.send(JSON.stringify(payload)); }
+function send(payload){
+  if (dc && dc.readyState==='open') {
+    dc.send(JSON.stringify(payload));
+  } else {
+    console.warn('DataChannel is not open yet; dropping payload:', payload?.type);
+  }
+}
 
 async function connect(){
   const { url, client_secret, instructions } = await getRtToken();
@@ -55,6 +60,28 @@ async function connect(){
   pc = new RTCPeerConnection();
   dc = pc.createDataChannel('oai-events');
   dc.onmessage = onMessage;
+
+  // När DataChannel är öppen: registrera tools + policy
+  dc.onopen = () => {
+    log('DataChannel open – skickar session.update');
+    send({ type:'session.update', session:{
+      instructions: instructions + "\n\nREGLER:\n- Använd ALLTID ask_assistant för tekniska frågor om linje/maskiner/procedurer.\n- Vänta alltid på tool_result innan du talar.\n- Om manual saknas: säg ‘Oklar information – behöver uppdaterad manual.’\n- Svara kort på svenska.",
+      modalities:["audio","text"],
+      input_audio_transcription:{ model:"whisper-1" },
+      turn_detection:{ type:"server_vad", threshold:0.5, silence_duration_ms:650 },
+      tools:[{
+        type:"function",
+        name:"ask_assistant",
+        description:"Fråga Assistants API (med File Search) och returnera grundat svar.",
+        parameters:{
+          type:"object",
+          properties:{ query:{ type:"string" } },
+          required:["query"]
+        }
+      }],
+      tool_choice:"auto"
+    }});
+  };
 
   const audio = document.createElement('audio');
   audio.autoplay = true;
@@ -78,25 +105,6 @@ async function connect(){
   document.getElementById('status').textContent='Status: ansluten';
   document.getElementById('btnMic').disabled=false;
   document.getElementById('btnHang').disabled=false;
-
-  // Registrera verktyget + policy (vänta på tool_result)
-  send({ type:'session.update', session:{
-    instructions: instructions + "\n\nREGLER:\n- Använd ALLTID ask_assistant för tekniska frågor om linje/maskiner/procedurer.\n- Vänta alltid på tool_result innan du talar.\n- Om manual saknas: säg ‘Oklar information – behöver uppdaterad manual.’\n- Svara kort på svenska.",
-    modalities:["audio","text"],
-    input_audio_transcription:{ model:"whisper-1" },
-    turn_detection:{ type:"server_vad", threshold:0.5, silence_duration_ms:650 },
-    tools:[{
-      type:"function",
-      name:"ask_assistant",
-      description:"Fråga Assistants API (med File Search) och returnera grundat svar.",
-      parameters:{
-        type:"object",
-        properties:{ query:{ type:"string" } },
-        required:["query"]
-      }
-    }],
-    tool_choice:"auto"
-  }});
 }
 
 function hang(){
@@ -141,9 +149,10 @@ async function onMessage(evt){
         // ALLTID returnera function_call_output – även vid succé
         send({ type:'response.function_call_output', function_call_id, output: {
           answer: data.answer || '',
-          citations: data.citations || []
+          citations: data.citations || [],
+          notice: data.notice || null
         }});
-        log('function_call_output skickad. citations:', (data?.citations?.length||0));
+        log('function_call_output skickad. citations:', (data?.citations?.length||0), 'notice:', data?.notice || '—');
       }catch(e){
         send({ type:'response.function_call_output', function_call_id, output: { error:String(e) } });
         log('Tool error returnerad');
