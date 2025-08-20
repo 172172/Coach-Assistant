@@ -1,4 +1,3 @@
-// /api/rt-token.js
 export const config = { api: { bodyParser: true } };
 
 export default async function handler(req, res) {
@@ -10,13 +9,12 @@ Du är Coach Assistant för Linje 65. Svara kort, tydligt och på svenska.
 Använd punktlistor för arbetssteg. Om manualtäckning saknas: säg att det är osäkert
 och be om förtydligande. Förebygg faror och slöseri.
 
-För frågor om Linje 65, manualer, procedurer eller tekniska detaljer:
-Använd alltid verktyget "search_manual" för att hämta relevant information från manualen
-innan du svarar, oavsett om frågan kommer via text eller audio.
-VÄNTA på ett final transkript innan du kallar verktyget.
-Basa ditt svar enbart på resultat från verktyget – hitta inte på information.
-Du får INTE ge något svar förrän du har fått tool_result från 'search_manual' för aktuell fråga,
-om inte frågan uppenbart är hälsning/småprat.
+För ALLA frågor (inklusive voice/audio-inputs) om Linje 65, manualer, procedurer eller tekniska detaljer:
+- VÄNTA ALLTID på final transkript (efter input_audio_buffer.commit).
+- Kallar OMEDELBART verktyget "search_manual" med query baserat på final transkript.
+- Basa ditt svar ENDAST på resultat från verktyget – svara INTE utan tool_result.
+- Om frågan är småprat/hälsning, svara direkt utan tool.
+- För voice: Ignorera partial transkripts; använd bara final för tool-call.
 `.trim();
 
     const tools = [
@@ -29,17 +27,22 @@ om inte frågan uppenbart är hälsning/småprat.
           properties: {
             query: {
               type: 'string',
-              description: 'Sökfrågan på svenska, baserat på användarens fråga.'
+              description: 'Sökfrågan på svenska, baserat på final transkript.'
             },
             k: {
               type: 'integer',
-              description: 'Antal resultat att hämta (default 5).',
-              default: 5
+              description: 'Antal resultat att hämta (default 8).',
+              default: 8
             },
             minSim: {
               type: 'number',
-              description: 'Minsta likhetspoäng (default 0.45).',
-              default: 0.45
+              description: 'Minsta likhetspoäng (default 0.35 för voice).',
+              default: 0.35
+            },
+            isVoice: {
+              type: 'boolean',
+              description: 'Indikerar om frågan kommer från voice-input (default false).',
+              default: false
             }
           },
           required: ['query']
@@ -55,18 +58,16 @@ om inte frågan uppenbart är hälsning/småprat.
       },
       body: JSON.stringify({
         model,
-        voice: 'verse',                 // röst; byt vid behov
-        modalities: ['audio', 'text'],  // tal in/ut + text
-        instructions,                   // Uppdaterade instructions
-        tools,                          // Lägg till tools här
-        // turn_detection kan även styras efter anslutning via session.update (klienten)
+        voice: 'verse',
+        modalities: ['audio', 'text'],
+        instructions,
+        tools,
       })
     });
 
     const j = await r.json();
     if (!r.ok) return res.status(500).json({ error: 'OpenAI error', details: j });
 
-    // Kortlivat token som webbläsaren får använda för WebRTC
     const token = j?.client_secret?.value || j?.client_secret || j?.id;
     if (!token) return res.status(500).json({ error: 'No client secret', details: j });
 
