@@ -38,7 +38,7 @@ function log(...args){
 }
 
 let pc, dc, micStream;
-let threadId = null; // återanvänds under samtalet
+let threadId = null; // återanvänd tråd per samtal
 
 async function getRtToken(){
   const res = await fetch('/api/rt-token');
