@@ -6,7 +6,7 @@ export const config = { runtime: 'nodejs' };
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const ASSISTANT_ID = process.env.ASSISTANT_ID;
-const VECTOR_STORE_ID = process.env.VECTOR_STORE_ID; // <= lägg in i Vercel
+const VECTOR_STORE_ID = process.env.VECTOR_STORE_ID; // lägg in i Vercel
 
 function extractTextAndCitations(messages) {
   const last = messages.data?.find(m => m.role === 'assistant') || messages.data?.[0];
@@ -71,7 +71,7 @@ export default async function handler(req) {
       }]
     });
 
-    // 3) Starta en Run – T V I N G A vector store för File Search
+    // 3) Starta en Run – T V I N G A din vector store för File Search
     const run = await openai.beta.threads.runs.create(threadId, {
       assistant_id: ASSISTANT_ID,
       additional_instructions:
