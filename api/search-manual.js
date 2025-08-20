@@ -1,9 +1,10 @@
-// /api/search-manual.js – v4 (JS) — HYBRID (vector + trigram) + RRF + rubrik-normalisering + debug
+// /api/search-manual.js – v5 (JS) — HYBRID (vector + trigram) + RRF + rubrik-normalisering + debug + voice support
 // - Konsekvent cosine (<=>) i score & sortering (embeddings)
 // - Lexikal sökning via pg_trgm på chunk/heading/title
 // - RRF-fusion av vector + lexikal
 // - Rubrikfilter mot heading + title
-// - Personläge: extrahera namn från frågan och sänk minSim (bibehållet för bakåtkomp.)
+// - Personläge: extrahera namn från frågan och sänk minSim
+// - Voice-läge: sänk minSim ytterligare för voice-inputs
 // - Normalisera rubrik mot kända rubriker i tabellen
 // - Extra debug-fält i svaret
 
@@ -115,7 +116,7 @@ async function getMappings() {
     };
   }
 
-  return { schema, chunksTable, textCol, embCol, idxCol, headingCol, docIdCol, join };
+  return { schema, chunksTable, textCol, embCol, idxKeyOf, headingCol, docIdCol, join };
 }
 
 // ---- Rubrik-normalisering + persondetektion ----
@@ -206,8 +207,9 @@ export default async function handler(req, res) {
   try {
     const body = readJsonBody(req);
     const rawQ = (body.query || '').trim();
-    const K = Math.min(Math.max(parseInt(body.k || body.topK || 5, 10) || 5, 1), 20);
-    const minScore = typeof body.minSim === 'number' ? body.minSim : 0.4;
+    const K = Math.min(Math.max(parseInt(body.k || body.topK || 8, 10) || 8, 1), 20);
+    const minScore = typeof body.minSim === 'number' ? body.minSim : 0.35;
+    const isVoice = !!body.isVoice;
     const rawHeading = body.heading ? String(body.heading).trim() : null;
     const restrictRequested = !!body.restrictToHeading;
 
@@ -224,7 +226,7 @@ export default async function handler(req, res) {
       effectiveHeading = 'personal';
     }
     const restrict = !!effectiveHeading && (restrictRequested || personMode);
-    const minScoreEff = personMode ? Math.min(minScore, 0.35) : minScore;
+    const minScoreEff = (personMode || isVoice) ? Math.min(minScore, 0.35) : minScore;
 
     // ===== 1) Embedding-sök =====
     const embedText = nameOnly || q;
@@ -300,7 +302,6 @@ export default async function handler(req, res) {
     }
 
     // ===== 3) RRF-fusion =====
-    // key: doc_id|idx|heading|chunkStart(24)
     const keyOf = (r) => `${r.doc_id ?? ''}|${r.idx ?? ''}|${r.heading ?? ''}|${String(r.chunk||'').slice(0,24)}`;
     const rrf = (list, isLex) => {
       const m = new Map();
@@ -352,6 +353,7 @@ export default async function handler(req, res) {
       fallback: usedFallback,
       effective_heading: effectiveHeading || null,
       person_mode: !!personMode,
+      is_voice: isVoice,
       query_used_for_embed: embedText,
       fusion: { vec_count: rows.length, lex_count: lexRows.length },
       snippets: fused
@@ -361,22 +363,3 @@ export default async function handler(req, res) {
     res.status(500).end(JSON.stringify({ ok: false, error: err && err.message ? err.message : String(err) }));
   }
 }
-
-/*
-SQL att köra (en gång) för prestanda:
-
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
-
--- ALTER TABLE public.manual_chunks ALTER COLUMN embedding TYPE vector(1536);
-CREATE INDEX IF NOT EXISTS manual_chunks_emb_cos_idx
-  ON public.manual_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-
--- Trigram-index för snabb textmatch
-CREATE INDEX IF NOT EXISTS manual_chunks_chunk_trgm_idx
-  ON public.manual_chunks USING GIN ((lower(chunk)) gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS manual_chunks_heading_trgm_idx
-  ON public.manual_chunks USING GIN ((lower(heading)) gin_trgm_ops);
-
-ANALYZE public.manual_chunks;
-*/
