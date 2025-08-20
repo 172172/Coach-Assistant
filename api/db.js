@@ -1,15 +1,18 @@
-import { Pool } from "pg";
+import pg from 'pg';
+
+const { Pool } = pg;
 export const pool = new Pool({
   host: process.env.PGHOST,
-  port: Number(process.env.PGPORT ?? 6543),
+  port: process.env.PGPORT ? Number(process.env.PGPORT) : 5432,
   database: process.env.PGDATABASE,
   user: process.env.PGUSER,
   password: process.env.PGPASSWORD,
-  ssl: { require: true, rejectUnauthorized: false },
-  max: 3, // liten pool för serverless
+  ssl: process.env.PGSSL ? { rejectUnauthorized:false } : undefined,
+  max: 5
 });
-export async function q(sql, params=[]) {
-  const client = await pool.connect();
-  try { return await client.query(sql, params); }
-  finally { client.release(); }
-}
+
+// manual_chunks schema (exempel):
+// id serial primary key
+// title text, section text, content text
+// embedding cube   -- eller vector (anpassa ORDER BY)
+// tsv tsvector GENERATED ALWAYS AS (to_tsvector('swedish', coalesce(title,'')||' '||coalesce(content,''))) STORED
