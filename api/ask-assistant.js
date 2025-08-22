@@ -1,12 +1,14 @@
+// /api/ask-assistant.js (ESM)
 // Brygga: tar emot query (+ ev. thread_id), kör Assistants (File Search) och
-// returnerar svar + citat. Node-stil svar (res.json) + robust felhantering.
-import OpenAI from 'openai';
+// returnerar { answer, citations, thread_id }. VECTOR_STORE_ID är VALFRI.
 
-export const config = { runtime: 'nodejs' };
+import OpenAI from "openai";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const API_KEY = process.env.OPENAI_API_KEY || process.env.OPEN_API_KEY;
 const ASSISTANT_ID = process.env.ASSISTANT_ID;
-const VECTOR_STORE_ID = process.env.VECTOR_STORE_ID;
+const VECTOR_STORE_ID = process.env.VECTOR_STORE_ID; // valfri – används om satt
+
+const client = new OpenAI({ apiKey: API_KEY });
 
 function normalizeSv(q){
   return String(q||'').toLowerCase()
@@ -19,19 +21,19 @@ function normalizeSv(q){
 
 function extractAnswerForRun(messages, runId){
   const items = messages.data || [];
-  const msg = items.find(m => m.role === 'assistant' && m.run_id === runId) ||
-              items.find(m => m.role === 'assistant');
-  let answer = '';
+  const msg = items.find(m => m.role === "assistant" && m.run_id === runId)
+            || items.find(m => m.role === "assistant");
+  let answer = "";
   const citations = [];
   if (!msg) return { answer, citations };
   for (const c of msg.content || []) {
-    if (c.type === 'text') {
-      answer += c.text?.value || '';
+    if (c.type === "text") {
+      answer += c.text?.value || "";
       for (const a of c.text?.annotations || []) {
         if (a?.file_citation?.file_id) {
           citations.push({
             file_id: a.file_citation.file_id,
-            quote: a.file_citation.quote || ''
+            quote: a.file_citation.quote || ""
           });
         }
       }
@@ -42,80 +44,89 @@ function extractAnswerForRun(messages, runId){
 
 export default async function handler(req, res) {
   try {
-    if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: 'Missing OPENAI_API_KEY env' });
-    if (!ASSISTANT_ID) return res.status(500).json({ error: 'Missing ASSISTANT_ID env' });
-    if (!VECTOR_STORE_ID) return res.status(500).json({ error: 'Missing VECTOR_STORE_ID env' });
+    // Bas-env
+    if (!API_KEY)        return res.status(500).json({ error:"Missing OPENAI_API_KEY/OPEN_API_KEY env" });
+    if (!ASSISTANT_ID)   return res.status(500).json({ error:"Missing ASSISTANT_ID env" });
 
-    const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-    const { query, thread_id: incomingThreadId, context } = body;
-    if (!query) return res.status(400).json({ error: 'Missing query' });
+    // Parsea body robust
+    let body = req.body;
+    if (typeof body === "string") {
+      try { body = JSON.parse(body); } catch { body = {}; }
+    }
+    if (!body || typeof body !== "object") {
+      try { body = await req.json?.(); } catch { /* ignore */ }
+    }
+    const { query, thread_id: incomingThreadId, context } = body || {};
+    if (!query) return res.status(400).json({ error: "Missing query" });
 
     const q = normalizeSv(query).slice(0, 800);
 
-    // 1) Skapa/återanvänd tråd och BIND vector store på tråden
+    // 1) Skapa/uppdatera THREAD. Om VECTOR_STORE_ID finns: bind den på tråden.
     let threadId = incomingThreadId;
     if (!threadId) {
-      const thread = await openai.beta.threads.create({
-        tool_resources: {
-          file_search: { vector_store_ids: [VECTOR_STORE_ID] }
-        }
-      });
+      const threadPayload = {};
+      if (VECTOR_STORE_ID) {
+        threadPayload.tool_resources = { file_search: { vector_store_ids: [VECTOR_STORE_ID] } };
+      }
+      const thread = await client.beta.threads.create(threadPayload);
       threadId = thread.id;
-    } else {
-      await openai.beta.threads.update(threadId, {
-        tool_resources: {
-          file_search: { vector_store_ids: [VECTOR_STORE_ID] }
-        }
+    } else if (VECTOR_STORE_ID) {
+      // uppdatera existerande tråd med vår store om satt
+      await client.beta.threads.update(threadId, {
+        tool_resources: { file_search: { vector_store_ids: [VECTOR_STORE_ID] } }
       });
     }
+    // OBS: Om VECTOR_STORE_ID inte finns, används de stores som redan är kopplade till själva assistenten (enligt din health ✅).
 
     // 2) Lägg till frågan
-    await openai.beta.threads.messages.create(threadId, {
-      role: 'user',
+    await client.beta.threads.messages.create(threadId, {
+      role: "user",
       content: [{
-        type: 'text',
+        type: "text",
         text:
           `Fråga (svenska): ${q}\n` +
           `Policy: Svara ENDAST utifrån dina kopplade filer. Säg "Oklar information – behöver uppdaterad manual" om underlag saknas.\n` +
-          (context?.current_line ? `current_line=${context.current_line}\n` : '')
+          (context?.current_line ? `current_line=${context.current_line}\n` : "")
       }]
     });
 
-    // 3) Run – BIND vector store även på run-nivå
-    const run = await openai.beta.threads.runs.create(threadId, {
+    // 3) Starta RUN. Om VECTOR_STORE_ID finns: bind även på RUN; annars förlitar vi oss på assistentens kopplade store.
+    const runPayload = {
       assistant_id: ASSISTANT_ID,
       additional_instructions:
-        (context?.current_line ? `Prioritera information för linje ${context.current_line}. ` : '') +
-        `Citat: inkludera filreferens/sektion när du anger exakta värden.`,
-      tool_resources: {
-        file_search: { vector_store_ids: [VECTOR_STORE_ID] }
-      }
-    });
-
-    // 4) Poll (≈5s)
-    let runStatus = run;
-    for (let i = 0; i < 25; i++) {
-      await new Promise(r => setTimeout(r, 200));
-      runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
-      if (runStatus.status === 'completed') break;
-      if (['failed','cancelled','expired'].includes(runStatus.status)) break;
+        (context?.current_line ? `Prioritera information för linje ${context.current_line}. ` : "") +
+        `Citat: inkludera filreferens/sektion när du anger exakta värden.`
+    };
+    if (VECTOR_STORE_ID) {
+      runPayload.tool_resources = { file_search: { vector_store_ids: [VECTOR_STORE_ID] } };
     }
 
-    if (runStatus.status !== 'completed') {
+    const run = await client.beta.threads.runs.create(threadId, runPayload);
+
+    // 4) Poll tills completed (≈5s) och rapportera status om inte klar
+    let status = run;
+    for (let i = 0; i < 25; i++) {
+      await new Promise(r => setTimeout(r, 200));
+      status = await client.beta.threads.runs.retrieve(threadId, run.id);
+      if (status.status === "completed") break;
+      if (["failed","cancelled","expired"].includes(status.status)) break;
+    }
+
+    if (status.status !== "completed") {
       return res.status(200).json({
-        answer: '',
+        answer: "",
         citations: [],
         thread_id: threadId,
-        notice: `run_status=${runStatus.status}`
+        notice: `run_status=${status.status}`
       });
     }
 
-    // 5) Hämta svaret för just denna run
-    const messages = await openai.beta.threads.messages.list(threadId, { order: 'desc', limit: 10 });
+    // 5) Svar för just den runnen
+    const messages = await client.beta.threads.messages.list(threadId, { order: "desc", limit: 10 });
     const { answer, citations } = extractAnswerForRun(messages, run.id);
 
     return res.status(200).json({ answer, citations, thread_id: threadId });
   } catch (e) {
-    return res.status(500).json({ error: String(e), stack: e?.stack });
+    return res.status(500).json({ error:String(e), stack:e?.stack });
   }
 }
