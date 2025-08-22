@@ -1,4 +1,4 @@
-// /api/assistant-health.js  (ESM, funkar med "type":"module")
+ // /api/assistant-health.js  (ESM, funkar med "type":"module")
 import OpenAI from "openai";
 
 const API_KEY = process.env.OPENAI_API_KEY || process.env.OPEN_API_KEY; // fallback om du råkat döpa annorlunda
