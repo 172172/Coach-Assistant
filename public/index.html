@@ -128,32 +128,55 @@ async function onMessage(evt){
   if(m.type==='response.completed'){ log('response.completed'); }
 
   if(m.type==='response.function_call'){
-    const { id:function_call_id, name, arguments: args } = m.function_call;
-    log('Tool call:', name, 'args:', args);
+    const { id:function_call_id, name, arguments: rawArgs } = m.function_call;
+    log('Tool call:', name, 'args:', rawArgs);
+
+    // defensiv parsning av arguments (kan komma som sträng)
+    let toolArgs = rawArgs;
+    if (typeof toolArgs === 'string') {
+      try { toolArgs = JSON.parse(toolArgs); } catch { toolArgs = {}; }
+    }
+    const userQuery = toolArgs?.query || '';
 
     if(name==='ask_assistant'){
       try{
         const res = await fetch('/api/ask-assistant', {
-          method:'POST', headers:{'Content-Type':'application/json'},
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
           body: JSON.stringify({
-            query: args.query || '',
+            query: userQuery,
             thread_id: threadId,
             context: { current_line: 65 }
           })
         });
+
         const data = await res.json();
         if (data.thread_id && !threadId) threadId = data.thread_id;
 
-        // ALLTID returnera function_call_output – även vid succé
-        send({ type:'response.function_call_output', function_call_id, output: {
-          answer: data.answer || '',
-          citations: data.citations || [],
-          notice: data.notice || null
-        }});
-        log('function_call_output skickad. citations:', (data?.citations?.length||0), 'notice:', data?.notice || '—');
+        // payload som ska tillbaka till modellen
+        const payload = {
+          answer: data?.answer || '',
+          citations: data?.citations || [],
+          notice: data?.notice || null
+        };
+
+        // 1) output MÅSTE vara en JSON-sträng
+        send({
+          type:'response.function_call_output',
+          function_call_id,
+          output: JSON.stringify(payload)
+        });
+        log('function_call_output skickad (stringified). citations:', (data?.citations?.length||0), 'notice:', data?.notice || '—');
+
+        // 2) trigga modellen att fortsätta tala på tool-resultatet
+        send({ type:'response.create' });
       }catch(e){
-        send({ type:'response.function_call_output', function_call_id, output: { error:String(e) } });
-        log('Tool error returnerad');
+        const errPayload = { error: String(e) };
+        send({ type:'response.function_call_output', function_call_id, output: JSON.stringify(errPayload) });
+        log('Tool error returnerad:', String(e));
+
+        // be modellen svara något begripligt om felet
+        send({ type:'response.create' });
       }
     }
   }
