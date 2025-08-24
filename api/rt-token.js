@@ -1,4 +1,4 @@
-// /api/rt-token.js
+// /api/rt-token.js (FIXED: single source of truth for instructions + tools)
 export const config = { api: { bodyParser: true } };
 
 export default async function handler(req, res) {
@@ -7,40 +7,27 @@ export default async function handler(req, res) {
     const model = process.env.REALTIME_MODEL || 'gpt-4o-realtime-preview';
     const instructions = `
 Du är Coach Assistant för Linje 65. Svara kort, tydligt och på svenska.
-Använd punktlistor för arbetssteg. Om manualtäckning saknas: säg att det är osäkert
-och be om förtydligande. Förebygg faror och slöseri.
-
-För frågor om Linje 65, manualer, procedurer eller tekniska detaljer:
-Använd alltid verktyget "search_manual" för att hämta relevant information från manualen
-innan du svarar, oavsett om frågan kommer via text eller audio.
-VÄNTA på ett final transkript innan du kallar verktyget.
-Basa ditt svar enbart på resultat från verktyget – hitta inte på information.
-Du får INTE ge något svar förrän du har fått tool_result från 'search_manual' för aktuell fråga,
-om inte frågan uppenbart är hälsning/småprat.
+• Vänta alltid på det slutliga transkriptet innan du svarar.
+• För frågor om Linje 65, manualer, procedurer eller tekniska detaljer:
+  – Anropa alltid verktyget "search_manual" först.
+  – Baserar du sedan svaret enbart på resultatet från verktyget.
+  – Om fakta inte räcker: säg "Jag hittar inte det i manualen."
+• Hitta aldrig på information. Förebygg faror och slöseri. Använd punktlistor för arbetssteg när det är “hur”-frågor.
 `.trim();
 
     const tools = [
       {
         type: 'function',
         name: 'search_manual',
-        description: 'Sök i Linje 65-manualen efter relevant information. Använd detta för alla frågor som rör manualer, procedurer eller tekniska detaljer.',
+        description: 'Sök i Linje 65-manualen efter relevant information. Måste anropas inför alla sakfrågor.',
         parameters: {
           type: 'object',
           properties: {
-            query: {
-              type: 'string',
-              description: 'Sökfrågan på svenska, baserat på användarens fråga.'
-            },
-            k: {
-              type: 'integer',
-              description: 'Antal resultat att hämta (default 5).',
-              default: 5
-            },
-            minSim: {
-              type: 'number',
-              description: 'Minsta likhetspoäng (default 0.45).',
-              default: 0.45
-            }
+            query: { type: 'string', description: 'Sökfrågan på svenska, baserad på användarens fråga.' },
+            k: { type: 'integer', description: 'Antal resultat att hämta (default 5).', default: 5 },
+            minSim: { type: 'number', description: 'Minsta likhetspoäng (default 0.45).', default: 0.45 },
+            heading: { type: 'string', description: 'Valfri rubrik/sektion, t.ex. "Personal".' },
+            restrictToHeading: { type: 'boolean', description: 'Om true, bara träffar inom rubriken.' }
           },
           required: ['query']
         }
@@ -55,18 +42,16 @@ om inte frågan uppenbart är hälsning/småprat.
       },
       body: JSON.stringify({
         model,
-        voice: 'verse',                 // röst; byt vid behov
-        modalities: ['audio', 'text'],  // tal in/ut + text
-        instructions,                   // Uppdaterade instructions
-        tools,                          // Lägg till tools här
-        // turn_detection kan även styras efter anslutning via session.update (klienten)
+        voice: 'verse',
+        modalities: ['audio', 'text'],
+        instructions,
+        tools
       })
     });
 
     const j = await r.json();
     if (!r.ok) return res.status(500).json({ error: 'OpenAI error', details: j });
 
-    // Kortlivat token som webbläsaren får använda för WebRTC
     const token = j?.client_secret?.value || j?.client_secret || j?.id;
     if (!token) return res.status(500).json({ error: 'No client secret', details: j });
 
