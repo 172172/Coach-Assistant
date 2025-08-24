@@ -360,7 +360,7 @@ ${factsList}
                 prefix_padding_ms: 200
               },
               input_audio_transcription: { model: "gpt-4o-transcribe", language: "sv" },
-              tool_choice:'auto',
+              tool_choice:{ type:"function", name:"search_manual" },
               instructions:`
 Du är Coach Assistant för Linje 65, som Jarvis – hjälpsam, kvick, vänlig. Svara kort och på svenska.
 För personfrågor (namn, roller, arbetsuppgifter): använd alltid People-uppslag. Om inget hittas där, säg att du inte hittar det i manualen – gissa aldrig.
