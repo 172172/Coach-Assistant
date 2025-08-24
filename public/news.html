@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Nyheter / Skiftöverlämning</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root { --bg:#0b0b0f; --fg:#fff; --mut:#b9c0c7; --acc:#00aaff; }
+    body { font-family: system-ui, sans-serif; padding: 2rem; background: var(--bg); color: var(--fg); }
+    .wrap { max-width: 820px; margin: 0 auto; }
+    label { display:block; margin:.6rem 0 .3rem; color: var(--mut); }
+    input, textarea, select {
+      width:100%; padding:.8rem; border-radius:12px; border:1px solid #232733;
+      background:#12141a; color:#fff; outline:none;
+    }
+    textarea { min-height: 180px; }
+    .row { display:flex; gap:.6rem; flex-wrap:wrap; }
+    .row > * { flex:1 1 200px; }
+    button { margin-top:1rem; padding:.9rem 1.1rem; border:0; border-radius:12px; background:var(--acc); color:#fff; cursor:pointer; }
+    .pill { background:#12141a; border:1px solid #232733; padding:.9rem 1rem; border-radius:12px; margin-top:1rem; }
+    .muted { color: var(--mut); font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Nyheter / Överlämning / Underhåll</h1>
+    <p class="muted">Skriv fri text om vad som hänt. AI:n kan sedan svara på “Vad har hänt i veckan?” baserat på detta.</p>
+
+    <div class="pill">
+      <label for="adminToken">Admin-token (engångs)</label>
+      <input id="adminToken" type="password" placeholder="Klistra in ADMIN_TOKEN (sparas lokalt)">
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="newsAt">Gäller datum/tid</label>
+        <input id="newsAt" type="datetime-local">
+      </div>
+      <div>
+        <label for="area">Område (valfritt)</label>
+        <input id="area" type="text" placeholder="t.ex. Tapp, OCME, Jones, Pastör, CIP…">
+      </div>
+      <div>
+        <label for="shift">Skift (valfritt)</label>
+        <select id="shift">
+          <option value="">—</option>
+          <option>A</option><option>B</option><option>C</option><option>D</option>
+        </select>
+      </div>
+    </div>
+
+    <label for="title">Rubrik (valfritt)</label>
+    <input id="title" type="text" placeholder="Kort rubrik">
+
+    <label for="body">Text</label>
+    <textarea id="body" placeholder="Fri text, t.ex. vad som byttes, stopporsak, beslut, observationer…"></textarea>
+
+    <label for="tags">Taggar (valfritt, kommaseparerat)</label>
+    <input id="tags" type="text" placeholder="underhåll, stopp, byte">
+
+    <button id="saveBtn">Spara nyhet</button>
+    <div id="status" class="pill" style="display:none"></div>
+
+    <p class="muted" style="margin-top:1rem">
+      Tips: lägg en knapp i röst-UI till <code>/news.html</code> precis som vi gjorde för <code>/report.html</code>.
+    </p>
+  </div>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+
+    // Förifyll: newsAt = nu, adminToken från localStorage
+    window.addEventListener('load', () => {
+      const now = new Date();
+      const iso = new Date(now.getTime() - now.getTimezoneOffset()*60000).toISOString().slice(0,16);
+      el('newsAt').value = iso;
+      const savedToken = localStorage.getItem('adminToken');
+      if (savedToken) el('adminToken').value = savedToken;
+
+      // säkerställ userId
+      const uid = localStorage.getItem('userId') || (() => {
+        const x = 'u_' + Math.random().toString(36).slice(2);
+        localStorage.setItem('userId', x);
+        return x;
+      })();
+    });
+
+    function showStatus(msg, ok=true){
+      const box = el('status');
+      box.style.display='block';
+      box.textContent = msg;
+      box.style.borderColor = ok ? '#233d2c' : '#3b2121';
+      box.style.background = ok ? '#102216' : '#1a1212';
+    }
+
+    el('saveBtn').addEventListener('click', async () => {
+      const adminToken = el('adminToken').value.trim();
+      if (!adminToken) { showStatus('ADMIN_TOKEN saknas.', false); return; }
+      localStorage.setItem('adminToken', adminToken);
+
+      const userId = localStorage.getItem('userId');
+      const payload = {
+        title: el('title').value.trim(),
+        body: el('body').value.trim(),
+        area: el('area').value.trim() || null,
+        shift: el('shift').value || null,
+        tags: el('tags').value ? el('tags').value.split(',').map(s=>s.trim()).filter(Boolean) : [],
+        news_at: el('newsAt').value ? new Date(el('newsAt').value).toISOString() : new Date().toISOString(),
+        user_id: userId,
+        source: 'ui'
+      };
+
+      if (!payload.body || payload.body.length < 3) {
+        showStatus('Skriv lite mer innehåll i texten.', false);
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/news/append', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Admin-Token': adminToken
+          },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Okänt fel');
+
+        showStatus('Sparat ✅');
+        // rensa bara brödtext/title, behåll övriga val
+        el('title').value = '';
+        el('body').value = '';
+      } catch (err) {
+        showStatus('Kunde inte spara: ' + (err.message || err), false);
+      }
+    });
+  </script>
+</body>
+</html>
