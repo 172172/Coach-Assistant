@@ -56,7 +56,7 @@
     </div>
 
     <footer>
-      Stabiliserad flöde: GPT anropar <code>search_manual</code> själv → vi svarar enbart med tool_result → GPT formulerar svaret.
+      Flöde: GPT anropar <code>search_manual</code> → vi svarar med <code>function_call_output</code> → GPT formulerar svaret.
     </footer>
   </div>
 
@@ -73,7 +73,7 @@
     let rt = {
       pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
       calls: new Map(),
-      lastUserText: '' // ⬅️ används som fallback till tool.query
+      lastUserText: '' // används som fallback till tool.query
     };
 
     // mic viz
@@ -123,7 +123,27 @@
               modalities:['audio','text'],
               turn_detection:{ type:'server_vad', threshold:0.6, silence_duration_ms:550, prefix_padding_ms:200 },
               input_audio_transcription:{ model:'gpt-4o-transcribe', language:'sv' },
-              tool_choice:'auto'
+              tool_choice:'auto',
+              // Bälte & hängslen: registrera verktyget här också
+              tools: [
+                {
+                  type: 'function',
+                  name: 'search_manual',
+                  description: 'Sök i manualen och returnera snippets.',
+                  parameters: {
+                    type: 'object',
+                    properties: {
+                      query: { type: 'string' },
+                      k: { type: 'integer' },
+                      minSim: { type: 'number' },
+                      heading: { type: 'string' },
+                      restrictToHeading: { type: 'boolean' }
+                    },
+                    required: ['query']
+                  }
+                }
+              ],
+              instructions: 'Anropa alltid search_manual först och svara endast baserat på snippets.'
             }
           }));
           append(pill('Realtime ansluten.'));
@@ -168,7 +188,7 @@
 
     // ===== Tool call plumbing =====
     function handleRealtimeMessage(msg){
-      // 0) Fånga transkript (delta & done) TIDIGT → så fallback finns innan tool-call
+      // Fånga transkript i realtid → så vi alltid har en fallback
       if (msg.type === 'response.input_audio_transcription.delta') {
         const t = (msg.delta || msg.text || '').trim();
         if (t) rt.lastUserText = t;
@@ -181,14 +201,14 @@
         if (t) rt.lastUserText = t;
       }
 
-      // 1) Visa meddelanden
+      // Visa meddelanden
       if (msg.type==='conversation.item.created'){
         if (msg.item?.role==='user'){
           const parts=msg.item?.content||[];
           for (const p of parts){
             const text = p?.text || p?.transcript || p?.input_text || p?.input_audio_transcription?.text;
             if (typeof text === 'string' && text.trim()){
-              rt.lastUserText = text.trim(); // spara senaste färdiga texten
+              rt.lastUserText = text.trim(); // spara senaste texten
               append(bubble(text,'user'));
             }
           }
@@ -202,7 +222,7 @@
         }
       }
 
-      // 2) Samla ihop tool-argument (DELTA) — använd ALLTID tool_call_id som nyckel
+      // Samla ihop tool-argument — ALLTID nyckla på tool_call_id
       if (msg.type==='response.function_call_arguments.delta'){
         const key = msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
         const prev = rt.calls.get(key) || { name: msg.name, argsText: '', tool_call_id: key };
@@ -212,13 +232,12 @@
         return;
       }
 
-      // 3) Kör verktyget när argumenten är klara (DONE) — samma nyckel
+      // Kör verktyget när argumenten är klara — samma nyckel + skicka tool_call_id vidare
       if (msg.type==='response.function_call_arguments.done'){
         const key = msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
         const tc = rt.calls.get(key) || { name: msg.name, argsText: '', tool_call_id: key };
         let args={}; try{ args=JSON.parse(tc.argsText||'{}'); }catch{ args={}; }
 
-        // Fallback: om modellen glömde query → använd senaste användartexten
         const effectiveQuery = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
         if (!args.query && effectiveQuery) args.query = effectiveQuery;
 
@@ -226,13 +245,13 @@
         append(pill(`TOOL CALL → ${tc.name} q="${shown}"`));
 
         if (tc.name==='search_manual'){
-          runSearchManualTool(tc.tool_call_id, args)  // skicka alltid tool_call_id
+          runSearchManualTool(tc.tool_call_id, args)  // viktigt: skicka tool_call_id
             .catch(err=>append(errorBubble('Tool fel: '+(err?.message||String(err)))));
           return;
         }
       }
 
-      // 4) Visa färdiga textsvar
+      // Visa färdiga textsvar
       if (msg.type==='response.output_text.done'){
         const text=msg.output_text||msg.text||'';
         if (text?.trim()) append(bubble(text,'assistant'));
@@ -243,37 +262,38 @@
     async function runSearchManualTool(toolCallId, args) {
       console.log('Tool args:', args);
 
-      // Fallback: läs senaste användartext om args.query saknas
+      // Fallback: använd senaste text om modellen glömde query
       const q = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
 
-      // Om allt ändå är tomt → rapportera tydligt till modellen och avsluta
       if (!q) {
-        console.warn('Empty args or query received from AI (efter fallback)');
+        console.warn('Empty args or query (efter fallback)');
         const fallbackResponse = {
           ok: false,
           snippets: [{
-            text: "Jag saknar en fråga att söka på. Säg t.ex. 'Hur gör man sortbyte i OCME?'",
+            text: "Jag saknar en fråga att söka på. Säg t.ex. 'Hur gör man formatbyte i OCME?'",
             heading: "Hjälp",
             score: 0
           }],
-          error: "missing_query"
         };
-        if (rt.dc && rt.dc.readyState === 'open') {
-          rt.dc.send(JSON.stringify({
-            type: 'tool_call_output',
-            tool_call_id: toolCallId,
+
+        // ✅ Rätt retur: conversation.item.create + response.create
+        rt.dc?.send(JSON.stringify({
+          type: 'conversation.item.create',
+          item: {
+            type: 'function_call_output',
+            call_id: toolCallId,
             output: JSON.stringify(fallbackResponse)
-          }));
-          rt.dc.send(JSON.stringify({ type:'response.create' }));
-        }
+          }
+        }));
+        rt.dc?.send(JSON.stringify({ type:'response.create' }));
+        console.log('→ sent function_call_output (fallback) & response.create');
         return fallbackResponse;
       }
 
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
+        const timeoutId = setTimeout(() => controller.abort(), 20000);
 
-        // Sänk minSim lite för robustare träffar
         const params = {
           query: q,
           k: typeof args?.k === 'number' ? args.k : 5,
@@ -296,14 +316,16 @@
 
         if (!data.snippets) data.snippets = [];
 
-        if (rt.dc && rt.dc.readyState === 'open') {
-          rt.dc.send(JSON.stringify({
-            type: 'tool_call_output',
-            tool_call_id: toolCallId,
+        rt.dc?.send(JSON.stringify({
+          type: 'conversation.item.create',
+          item: {
+            type: 'function_call_output',
+            call_id: toolCallId,
             output: JSON.stringify(data)
-          }));
-          rt.dc.send(JSON.stringify({ type:'response.create' }));
-        }
+          }
+        }));
+        rt.dc?.send(JSON.stringify({ type:'response.create' }));
+        console.log('→ sent function_call_output & response.create', data);
         return data;
       } catch (error) {
         console.error('Search tool error:', error);
@@ -316,14 +338,16 @@
           }],
           error: error.toString()
         };
-        if (rt.dc && rt.dc.readyState === 'open') {
-          rt.dc.send(JSON.stringify({
-            type: 'tool_call_output',
-            tool_call_id: toolCallId,
+        rt.dc?.send(JSON.stringify({
+          type: 'conversation.item.create',
+          item: {
+            type: 'function_call_output',
+            call_id: toolCallId,
             output: JSON.stringify(errorResponse)
-          }));
-          rt.dc.send(JSON.stringify({ type:'response.create' }));
-        }
+          }
+        }));
+        rt.dc?.send(JSON.stringify({ type:'response.create' }));
+        console.log('→ sent function_call_output (error) & response.create');
         return errorResponse;
       }
     }
