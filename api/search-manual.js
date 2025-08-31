@@ -342,6 +342,25 @@ export default async function handler(req, res) {
       .map(([k]) => byKey.get(k))
       .slice(0, K);
 
+    // Lägg till detta direkt efter try i handler-funktionen:
+    console.log('Query received:', rawQ, 'K:', K, 'minScore:', minScore);
+
+    // Efter embedding-generering:
+    console.log('Embedding generated, dims:', dims);
+
+    // Efter SQL-generering:
+    console.log('SQL:', sql);
+    console.log('Params:', params);
+
+    // Efter databas-query:
+    console.log('DB rows returned:', rows?.length || 0);
+
+    // Efter lexikal sökning:
+    console.log('Lexical rows returned:', lexRows?.length || 0);
+
+    // Efter fusion:
+    console.log('Final fused results:', fused?.length || 0);
+
     return res.status(200).end(JSON.stringify({
       ok: true,
       query: rawQ,
