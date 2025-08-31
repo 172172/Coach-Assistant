@@ -29,6 +29,7 @@
     .vis>b{display:block;height:100%;width:6%;background:linear-gradient(90deg,#85f3d5,#4dd4ff);transition:width .08s linear}
     footer{margin-top:24px;color:var(--muted);font-size:12px}
     .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    code.small{font-size:11px;opacity:.85}
   </style>
 </head>
 <body>
@@ -56,7 +57,7 @@
     </div>
 
     <footer>
-      Flöde: GPT anropar <code>search_manual</code> → vi svarar med <code>function_call_output</code> → GPT formulerar svaret.
+      Röstflöde: <code class="small">conversation.item.input_audio_transcription.completed → (fallback query) → function_call_output(call_id) → response.create</code>
     </footer>
   </div>
 
@@ -72,8 +73,9 @@
     // ===== State =====
     let rt = {
       pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
-      calls: new Map(),
-      lastUserText: '' // används som fallback till tool.query
+      calls: new Map(),               // key = call_id
+      lastUserText: '',               // senaste transkript / text
+      partialByItem: new Map(),       // item_id -> pågående transkript
     };
 
     // mic viz
@@ -124,26 +126,21 @@
               turn_detection:{ type:'server_vad', threshold:0.6, silence_duration_ms:550, prefix_padding_ms:200 },
               input_audio_transcription:{ model:'gpt-4o-transcribe', language:'sv' },
               tool_choice:'auto',
-              // Bälte & hängslen: registrera verktyget här också
-              tools: [
-                {
-                  type: 'function',
-                  name: 'search_manual',
-                  description: 'Sök i manualen och returnera snippets.',
-                  parameters: {
-                    type: 'object',
-                    properties: {
-                      query: { type: 'string' },
-                      k: { type: 'integer' },
-                      minSim: { type: 'number' },
-                      heading: { type: 'string' },
-                      restrictToHeading: { type: 'boolean' }
-                    },
-                    required: ['query']
-                  }
+              // extra säkert: registrera verktyget i klient-sessionen också
+              tools:[{
+                type:'function', name:'search_manual',
+                description:'Sök i manualen och returnera snippets.',
+                parameters:{
+                  type:'object',
+                  properties:{
+                    query:{type:'string'}, k:{type:'integer'},
+                    minSim:{type:'number'}, heading:{type:'string'},
+                    restrictToHeading:{type:'boolean'}
+                  },
+                  required:['query']
                 }
-              ],
-              instructions: 'Anropa alltid search_manual först och svara endast baserat på snippets.'
+              }],
+              instructions:'Anropa alltid search_manual först och svara endast baserat på snippets.'
             }
           }));
           append(pill('Realtime ansluten.'));
@@ -171,48 +168,61 @@
         rt.pc?.close(); rt.mic?.getTracks()?.forEach(t=>t.stop());
         micAnalyser=null;
       }catch{}
-      rt={ pc:null, dc:null, mic:null, remoteAudio:null, connected:false, calls:new Map(), lastUserText:'' };
+      rt={ pc:null, dc:null, mic:null, remoteAudio:null, connected:false, calls:new Map(), lastUserText:'', partialByItem:new Map() };
       $('#rtBtn').style.display='inline-block'; $('#rtHangup').style.display='none'; $('#rtStatus').textContent='Inte ansluten'; append(pill('Samtal avslutat.'));
     }
 
-    // ===== Text input → assistant =====
+    // ===== Text input → assistant (för test) =====
     $('#sendTextBtn').onclick = sendQuickText;
     $('#quickText').addEventListener('keydown', e => { if(e.key==='Enter') sendQuickText(); });
     function sendQuickText(){
       const t=$('#quickText').value.trim(); if(!t) return;
-      rt.lastUserText = t; // spara så tool alltid har något
+      rt.lastUserText = t;
       $('#quickText').value=''; append(bubble('➤ '+t,'user'));
       if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({ type:'input_text', text:t }));
+      // För text vill vi trigga svar direkt
+      rt.dc.send(JSON.stringify({ type:'response.create' }));
     }
 
-    // ===== Tool call plumbing =====
+    // ===== Realtime event handler =====
     function handleRealtimeMessage(msg){
-      // Fånga transkript i realtid → så vi alltid har en fallback
-      if (msg.type === 'response.input_audio_transcription.delta') {
-        const t = (msg.delta || msg.text || '').trim();
-        if (t) rt.lastUserText = t;
-      }
-      if (
-        msg.type === 'response.input_audio_transcription.done' ||
-        msg.type === 'response.input_audio_transcription.completed'
-      ) {
-        const t = (msg.transcript || msg.text || msg.output_audio_transcription || '').trim();
-        if (t) rt.lastUserText = t;
+      // Debug-piller för viktiga events
+      if (msg?.type && (
+        msg.type.startsWith('response.function_call') ||
+        msg.type.startsWith('conversation.item.input_audio_transcription') ||
+        msg.type==='response.created' || msg.type==='response.completed'
+      )) append(pill('EVT: '+msg.type));
+
+      // --- RÖST: fånga transkriptions-delta ---
+      if (msg.type === 'conversation.item.input_audio_transcription.delta') {
+        const itemId = msg.item_id || msg.item?.id || 'unknown';
+        const delta = (msg.delta || msg.text || '').trim();
+        if (delta) {
+          const prev = rt.partialByItem.get(itemId) || '';
+          const cur = prev + delta;
+          rt.partialByItem.set(itemId, cur);
+          rt.lastUserText = cur; // uppdatera live
+        }
+        return;
       }
 
-      // Visa meddelanden
-      if (msg.type==='conversation.item.created'){
-        if (msg.item?.role==='user'){
-          const parts=msg.item?.content||[];
-          for (const p of parts){
-            const text = p?.text || p?.transcript || p?.input_text || p?.input_audio_transcription?.text;
-            if (typeof text === 'string' && text.trim()){
-              rt.lastUserText = text.trim(); // spara senaste texten
-              append(bubble(text,'user'));
-            }
-          }
+      // --- RÖST: transkription färdig (completed/done) ---
+      if (msg.type === 'conversation.item.input_audio_transcription.completed' ||
+          msg.type === 'conversation.item.input_audio_transcription.done') {
+        const itemId = msg.item_id || msg.item?.id || 'unknown';
+        const full = (msg.transcript || msg.text || rt.partialByItem.get(itemId) || '').trim();
+        if (full) {
+          rt.lastUserText = full;
+          append(bubble(full, 'user'));
         }
+        // Viktigt: trigga modellen att köra (ibland krävs detta för röst). 
+        rt.dc?.send(JSON.stringify({ type: 'response.create' }));
+        return;
+      }
+
+      // Visa skapade items (kan innehålla text-svar)
+      if (msg.type==='conversation.item.created'){
         if (msg.item?.role==='assistant'){
           const parts=msg.item?.content||[];
           for (const p of parts){
@@ -222,36 +232,38 @@
         }
       }
 
-      // Samla ihop tool-argument — ALLTID nyckla på tool_call_id
+      // === Verktygsanrop: samla arguments (nyckla på call_id) ===
       if (msg.type==='response.function_call_arguments.delta'){
-        const key = msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
-        const prev = rt.calls.get(key) || { name: msg.name, argsText: '', tool_call_id: key };
+        const key = msg.call_id ?? msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
+        const prev = rt.calls.get(key) || { name: msg.name, argsText: '', call_id: key };
         prev.argsText += (msg.delta || msg.arguments_delta || '');
         prev.name = prev.name || msg.name;
+        prev.call_id = prev.call_id || key;
         rt.calls.set(key, prev);
         return;
       }
 
-      // Kör verktyget när argumenten är klara — samma nyckel + skicka tool_call_id vidare
+      // === Verktygsanrop färdigt: kör verktyget ===
       if (msg.type==='response.function_call_arguments.done'){
-        const key = msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
-        const tc = rt.calls.get(key) || { name: msg.name, argsText: '', tool_call_id: key };
+        const key = msg.call_id ?? msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
+        const tc = rt.calls.get(key) || { name: msg.name, argsText: '', call_id: key };
         let args={}; try{ args=JSON.parse(tc.argsText||'{}'); }catch{ args={}; }
 
+        // Fallback: om modellen glömde query → använd senaste transkript
         const effectiveQuery = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
         if (!args.query && effectiveQuery) args.query = effectiveQuery;
 
         const shown = (effectiveQuery||'').slice(0,48)+((effectiveQuery||'').length>48?'…':'');
-        append(pill(`TOOL CALL → ${tc.name} q="${shown}"`));
+        append(pill(`TOOL CALL → ${tc.name} q="${shown}" (call_id=${tc.call_id})`));
 
         if (tc.name==='search_manual'){
-          runSearchManualTool(tc.tool_call_id, args)  // viktigt: skicka tool_call_id
+          runSearchManualTool(tc.call_id, args)
             .catch(err=>append(errorBubble('Tool fel: '+(err?.message||String(err)))));
           return;
         }
       }
 
-      // Visa färdiga textsvar
+      // Svarstext som streamats klart
       if (msg.type==='response.output_text.done'){
         const text=msg.output_text||msg.text||'';
         if (text?.trim()) append(bubble(text,'assistant'));
@@ -259,14 +271,12 @@
       }
     }
 
-    async function runSearchManualTool(toolCallId, args) {
+    // ===== Verktygsfunktion (klient) =====
+    async function runSearchManualTool(callId, args) {
       console.log('Tool args:', args);
-
-      // Fallback: använd senaste text om modellen glömde query
       const q = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
 
       if (!q) {
-        console.warn('Empty args or query (efter fallback)');
         const fallbackResponse = {
           ok: false,
           snippets: [{
@@ -275,25 +285,20 @@
             score: 0
           }],
         };
-
-        // ✅ Rätt retur: conversation.item.create + response.create
+        // 1) skicka funktions-output (kräver call_id)
         rt.dc?.send(JSON.stringify({
           type: 'conversation.item.create',
-          item: {
-            type: 'function_call_output',
-            call_id: toolCallId,
-            output: JSON.stringify(fallbackResponse)
-          }
+          item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(fallbackResponse) }
         }));
+        // 2) be modellen fortsätta svaret
         rt.dc?.send(JSON.stringify({ type:'response.create' }));
-        console.log('→ sent function_call_output (fallback) & response.create');
+        append(pill('↩︎ function_call_output (fallback) + response.create'));
         return fallbackResponse;
       }
 
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 20000);
-
         const params = {
           query: q,
           k: typeof args?.k === 'number' ? args.k : 5,
@@ -313,19 +318,14 @@
         let data;
         try { data = await response.json(); }
         catch { data = { ok:false, snippets:[], error:'Ogiltigt svar från servern' }; }
-
         if (!data.snippets) data.snippets = [];
 
         rt.dc?.send(JSON.stringify({
           type: 'conversation.item.create',
-          item: {
-            type: 'function_call_output',
-            call_id: toolCallId,
-            output: JSON.stringify(data)
-          }
+          item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(data) }
         }));
         rt.dc?.send(JSON.stringify({ type:'response.create' }));
-        console.log('→ sent function_call_output & response.create', data);
+        append(pill('↩︎ function_call_output + response.create (snippets: '+(data.snippets?.length||0)+')'));
         return data;
       } catch (error) {
         console.error('Search tool error:', error);
@@ -340,14 +340,10 @@
         };
         rt.dc?.send(JSON.stringify({
           type: 'conversation.item.create',
-          item: {
-            type: 'function_call_output',
-            call_id: toolCallId,
-            output: JSON.stringify(errorResponse)
-          }
+          item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(errorResponse) }
         }));
         rt.dc?.send(JSON.stringify({ type:'response.create' }));
-        console.log('→ sent function_call_output (error) & response.create');
+        append(pill('↩︎ function_call_output (error) + response.create'));
         return errorResponse;
       }
     }
