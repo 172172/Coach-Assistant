@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="sv">
 <head>
@@ -58,7 +57,7 @@
     </div>
 
     <footer>
-      Röstflöde: <code class="small">transcription.completed → function_call.created (namn + call_id) → arguments.done → function_call_output(call_id) → response.create</code>
+      Röstflöde: <code class="small">transcription.completed → (meta-guard?) → (ev. client-manual-first) → function_call_output → response.create</code>
     </footer>
   </div>
 
@@ -77,6 +76,7 @@
       calls: new Map(),               // key = call_id, value = {name,argsText}
       lastUserText: '',               // senaste transkript / text
       partialByItem: new Map(),       // item_id -> pågående transkript
+      sawToolResultForThisTurn: false // ENFORCER: måste vara true innan tekniskt svar
     };
 
     // mic viz
@@ -119,6 +119,7 @@
 
         rt.dc=rt.pc.createDataChannel('oai-events');
         rt.dc.onopen=()=>{
+          // *** Viktigt: Skicka INTE några extra instructions här ***
           rt.dc.send(JSON.stringify({
             type:'session.update',
             session:{
@@ -126,21 +127,7 @@
               modalities:['audio','text'],
               turn_detection:{ type:'server_vad', threshold:0.6, silence_duration_ms:550, prefix_padding_ms:200 },
               input_audio_transcription:{ model:'gpt-4o-transcribe', language:'sv' },
-              tool_choice:'auto',
-              tools:[{
-                type:'function', name:'search_manual',
-                description:'Sök i manualen och returnera snippets.',
-                parameters:{
-                  type:'object',
-                  properties:{
-                    query:{type:'string'}, k:{type:'integer'},
-                    minSim:{type:'number'}, heading:{type:'string'},
-                    restrictToHeading:{type:'boolean'}
-                  },
-                  required:['query']
-                }
-              }],
-              instructions:'Anropa alltid search_manual först och svara endast baserat på snippets.'
+              tool_choice:'auto'
             }
           }));
           append(pill('Realtime ansluten.'));
@@ -168,7 +155,7 @@
         rt.pc?.close(); rt.mic?.getTracks()?.forEach(t=>t.stop());
         micAnalyser=null;
       }catch{}
-      rt={ pc:null, dc:null, mic:null, remoteAudio:null, connected:false, calls:new Map(), lastUserText:'', partialByItem:new Map() };
+      rt={ pc:null, dc:null, mic:null, remoteAudio:null, connected:false, calls:new Map(), lastUserText:'', partialByItem:new Map(), sawToolResultForThisTurn:false };
       $('#rtBtn').style.display='inline-block'; $('#rtHangup').style.display='none'; $('#rtStatus').textContent='Inte ansluten'; append(pill('Samtal avslutat.'));
     }
 
@@ -178,15 +165,45 @@
     function sendQuickText(){
       const t=$('#quickText').value.trim(); if(!t) return;
       rt.lastUserText = t;
+      rt.sawToolResultForThisTurn = false; // ny tur
       $('#quickText').value=''; append(bubble('➤ '+t,'user'));
       if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({ type:'input_text', text:t }));
       rt.dc.send(JSON.stringify({ type:'response.create' })); // trigga modell för text
     }
 
+    // ===== Meta-guard (identitet) =====
+    function isMetaQuestion(t) {
+      const s = (t||'').toLowerCase();
+      return /(vem.*skapade dig|vem är du|vad.*huvuduppgift|varför.*finns du)/i.test(s);
+    }
+    function metaAnswerFor(t) {
+      const s = (t||'').toLowerCase();
+      if (/vem.*skapade dig|vem är du/.test(s)) {
+        return "Jag är utvecklad av ett lokalt team i Falkenberg för att underlätta operatörernas dagliga arbete.";
+      }
+      if (/vad.*huvuduppgift|varför.*finns du/.test(s)) {
+        return "Min huvuduppgift är att hjälpa operatörer på Linje 65 att snabbt hitta rätt i manualerna och att stötta i dagliga uppgifter.";
+      }
+      return "Jag är Coach Assistant för Linje 65 — byggd lokalt i Falkenberg för att hjälpa er i vardagen.";
+    }
+    function speakExact(text) {
+      append(bubble(text, 'assistant'));
+      rt.dc?.send(JSON.stringify({
+        type: 'response.create',
+        response: { instructions: `Säg exakt, ordagrant: "${text}"` }
+      }));
+    }
+
+    // ===== Linje-klassificerare (för policy-cop) =====
+    function isLine65Question(t) {
+      const s = (t||'').toLowerCase();
+      return /(linje\s*65|sortbyte|formatbyte|pastör|ocme|kister|jones|mes|rinser|fals|tapp|pallastare|kolliprinter|buffert|cip)/i.test(s);
+    }
+
     // ===== Realtime events =====
     function handleRealtimeMessage(msg){
-      // debug
+      // debug (valfritt)
       if (msg?.type && (
         msg.type.startsWith('response.function_call') ||
         msg.type.startsWith('conversation.item.input_audio_transcription') ||
@@ -212,10 +229,18 @@
         const itemId = msg.item_id || msg.item?.id || 'unknown';
         const full = (msg.transcript || msg.text || rt.partialByItem.get(itemId) || '').trim();
         if (full) {
-          rt.lastUserText = normalizeASR(full); // ⬅️ stavningsfixar
+          rt.lastUserText = normalizeASR(full);
+          rt.sawToolResultForThisTurn = false; // ny tur
           append(bubble(rt.lastUserText, 'user'));
+
+          // META-GUARD: besvara själv, skicka inte till modellen
+          if (isMetaQuestion(rt.lastUserText)) {
+            speakExact(metaAnswerFor(rt.lastUserText));
+            return;
+          }
         }
-        rt.dc?.send(JSON.stringify({ type: 'response.create' })); // trigga modell (röst)
+        // annars låt modellen jobba
+        rt.dc?.send(JSON.stringify({ type: 'response.create' }));
         return;
       }
 
@@ -270,9 +295,17 @@
         return;
       }
 
-      // Svarstext stream klar
+      // === POLICY-COP: stoppa textsvar om ingen manual i denna tur ===
       if (msg.type==='response.output_text.done'){
         const text=msg.output_text||msg.text||'';
+
+        if (isLine65Question(rt.lastUserText) && !rt.sawToolResultForThisTurn) {
+          append(pill('⚠︎ Stoppar svar utan manual. Kör sökning först.'));
+          runSearchManualTool('auto_'+Date.now(), { query: rt.lastUserText })
+            .catch(err=>append(errorBubble('Tool fel: '+(err?.message||String(err)))));
+          return; // visa inte modellens svar ännu
+        }
+
         if (text?.trim()) append(bubble(text,'assistant'));
         return;
       }
@@ -280,19 +313,15 @@
 
     // ===== Klient-verktyg =====
     async function runSearchManualTool(callId, args) {
-      console.log('Tool args:', args);
       const qRaw = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
-      const q = normalizeASR(qRaw); // ⬅️ stavningsfixar för ASR
+      const q = normalizeASR(qRaw);
 
       if (!q) {
         const fallbackResponse = {
           ok: false,
-          snippets: [{
-            text: "Jag saknar en fråga att söka på. Säg t.ex. 'Hur gör man sortbyte i OCME?'",
-            heading: "Hjälp",
-            score: 0
-          }],
+          snippets: [{ text: "Jag saknar en fråga att söka på. Säg t.ex. 'Hur gör man sortbyte i OCME?'", heading: "Hjälp", score: 0 }]
         };
+        // markera att vi INTE har ett riktigt tool-result
         rt.dc?.send(JSON.stringify({
           type: 'conversation.item.create',
           item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(fallbackResponse) }
@@ -322,10 +351,12 @@
         });
         clearTimeout(timeoutId);
 
-        let data;
-        try { data = await response.json(); }
+        let data; try { data = await response.json(); }
         catch { data = { ok:false, snippets:[], error:'Ogiltigt svar från servern' }; }
         if (!data.snippets) data.snippets = [];
+
+        // *** Viktigt: markera att denna tur HAR manualresultat ***
+        rt.sawToolResultForThisTurn = true;
 
         rt.dc?.send(JSON.stringify({
           type: 'conversation.item.create',
@@ -335,14 +366,9 @@
         append(pill('↩︎ function_call_output + response.create (snippets: '+(data.snippets?.length||0)+')'));
         return data;
       } catch (error) {
-        console.error('Search tool error:', error);
         const errorResponse = {
           ok: false,
-          snippets: [{
-            text: "Ett tekniskt fel uppstod vid sökning i manualen.",
-            heading: "Fel",
-            score: 0
-          }],
+          snippets: [{ text: "Ett tekniskt fel uppstod vid sökning i manualen.", heading: "Fel", score: 0 }],
           error: error.toString()
         };
         rt.dc?.send(JSON.stringify({
@@ -363,7 +389,7 @@
       t = t.replace(/\bsått\b/g, 'sort');
       t = t.replace(/\bsott\s+byte\b/g, 'sortbyte');
       t = t.replace(/\bsått\s+byte\b/g, 'sortbyte');
-      // lite fler svenska varianter
+      // städa upp whitespace
       t = t.replace(/\s{2,}/g,' ').trim();
       return t;
     }
