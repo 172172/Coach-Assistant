@@ -218,45 +218,49 @@
       }
     }
 
-    async function runSearchManualTool(toolCallId, args){
-      // 1) Hämta från din backend
-      const body = {
-        query: String(args?.query||'').trim(),
-        k: Number.isInteger(args?.k) ? args.k : 5,
-        minSim: typeof args?.minSim === 'number' ? args.minSim : 0.45,
-        heading: args?.heading || null,
-        restrictToHeading: !!args?.restrictToHeading
-      };
-      if (!body.query){
-        // signalera fel till modellen
-        rt.dc?.send(JSON.stringify({
-          type:'conversation.item.create',
-          item:{ type:'function_call_output', call_id: toolCallId, output: JSON.stringify({ ok:false, error:'missing_query' }) }
-        }));
-        rt.dc?.send(JSON.stringify({ type:'response.create' }));
-        return;
-      }
-
-      let data;
-      try{
-        data = await fetchJSON('/api/search-manual',{ method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-      }catch(e){
-        data = { ok:false, error:e?.message||String(e) };
-      }
-
-      // Lägg till efter "1) Hämta från din backend"
+    async function runSearchManualTool(toolCallId, args) {
       console.log('Tool args:', args);
-      console.log('Tool response:', data);
-
-      // 2) Skicka tool_result till modellen (ingen egen summering här)
-      const payload = data?.snippets ? { ok:true, snippets: data.snippets } : data;
-      rt.dc?.send(JSON.stringify({
-        type:'conversation.item.create',
-        item:{ type:'function_call_output', call_id: toolCallId, output: JSON.stringify(payload) }
-      }));
-
-      // 3) Låt modellen formulera svaret
-      rt.dc?.send(JSON.stringify({ type:'response.create' }));
+      try {
+        // 1) Lägg till timeout för API-anropet
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 sekunder timeout
+        
+        // 2) Förenkla parametrarna (sänk minSim)
+        const params = {
+          query: args.query,
+          k: typeof args.k === 'number' ? args.k : 5,
+          minSim: 0.3,  // Hårdkoda till 0.3 för att säkerställa träffar
+          heading: args.heading,
+          restrictToHeading: args.restrictToHeading
+        };
+        
+        // 3) Använd AbortController för att kunna avbryta långsamma anrop
+        const response = await fetch('/api/search-manual', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(params),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId); // Rensa timeout om anropet lyckas
+        
+        const data = await response.json();
+        console.log('Tool response:', data);
+        
+        // 4) Returnera alltid något, även om snippets är tomma
+        if (!data.snippets || !data.snippets.length) {
+          return { ok: true, snippets: [], note: "Inga träffar hittades" };
+        }
+        return data;
+      } catch (error) {
+        console.error('Search tool error:', error);
+        // 5) Returnera ett komplett svar vid fel för att undvika hängande promises
+        return { 
+          ok: false, 
+          snippets: [], 
+          error: error.toString(),
+          query: args.query
+        };
+      }
     }
   </script>
 </body>
