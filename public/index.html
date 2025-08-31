@@ -72,7 +72,8 @@
     // ===== State =====
     let rt = {
       pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
-      calls: new Map()
+      calls: new Map(),
+      lastUserText: '' // ⬅️ viktigt för fallback
     };
 
     // mic viz
@@ -115,7 +116,6 @@
 
         rt.dc=rt.pc.createDataChannel('oai-events');
         rt.dc.onopen=()=>{
-          // Viktigt: skicka INTE om nya instructions/tools här (undvik dubbelkonfiguration).
           rt.dc.send(JSON.stringify({
             type:'session.update',
             session:{
@@ -151,7 +151,7 @@
         rt.pc?.close(); rt.mic?.getTracks()?.forEach(t=>t.stop());
         micAnalyser=null;
       }catch{}
-      rt={ pc:null, dc:null, mic:null, remoteAudio:null, connected:false, calls:new Map() };
+      rt={ pc:null, dc:null, mic:null, remoteAudio:null, connected:false, calls:new Map(), lastUserText:'' };
       $('#rtBtn').style.display='inline-block'; $('#rtHangup').style.display='none'; $('#rtStatus').textContent='Inte ansluten'; append(pill('Samtal avslutat.'));
     }
 
@@ -160,6 +160,7 @@
     $('#quickText').addEventListener('keydown', e => { if(e.key==='Enter') sendQuickText(); });
     function sendQuickText(){
       const t=$('#quickText').value.trim(); if(!t) return;
+      rt.lastUserText = t; // ⬅️ spara så tool alltid har något
       $('#quickText').value=''; append(bubble('➤ '+t,'user'));
       if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({ type:'input_text', text:t }));
@@ -173,7 +174,10 @@
           const parts=msg.item?.content||[];
           for (const p of parts){
             const text = p?.text || p?.transcript || p?.input_text || p?.input_audio_transcription?.text;
-            if (typeof text === 'string' && text.trim()) append(bubble(text,'user'));
+            if (typeof text === 'string' && text.trim()){
+              rt.lastUserText = text.trim(); // ⬅️ spara senaste transkriptet
+              append(bubble(text,'user'));
+            }
           }
         }
         if (msg.item?.role==='assistant'){
@@ -201,8 +205,13 @@
         const id=msg.id||msg.tool_call_id||'unknown';
         const tc=rt.calls.get(id)||{name:msg.name,argsText:''};
         let args={}; try{ args=JSON.parse(tc.argsText||'{}'); }catch{ args={}; }
-        const shown=(args.query||'').slice(0,48)+(args.query?.length>48?'…':'');
-        append(pill(`TOOL CALL → ${tc.name} q="${shown||''}"`));
+
+        // Fallback: om modellen glömde query → använd senaste användartexten
+        const effectiveQuery = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
+        if (!args.query && effectiveQuery) args.query = effectiveQuery;
+
+        const shown = (effectiveQuery||'').slice(0,48)+((effectiveQuery||'').length>48?'…':'');
+        append(pill(`TOOL CALL → ${tc.name} q="${shown}"`));
 
         if (tc.name==='search_manual'){
           runSearchManualTool(id, args).catch(err=>append(errorBubble('Tool fel: '+(err?.message||String(err)))));
@@ -220,23 +229,22 @@
 
     async function runSearchManualTool(toolCallId, args) {
       console.log('Tool args:', args);
-      
-      // Validera och hantera tomma arguments
-      if (!args || Object.keys(args).length === 0 || !args.query || args.query.trim() === '') {
-        console.warn('Empty args or query received from AI');
+
+      // Fallback: läs senaste användartext om args.query saknas
+      const q = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
+
+      // Om allt ändå är tomt → rapportera tydligt till modellen och avsluta
+      if (!q) {
+        console.warn('Empty args or query received from AI (efter fallback)');
         const fallbackResponse = {
-          ok: true,
-          snippets: [
-            {
-              text: "Detta är en standardtext som returneras eftersom sökningen inte innehöll någon fråga. Ställ en mer specifik fråga om Linje 65.",
-              heading: "Hjälp",
-              score: 0.99
-            }
-          ],
-          note: "Sökningen saknade frågetext"
+          ok: false,
+          snippets: [{
+            text: "Jag saknar en fråga att söka på. Säg t.ex. 'Hur gör man sortbyte i OCME?'",
+            heading: "Hjälp",
+            score: 0
+          }],
+          error: "missing_query"
         };
-        
-        // Skicka fallback till AI
         if (rt.dc && rt.dc.readyState === 'open') {
           rt.dc.send(JSON.stringify({
             type: 'tool_call_result',
@@ -244,48 +252,36 @@
             result: JSON.stringify(fallbackResponse)
           }));
         }
-        
         return fallbackResponse;
       }
-      
+
       try {
-        // 1) Lägg till timeout för API-anropet
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 sekunder timeout
-        
-        // 2) Förenkla parametrarna (sänk minSim)
+        const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
+
+        // Sänk minSim lite för robustare träffar
         const params = {
-          query: args.query,
-          k: typeof args.k === 'number' ? args.k : 5,
-          minSim: 0.3,  // Hårdkoda till 0.3 för att säkerställa träffar
-          heading: args.heading,
-          restrictToHeading: args.restrictToHeading
+          query: q,
+          k: typeof args?.k === 'number' ? args.k : 5,
+          minSim: typeof args?.minSim === 'number' ? args.minSim : 0.3,
+          heading: args?.heading || null,
+          restrictToHeading: !!args?.restrictToHeading
         };
-        
-        // 3) Använd AbortController för att kunna avbryta långsamma anrop
+
         const response = await fetch('/api/search-manual', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(params),
           signal: controller.signal
         });
-        clearTimeout(timeoutId); // Rensa timeout om anropet lyckas
-        
-        // Försök tolka svar som JSON med fallback
+        clearTimeout(timeoutId);
+
         let data;
-        try {
-          data = await response.json();
-        } catch (parseError) {
-          console.error('Kunde inte tolka svar som JSON:', parseError);
-          data = { ok: false, snippets: [], error: 'Ogiltigt svar från servern' };
-        }
-        
-        console.log('Tool response:', data);
-        
-        // Säkerställ att snippets alltid finns
+        try { data = await response.json(); }
+        catch { data = { ok:false, snippets:[], error:'Ogiltigt svar från servern' }; }
+
         if (!data.snippets) data.snippets = [];
-        
-        // Skicka svaret till AI
+
         if (rt.dc && rt.dc.readyState === 'open') {
           rt.dc.send(JSON.stringify({
             type: 'tool_call_result',
@@ -293,23 +289,18 @@
             result: JSON.stringify(data)
           }));
         }
-        
         return data;
       } catch (error) {
         console.error('Search tool error:', error);
-        
-        // Skapa ett felmeddelande som alltid har snippets
-        const errorResponse = { 
-          ok: false, 
-          snippets: [{ 
-            text: "Ett tekniskt fel uppstod vid sökning i manualen. Försök ställa frågan på ett annat sätt.",
+        const errorResponse = {
+          ok: false,
+          snippets: [{
+            text: "Ett tekniskt fel uppstod vid sökning i manualen.",
             heading: "Fel",
             score: 0
-          }], 
+          }],
           error: error.toString()
         };
-        
-        // Skicka även felmeddelande till AI
         if (rt.dc && rt.dc.readyState === 'open') {
           rt.dc.send(JSON.stringify({
             type: 'tool_call_result',
@@ -317,7 +308,6 @@
             result: JSON.stringify(errorResponse)
           }));
         }
-        
         return errorResponse;
       }
     }
