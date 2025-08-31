@@ -29,6 +29,7 @@
     .vis>b{display:block;height:100%;width:6%;background:linear-gradient(90deg,#85f3d5,#4dd4ff);transition:width .08s linear}
     footer{margin-top:24px;color:var(--muted);font-size:12px}
     .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    code.small{font-size:11px;opacity:.85}
   </style>
 </head>
 <body>
@@ -40,21 +41,26 @@
         <button class="ghost" id="rtHangup" style="display:none">Lägg på</button>
       </div>
     </header>
+
     <div class="panel">
       <div class="flex">
         <div id="rtStatus" class="pill">Inte ansluten</div>
         <div class="vis" style="flex:1 1 220px; min-width:220px"><b id="micBar"></b></div>
       </div>
+
       <div class="row" style="margin-top:10px">
         <input id="quickText" type="search" placeholder="Skicka text till assistenten (enter)" style="flex:1" />
         <button class="ghost" id="sendTextBtn">Skicka</button>
       </div>
+
       <div id="output"></div>
     </div>
+
     <footer>
-      Flöde: GPT anropar <code>search_manual</code> → vi svarar med <code>function_call_output</code> → GPT formulerar svaret.
+      Röstflöde: <code class="small">transcription.completed → function_call.created (namn + call_id) → arguments.done → function_call_output(call_id) → response.create</code>
     </footer>
   </div>
+
   <script>
     // ===== Helpers =====
     const $ = s => document.querySelector(s);
@@ -63,12 +69,15 @@
     const bubble = (t,role='assistant') => { const d=document.createElement('div'); d.className='bubble '+role; d.textContent=t; return d; };
     const errorBubble = t => { const d=document.createElement('div'); d.className='bubble error'; d.textContent=t; return d; };
     async function fetchJSON(url, opts){ const r=await fetch(url,opts); const txt=await r.text(); let j; try{j=JSON.parse(txt)}catch{throw new Error(`${r.status} ${r.statusText}: ${txt.slice(0,200)}`)} if(!r.ok||j?.ok===false) throw new Error(j?.error||j?.message||`${r.status} ${r.statusText}`); return j; }
+
     // ===== State =====
     let rt = {
       pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
-      calls: new Map(),
-      lastUserText: '' // används som fallback till tool.query
+      calls: new Map(),               // key = call_id, value = {name,argsText}
+      lastUserText: '',               // senaste transkript / text
+      partialByItem: new Map(),       // item_id -> pågående transkript
     };
+
     // mic viz
     let micAnalyser, micData;
     function setupMicViz(stream){
@@ -87,9 +96,11 @@
         })();
       }catch{}
     }
+
     // ===== Connect / Hangup =====
     $('#rtBtn').addEventListener('click', connectRealtime);
     $('#rtHangup').addEventListener('click', hangupRealtime);
+
     async function connectRealtime(){
       const status=t=>$('#rtStatus').textContent=t;
       try{
@@ -97,11 +108,14 @@
           audio: { channelCount:1, noiseSuppression:true, echoCancellation:true, autoGainControl:false, sampleRate:48000 }
         });
         setupMicViz(rt.mic);
+
         rt.pc=new RTCPeerConnection();
         rt.pc.addTransceiver('audio', { direction:'recvonly' });
         rt.mic.getTracks().forEach(t=>rt.pc.addTrack(t,rt.mic));
+
         rt.remoteAudio=new Audio(); rt.remoteAudio.autoplay=true; rt.remoteAudio.playsInline=true; rt.remoteAudio.muted=false;
         rt.pc.ontrack=e=>{ rt.remoteAudio.srcObject=e.streams[0]; rt.remoteAudio.play().catch(()=>{}); append(pill('🔊 Mottar röst från assistenten')); };
+
         rt.dc=rt.pc.createDataChannel('oai-events');
         rt.dc.onopen=()=>{
           rt.dc.send(JSON.stringify({
@@ -110,33 +124,28 @@
               voice:'verse',
               modalities:['audio','text'],
               turn_detection:{ type:'server_vad', threshold:0.6, silence_duration_ms:550, prefix_padding_ms:200 },
-              input_audio_transcription:{ model:'whisper-1', language:'sv' },
+              input_audio_transcription:{ model:'gpt-4o-transcribe', language:'sv' },
               tool_choice:'auto',
-              // bälte & hängslen: registrera verktyget här också
-              tools: [
-                {
-                  type: 'function',
-                  name: 'search_manual',
-                  description: 'Sök i manualen och returnera snippets.',
-                  parameters: {
-                    type: 'object',
-                    properties: {
-                      query: { type: 'string' },
-                      k: { type: 'integer' },
-                      minSim: { type: 'number' },
-                      heading: { type: 'string' },
-                      restrictToHeading: { type: 'boolean' }
-                    },
-                    required: ['query']
-                  }
+              tools:[{
+                type:'function', name:'search_manual',
+                description:'Sök i manualen och returnera snippets.',
+                parameters:{
+                  type:'object',
+                  properties:{
+                    query:{type:'string'}, k:{type:'integer'},
+                    minSim:{type:'number'}, heading:{type:'string'},
+                    restrictToHeading:{type:'boolean'}
+                  },
+                  required:['query']
                 }
-              ],
-              instructions: 'Anropa alltid search_manual först och svara endast baserat på snippets.'
+              }],
+              instructions:'Anropa alltid search_manual först och svara endast baserat på snippets.'
             }
           }));
           append(pill('Realtime ansluten.'));
         };
         rt.dc.onmessage=(e)=>{ try{ handleRealtimeMessage(JSON.parse(e.data)); }catch(err){ console.warn('parse',err); } };
+
         const {token, model}=await fetchJSON('/api/rt-token');
         append(pill('Realtime modell: '+model));
         const offer=await rt.pc.createOffer(); await rt.pc.setLocalDescription(offer);
@@ -146,9 +155,11 @@
           body:offer.sdp
         }).then(r=>r.text());
         await rt.pc.setRemoteDescription({type:'answer', sdp});
+
         rt.connected=true; $('#rtBtn').style.display='none'; $('#rtHangup').style.display='inline-block'; status('Realtime ansluten');
       }catch(e){ console.error(e); $('#rtStatus').textContent=`Realtime misslyckades: ${e?.message||e}`; append(errorBubble('Fel vid anslutning: '+(e?.message||e))); }
     }
+
     async function hangupRealtime(){
       try{
         rt.dc?.close();
@@ -156,45 +167,59 @@
         rt.pc?.close(); rt.mic?.getTracks()?.forEach(t=>t.stop());
         micAnalyser=null;
       }catch{}
-      rt={ pc:null, dc:null, mic:null, remoteAudio:null, connected:false, calls:new Map(), lastUserText:'' };
+      rt={ pc:null, dc:null, mic:null, remoteAudio:null, connected:false, calls:new Map(), lastUserText:'', partialByItem:new Map() };
       $('#rtBtn').style.display='inline-block'; $('#rtHangup').style.display='none'; $('#rtStatus').textContent='Inte ansluten'; append(pill('Samtal avslutat.'));
     }
-    // ===== Text input → assistant =====
+
+    // ===== Text input (test) =====
     $('#sendTextBtn').onclick = sendQuickText;
     $('#quickText').addEventListener('keydown', e => { if(e.key==='Enter') sendQuickText(); });
     function sendQuickText(){
       const t=$('#quickText').value.trim(); if(!t) return;
-      rt.lastUserText = t; // spara så tool alltid har något
+      rt.lastUserText = t;
       $('#quickText').value=''; append(bubble('➤ '+t,'user'));
       if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({ type:'input_text', text:t }));
+      rt.dc.send(JSON.stringify({ type:'response.create' })); // trigga modell för text
     }
-    // ===== Tool call plumbing =====
+
+    // ===== Realtime events =====
     function handleRealtimeMessage(msg){
-      // Fånga transkript i realtid → så vi alltid har en fallback
-      if (msg.type === 'response.input_audio_transcription.delta') {
-        const t = (msg.delta || msg.text || '').trim();
-        if (t) rt.lastUserText = t;
-      }
-      if (
-        msg.type === 'response.input_audio_transcription.done' ||
-        msg.type === 'response.input_audio_transcription.completed'
-      ) {
-        const t = (msg.transcript || msg.text || msg.output_audio_transcription || '').trim();
-        if (t) rt.lastUserText = t;
-      }
-      // Visa meddelanden
-      if (msg.type==='conversation.item.created'){
-        if (msg.item?.role==='user'){
-          const parts=msg.item?.content||[];
-          for (const p of parts){
-            const text = p?.text || p?.transcript || p?.input_text || p?.input_audio_transcription?.text;
-            if (typeof text === 'string' && text.trim()){
-              rt.lastUserText = text.trim(); // spara senaste texten
-              append(bubble(text,'user'));
-            }
-          }
+      // debug
+      if (msg?.type && (
+        msg.type.startsWith('response.function_call') ||
+        msg.type.startsWith('conversation.item.input_audio_transcription') ||
+        msg.type==='response.created' || msg.type==='response.completed'
+      )) append(pill('EVT: '+msg.type));
+
+      // --- RÖST: transkriptions-delta ---
+      if (msg.type === 'conversation.item.input_audio_transcription.delta') {
+        const itemId = msg.item_id || msg.item?.id || 'unknown';
+        const delta = (msg.delta || msg.text || '').trim();
+        if (delta) {
+          const prev = rt.partialByItem.get(itemId) || '';
+          const cur = prev + delta;
+          rt.partialByItem.set(itemId, cur);
+          rt.lastUserText = cur;
         }
+        return;
+      }
+
+      // --- RÖST: transkription färdig ---
+      if (msg.type === 'conversation.item.input_audio_transcription.completed' ||
+          msg.type === 'conversation.item.input_audio_transcription.done') {
+        const itemId = msg.item_id || msg.item?.id || 'unknown';
+        const full = (msg.transcript || msg.text || rt.partialByItem.get(itemId) || '').trim();
+        if (full) {
+          rt.lastUserText = normalizeASR(full); // ⬅️ stavningsfixar
+          append(bubble(rt.lastUserText, 'user'));
+        }
+        rt.dc?.send(JSON.stringify({ type: 'response.create' })); // trigga modell (röst)
+        return;
+      }
+
+      // visa assisterande text när den dyker upp
+      if (msg.type==='conversation.item.created'){
         if (msg.item?.role==='assistant'){
           const parts=msg.item?.content||[];
           for (const p of parts){
@@ -203,66 +228,83 @@
           }
         }
       }
-      // Samla ihop tool-argument — ALLTID nyckla på tool_call_id
+
+      // === FUNKTIONSANROP: fånga skapandet (namn + call_id) ===
+      if (msg.type === 'response.function_call.created') {
+        const key = msg.call_id || msg.id || 'unknown';
+        const prev = rt.calls.get(key) || { argsText: '', call_id: key };
+        prev.name = msg.name || prev.name || 'search_manual';
+        rt.calls.set(key, prev);
+        append(pill(`FUNC CREATED: ${prev.name} (call_id=${key})`));
+        return;
+      }
+
+      // === FUNKTIONSANROP: delta av arguments ===
       if (msg.type==='response.function_call_arguments.delta'){
-        const key = msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
-        const prev = rt.calls.get(key) || { name: msg.name, argsText: '', tool_call_id: key };
+        const key = msg.call_id ?? msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
+        const prev = rt.calls.get(key) || { name: msg.name || 'search_manual', argsText: '', call_id: key };
         prev.argsText += (msg.delta || msg.arguments_delta || '');
-        prev.name = prev.name || msg.name;
+        if (msg.name) prev.name = msg.name;
         rt.calls.set(key, prev);
         return;
       }
-      // Kör verktyget när argumenten är klara — samma nyckel + skicka tool_call_id vidare
+
+      // === FUNKTIONSANROP: arguments klara → kör verktyget ===
       if (msg.type==='response.function_call_arguments.done'){
-        const key = msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
-        const tc = rt.calls.get(key) || { name: msg.name, argsText: '', tool_call_id: key };
+        const key = msg.call_id ?? msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
+        const tc = rt.calls.get(key) || { name: 'search_manual', argsText: '', call_id: key };
+
         let args={}; try{ args=JSON.parse(tc.argsText||'{}'); }catch{ args={}; }
+        // fallback: om query saknas → senaste transkript
         const effectiveQuery = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
         if (!args.query && effectiveQuery) args.query = effectiveQuery;
+
         const shown = (effectiveQuery||'').slice(0,48)+((effectiveQuery||'').length>48?'…':'');
-        append(pill(`TOOL CALL → ${tc.name} q="${shown}"`));
-        if (tc.name==='search_manual'){
-          runSearchManualTool(tc.tool_call_id, args)
-            .catch(err=>append(errorBubble('Tool fel: '+(err?.message||String(err)))));
-          return;
-        }
+        const toolName = tc.name || 'search_manual';
+        append(pill(`TOOL CALL → ${toolName} q="${shown}" (call_id=${tc.call_id})`));
+
+        // kör oavsett namn (defaultar till search_manual)
+        runSearchManualTool(tc.call_id, args)
+          .catch(err=>append(errorBubble('Tool fel: '+(err?.message||String(err)))));
+        return;
       }
-      // Visa färdiga textsvar
+
+      // Svarstext stream klar
       if (msg.type==='response.output_text.done'){
         const text=msg.output_text||msg.text||'';
         if (text?.trim()) append(bubble(text,'assistant'));
         return;
       }
     }
-    async function runSearchManualTool(toolCallId, args) {
+
+    // ===== Klient-verktyg =====
+    async function runSearchManualTool(callId, args) {
       console.log('Tool args:', args);
-      // Fallback: använd senaste text om modellen glömde query
-      const q = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
+      const qRaw = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
+      const q = normalizeASR(qRaw); // ⬅️ stavningsfixar för ASR
+
       if (!q) {
-        console.warn('Empty args or query (efter fallback)');
         const fallbackResponse = {
           ok: false,
           snippets: [{
-            text: "Jag saknar en fråga att söka på. Säg t.ex. 'Hur gör man formatbyte i OCME?'",
+            text: "Jag saknar en fråga att söka på. Säg t.ex. 'Hur gör man sortbyte i OCME?'",
             heading: "Hjälp",
             score: 0
           }],
         };
         rt.dc?.send(JSON.stringify({
           type: 'conversation.item.create',
-          item: {
-            type: 'function_call_output',
-            call_id: toolCallId,
-            output: JSON.stringify(fallbackResponse)
-          }
+          item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(fallbackResponse) }
         }));
         rt.dc?.send(JSON.stringify({ type:'response.create' }));
-        console.log('→ sent function_call_output (fallback) & response.create');
+        append(pill('↩︎ function_call_output (fallback) + response.create'));
         return fallbackResponse;
       }
+
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 20000);
+
         const params = {
           query: q,
           k: typeof args?.k === 'number' ? args.k : 5,
@@ -270,6 +312,7 @@
           heading: args?.heading || null,
           restrictToHeading: !!args?.restrictToHeading
         };
+
         const response = await fetch('/api/search-manual', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -277,20 +320,18 @@
           signal: controller.signal
         });
         clearTimeout(timeoutId);
+
         let data;
         try { data = await response.json(); }
         catch { data = { ok:false, snippets:[], error:'Ogiltigt svar från servern' }; }
         if (!data.snippets) data.snippets = [];
+
         rt.dc?.send(JSON.stringify({
           type: 'conversation.item.create',
-          item: {
-            type: 'function_call_output',
-            call_id: toolCallId,
-            output: JSON.stringify(data)
-          }
+          item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(data) }
         }));
         rt.dc?.send(JSON.stringify({ type:'response.create' }));
-        console.log('→ sent function_call_output & response.create', data);
+        append(pill('↩︎ function_call_output + response.create (snippets: '+(data.snippets?.length||0)+')'));
         return data;
       } catch (error) {
         console.error('Search tool error:', error);
@@ -305,16 +346,25 @@
         };
         rt.dc?.send(JSON.stringify({
           type: 'conversation.item.create',
-          item: {
-            type: 'function_call_output',
-            call_id: toolCallId,
-            output: JSON.stringify(errorResponse)
-          }
+          item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(errorResponse) }
         }));
         rt.dc?.send(JSON.stringify({ type:'response.create' }));
-        console.log('→ sent function_call_output (error) & response.create');
+        append(pill('↩︎ function_call_output (error) + response.create'));
         return errorResponse;
       }
+    }
+
+    // ===== ASR-normalisering (vanliga fel) =====
+    function normalizeASR(s){
+      let t = s.toLowerCase();
+      // vanliga misshörningar för “sortbyte”
+      t = t.replace(/\bsott\b/g, 'sort');
+      t = t.replace(/\bsått\b/g, 'sort');
+      t = t.replace(/\bsott\s+byte\b/g, 'sortbyte');
+      t = t.replace(/\bsått\s+byte\b/g, 'sortbyte');
+      // lite fler svenska varianter
+      t = t.replace(/\s{2,}/g,' ').trim();
+      return t;
     }
   </script>
 </body>
