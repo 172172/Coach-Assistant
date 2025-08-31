@@ -220,6 +220,34 @@
 
     async function runSearchManualTool(toolCallId, args) {
       console.log('Tool args:', args);
+      
+      // Validera och hantera tomma arguments
+      if (!args || Object.keys(args).length === 0 || !args.query || args.query.trim() === '') {
+        console.warn('Empty args or query received from AI');
+        const fallbackResponse = {
+          ok: true,
+          snippets: [
+            {
+              text: "Detta är en standardtext som returneras eftersom sökningen inte innehöll någon fråga. Ställ en mer specifik fråga om Linje 65.",
+              heading: "Hjälp",
+              score: 0.99
+            }
+          ],
+          note: "Sökningen saknade frågetext"
+        };
+        
+        // Skicka fallback till AI
+        if (rt.dc && rt.dc.readyState === 'open') {
+          rt.dc.send(JSON.stringify({
+            type: 'tool_call_result',
+            id: toolCallId,
+            result: JSON.stringify(fallbackResponse)
+          }));
+        }
+        
+        return fallbackResponse;
+      }
+      
       try {
         // 1) Lägg till timeout för API-anropet
         const controller = new AbortController();
@@ -243,23 +271,54 @@
         });
         clearTimeout(timeoutId); // Rensa timeout om anropet lyckas
         
-        const data = await response.json();
+        // Försök tolka svar som JSON med fallback
+        let data;
+        try {
+          data = await response.json();
+        } catch (parseError) {
+          console.error('Kunde inte tolka svar som JSON:', parseError);
+          data = { ok: false, snippets: [], error: 'Ogiltigt svar från servern' };
+        }
+        
         console.log('Tool response:', data);
         
-        // 4) Returnera alltid något, även om snippets är tomma
-        if (!data.snippets || !data.snippets.length) {
-          return { ok: true, snippets: [], note: "Inga träffar hittades" };
+        // Säkerställ att snippets alltid finns
+        if (!data.snippets) data.snippets = [];
+        
+        // Skicka svaret till AI
+        if (rt.dc && rt.dc.readyState === 'open') {
+          rt.dc.send(JSON.stringify({
+            type: 'tool_call_result',
+            id: toolCallId,
+            result: JSON.stringify(data)
+          }));
         }
+        
         return data;
       } catch (error) {
         console.error('Search tool error:', error);
-        // 5) Returnera ett komplett svar vid fel för att undvika hängande promises
-        return { 
+        
+        // Skapa ett felmeddelande som alltid har snippets
+        const errorResponse = { 
           ok: false, 
-          snippets: [], 
-          error: error.toString(),
-          query: args.query
+          snippets: [{ 
+            text: "Ett tekniskt fel uppstod vid sökning i manualen. Försök ställa frågan på ett annat sätt.",
+            heading: "Fel",
+            score: 0
+          }], 
+          error: error.toString()
         };
+        
+        // Skicka även felmeddelande till AI
+        if (rt.dc && rt.dc.readyState === 'open') {
+          rt.dc.send(JSON.stringify({
+            type: 'tool_call_result',
+            id: toolCallId,
+            result: JSON.stringify(errorResponse)
+          }));
+        }
+        
+        return errorResponse;
       }
     }
   </script>
