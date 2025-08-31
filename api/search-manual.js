@@ -1,4 +1,4 @@
-// /api/search-manual.js – v5 (JS)
+// /api/search-manual.js – v5
 // HYBRID (vector + trigram) + RRF + rubrik-normalisering + GET-stöd + timeouts
 
 import { Pool } from 'pg';
@@ -239,7 +239,7 @@ export default async function handler(req, res) {
   try {
     const rawQ = (body.query || '').trim();
     const K = Math.min(Math.max(parseInt(body.k || body.topK || 5, 10) || 5, 1), 20);
-    const minScore = typeof body.minSim === 'number' ? body.minSim : 0.3; // lite snällare default
+    const minScore = typeof body.minSim === 'number' ? body.minSim : 0.3; // snällare default
     const rawHeading = body.heading ? String(body.heading).trim() : null;
     const restrictRequested = !!body.restrictToHeading;
 
