@@ -57,7 +57,7 @@
     </div>
 
     <footer>
-      Röstflöde: <code class="small">transcription.completed → function_call.created (namn + call_id) → arguments.done → function_call_output(call_id) → response.create</code>
+      Beteende: kort (A–C) + följdfråga, manual-only. Minnesförslag sparas för manuell granskning (inga auto-ändringar).
     </footer>
   </div>
 
@@ -70,10 +70,17 @@
     const errorBubble = t => { const d=document.createElement('div'); d.className='bubble error'; d.textContent=t; return d; };
     async function fetchJSON(url, opts){ const r=await fetch(url,opts); const txt=await r.text(); let j; try{j=JSON.parse(txt)}catch{throw new Error(`${r.status} ${r.statusText}: ${txt.slice(0,200)}`)} if(!r.ok||j?.ok===false) throw new Error(j?.error||j?.message||`${r.status} ${r.statusText}`); return j; }
 
+    // ===== Device ID for prefs/memory =====
+    let deviceId = localStorage.getItem('coach_device_id');
+    if (!deviceId) {
+      deviceId = 'dev_' + (crypto?.randomUUID?.() || Math.random().toString(36).slice(2));
+      localStorage.setItem('coach_device_id', deviceId);
+    }
+
     // ===== State =====
     let rt = {
       pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
-      calls: new Map(),               // key = call_id, value = {name,argsText}
+      calls: new Map(),               // key = call_id
       lastUserText: '',               // senaste transkript / text
       partialByItem: new Map(),       // item_id -> pågående transkript
     };
@@ -129,20 +136,43 @@
               tools:[{
                 type:'function', name:'search_manual',
                 description:'Sök i manualen och returnera snippets.',
-                parameters:{
-                  type:'object',
-                  properties:{
-                    query:{type:'string'}, k:{type:'integer'},
-                    minSim:{type:'number'}, heading:{type:'string'},
-                    restrictToHeading:{type:'boolean'}
-                  },
-                  required:['query']
-                }
+                parameters:{ type:'object', properties:{
+                  query:{type:'string'}, k:{type:'integer'}, minSim:{type:'number'},
+                  heading:{type:'string'}, restrictToHeading:{type:'boolean'}
+                }, required:['query'] }
+              },{
+                type:'function', name:'store_memory_suggestion',
+                description:'Spara kandidatförslag till manual (kräver mänsklig granskning).',
+                parameters:{ type:'object', properties:{
+                  device_id:{type:'string'},
+                  title:{type:'string'}, summary:{type:'string'}, suggested_text:{type:'string'},
+                  risk_level:{type:'string', enum:['low','medium','high']},
+                  tags:{type:'array', items:{type:'string'}},
+                  evidence_snippets:{type:'array', items:{type:'object'}},
+                  user_utterance:{type:'string'}
+                }, required:['device_id','title','summary','suggested_text','risk_level'] }
+              },{
+                type:'function', name:'save_user_preference',
+                description:'Spara preferenser (t.ex. kortfattat).',
+                parameters:{ type:'object', properties:{
+                  device_id:{type:'string'},
+                  brevity:{type:'string', enum:['short','normal','detailed']},
+                  language:{type:'string'},
+                  speech_rate:{type:'string', enum:['slow','normal','fast']}
+                }, required:['device_id'] }
               }],
-              instructions:'Anropa alltid search_manual först och svara endast baserat på snippets.'
+              instructions:'Följ kort-svar, följdfråga, manual-only. Kalla store_memory_suggestion för lärande-förslag, save_user_preference för preferenser.'
             }
           }));
           append(pill('Realtime ansluten.'));
+
+          // Tipsa modellen om att vi föredrar korta svar (engångssignal)
+          rt.dc.send(JSON.stringify({
+            type: 'response.create',
+            response: {
+              instructions: 'Preferenser: brevity=short, language=sv.'
+            }
+          }));
         };
         rt.dc.onmessage=(e)=>{ try{ handleRealtimeMessage(JSON.parse(e.data)); }catch(err){ console.warn('parse',err); } };
 
@@ -171,7 +201,7 @@
       $('#rtBtn').style.display='inline-block'; $('#rtHangup').style.display='none'; $('#rtStatus').textContent='Inte ansluten'; append(pill('Samtal avslutat.'));
     }
 
-    // ===== Text input (test) =====
+    // ===== Text input (för test) =====
     $('#sendTextBtn').onclick = sendQuickText;
     $('#quickText').addEventListener('keydown', e => { if(e.key==='Enter') sendQuickText(); });
     function sendQuickText(){
@@ -185,14 +215,13 @@
 
     // ===== Realtime events =====
     function handleRealtimeMessage(msg){
-      // debug
       if (msg?.type && (
         msg.type.startsWith('response.function_call') ||
         msg.type.startsWith('conversation.item.input_audio_transcription') ||
         msg.type==='response.created' || msg.type==='response.completed'
       )) append(pill('EVT: '+msg.type));
 
-      // --- RÖST: transkriptions-delta ---
+      // --- Röst: transkriptions-delta ---
       if (msg.type === 'conversation.item.input_audio_transcription.delta') {
         const itemId = msg.item_id || msg.item?.id || 'unknown';
         const delta = (msg.delta || msg.text || '').trim();
@@ -205,20 +234,20 @@
         return;
       }
 
-      // --- RÖST: transkription färdig ---
+      // --- Röst: transkription klar ---
       if (msg.type === 'conversation.item.input_audio_transcription.completed' ||
           msg.type === 'conversation.item.input_audio_transcription.done') {
         const itemId = msg.item_id || msg.item?.id || 'unknown';
         const full = (msg.transcript || msg.text || rt.partialByItem.get(itemId) || '').trim();
         if (full) {
-          rt.lastUserText = normalizeASR(full); // ⬅️ stavningsfixar
+          rt.lastUserText = normalizeASR(full);
           append(bubble(rt.lastUserText, 'user'));
         }
-        rt.dc?.send(JSON.stringify({ type: 'response.create' })); // trigga modell (röst)
+        rt.dc?.send(JSON.stringify({ type: 'response.create' }));
         return;
       }
 
-      // visa assisterande text när den dyker upp
+      // visa assistenttext
       if (msg.type==='conversation.item.created'){
         if (msg.item?.role==='assistant'){
           const parts=msg.item?.content||[];
@@ -229,7 +258,7 @@
         }
       }
 
-      // === FUNKTIONSANROP: fånga skapandet (namn + call_id) ===
+      // funktionsanrop
       if (msg.type === 'response.function_call.created') {
         const key = msg.call_id || msg.id || 'unknown';
         const prev = rt.calls.get(key) || { argsText: '', call_id: key };
@@ -239,7 +268,6 @@
         return;
       }
 
-      // === FUNKTIONSANROP: delta av arguments ===
       if (msg.type==='response.function_call_arguments.delta'){
         const key = msg.call_id ?? msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
         const prev = rt.calls.get(key) || { name: msg.name || 'search_manual', argsText: '', call_id: key };
@@ -249,27 +277,31 @@
         return;
       }
 
-      // === FUNKTIONSANROP: arguments klara → kör verktyget ===
       if (msg.type==='response.function_call_arguments.done'){
         const key = msg.call_id ?? msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
         const tc = rt.calls.get(key) || { name: 'search_manual', argsText: '', call_id: key };
 
         let args={}; try{ args=JSON.parse(tc.argsText||'{}'); }catch{ args={}; }
-        // fallback: om query saknas → senaste transkript
-        const effectiveQuery = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
-        if (!args.query && effectiveQuery) args.query = effectiveQuery;
+        if (tc.name === 'search_manual') {
+          const q = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
+          args.query = normalizeASR(q);
+        }
+        const shown = (String(args?.query||'')||'').slice(0,48)+((String(args?.query||'')||'').length>48?'…':'');
+        append(pill(`TOOL CALL → ${tc.name} q="${shown}" (call_id=${tc.call_id})`));
 
-        const shown = (effectiveQuery||'').slice(0,48)+((effectiveQuery||'').length>48?'…':'');
-        const toolName = tc.name || 'search_manual';
-        append(pill(`TOOL CALL → ${toolName} q="${shown}" (call_id=${tc.call_id})`));
-
-        // kör oavsett namn (defaultar till search_manual)
-        runSearchManualTool(tc.call_id, args)
-          .catch(err=>append(errorBubble('Tool fel: '+(err?.message||String(err)))));
-        return;
+        // router
+        const tool = (tc.name||'search_manual');
+        if (tool === 'search_manual') return runSearchManualTool(tc.call_id, args).catch(err=>append(errorBubble(err?.message||String(err))));
+        if (tool === 'store_memory_suggestion') return runStoreMemorySuggestion(tc.call_id, args).catch(err=>append(errorBubble(err?.message||String(err))));
+        if (tool === 'save_user_preference') return runSaveUserPreference(tc.call_id, args).catch(err=>append(errorBubble(err?.message||String(err))));
+        // fallback: okänt -> no-op
+        rt.dc?.send(JSON.stringify({
+          type:'conversation.item.create',
+          item:{ type:'function_call_output', call_id: tc.call_id, output: JSON.stringify({ok:false,error:'unknown_tool'}) }
+        }));
+        rt.dc?.send(JSON.stringify({ type:'response.create' }));
       }
 
-      // Svarstext stream klar
       if (msg.type==='response.output_text.done'){
         const text=msg.output_text||msg.text||'';
         if (text?.trim()) append(bubble(text,'assistant'));
@@ -277,94 +309,118 @@
       }
     }
 
-    // ===== Klient-verktyg =====
+    // ===== Client tool: search_manual =====
     async function runSearchManualTool(callId, args) {
-      console.log('Tool args:', args);
-      const qRaw = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
-      const q = normalizeASR(qRaw); // ⬅️ stavningsfixar för ASR
-
-      if (!q) {
-        const fallbackResponse = {
-          ok: false,
-          snippets: [{
-            text: "Jag saknar en fråga att söka på. Säg t.ex. 'Hur gör man sortbyte i OCME?'",
-            heading: "Hjälp",
-            score: 0
-          }],
-        };
-        rt.dc?.send(JSON.stringify({
-          type: 'conversation.item.create',
-          item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(fallbackResponse) }
-        }));
-        rt.dc?.send(JSON.stringify({ type:'response.create' }));
-        append(pill('↩︎ function_call_output (fallback) + response.create'));
-        return fallbackResponse;
-      }
+      const q = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
+      if (!q) return sendTool(callId, { ok:false, error:'missing_query', snippets:[] });
 
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 20000);
-
-        const params = {
-          query: q,
-          k: typeof args?.k === 'number' ? args.k : 5,
-          minSim: typeof args?.minSim === 'number' ? args.minSim : 0.3,
-          heading: args?.heading || null,
-          restrictToHeading: !!args?.restrictToHeading
-        };
-
         const response = await fetch('/api/search-manual', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(params),
+          body: JSON.stringify({
+            query: q,
+            k: typeof args?.k === 'number' ? args.k : 5,
+            minSim: typeof args?.minSim === 'number' ? args.minSim : 0.3,
+            heading: args?.heading || null,
+            restrictToHeading: !!args?.restrictToHeading
+          }),
           signal: controller.signal
         });
         clearTimeout(timeoutId);
-
-        let data;
-        try { data = await response.json(); }
-        catch { data = { ok:false, snippets:[], error:'Ogiltigt svar från servern' }; }
+        let data; try { data = await response.json(); } catch { data = { ok:false, snippets:[], error:'Ogiltigt svar' }; }
         if (!data.snippets) data.snippets = [];
-
-        rt.dc?.send(JSON.stringify({
-          type: 'conversation.item.create',
-          item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(data) }
-        }));
-        rt.dc?.send(JSON.stringify({ type:'response.create' }));
-        append(pill('↩︎ function_call_output + response.create (snippets: '+(data.snippets?.length||0)+')'));
-        return data;
-      } catch (error) {
-        console.error('Search tool error:', error);
-        const errorResponse = {
-          ok: false,
-          snippets: [{
-            text: "Ett tekniskt fel uppstod vid sökning i manualen.",
-            heading: "Fel",
-            score: 0
-          }],
-          error: error.toString()
-        };
-        rt.dc?.send(JSON.stringify({
-          type: 'conversation.item.create',
-          item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(errorResponse) }
-        }));
-        rt.dc?.send(JSON.stringify({ type:'response.create' }));
-        append(pill('↩︎ function_call_output (error) + response.create'));
-        return errorResponse;
+        // liten indikator
+        const top = (data.snippets||[])[0];
+        if (top) {
+          append(pill(`📘 Källa: ${(top.heading||'Okänd rubrik')} (score ${typeof top.score==='number' ? Math.round(top.score*100)/100 : '–'})`));
+        }
+        return sendTool(callId, data);
+      } catch (e) {
+        return sendTool(callId, { ok:false, snippets:[], error: e?.message || String(e) });
       }
     }
 
-    // ===== ASR-normalisering (vanliga fel) =====
+    // ===== Client tool: store_memory_suggestion =====
+    async function runStoreMemorySuggestion(callId, args) {
+      try {
+        // injicera device_id + användarens text som bakgrund (om saknas)
+        if (!args.device_id) args.device_id = deviceId;
+        if (!args.user_utterance && rt.lastUserText) args.user_utterance = rt.lastUserText;
+
+        const r = await fetch('/api/memory-suggestion', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(args)
+        });
+        const data = await r.json().catch(()=>({ok:false,error:'bad_json'}));
+        return sendTool(callId, data);
+      } catch (e) {
+        return sendTool(callId, { ok:false, error: e?.message || String(e) });
+      }
+    }
+
+    // ===== Client tool: save_user_preference =====
+    async function runSaveUserPreference(callId, args) {
+      try {
+        if (!args.device_id) args.device_id = deviceId;
+        if (!args.brevity) args.brevity = 'short';
+        if (!args.language) args.language = 'sv';
+
+        const r = await fetch('/api/user-preference', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(args)
+        });
+        const data = await r.json().catch(()=>({ok:false,error:'bad_json'}));
+        return sendTool(callId, data);
+      } catch (e) {
+        return sendTool(callId, { ok:false, error: e?.message || String(e) });
+      }
+    }
+
+    // ===== Common: send tool output & ask model to continue =====
+    function sendTool(callId, data){
+      rt.dc?.send(JSON.stringify({
+        type: 'conversation.item.create',
+        item: { type:'function_call_output', call_id: callId, output: JSON.stringify(data) }
+      }));
+      rt.dc?.send(JSON.stringify({ type:'response.create' }));
+      append(pill(`↩︎ function_call_output (${data?.ok===false?'fail':'ok'}) + response.create`));
+      return data;
+    }
+
+    // ===== ASR-normalisering =====
     function normalizeASR(s){
       let t = s.toLowerCase();
-      // vanliga misshörningar för “sortbyte”
       t = t.replace(/\bsott\b/g, 'sort');
       t = t.replace(/\bsått\b/g, 'sort');
-      t = t.replace(/\bsott\s+byte\b/g, 'sortbyte');
-      t = t.replace(/\bsått\s+byte\b/g, 'sortbyte');
-      // lite fler svenska varianter
+      t = t.replace(/\bsott\s*byte\b/g, 'sortbyte');
+      t = t.replace(/\bsått\s*byte\b/g, 'sortbyte');
+      t = t.replace(/\bsort\s*byte\b/g, 'sortbyte');
       t = t.replace(/\s{2,}/g,' ').trim();
       return t;
+    }
+
+    // mic viz setup
+    let micAnalyser, micData;
+    function setupMicViz(stream){
+      try{
+        const ctx=new (window.AudioContext||window.webkitAudioContext)();
+        const src=ctx.createMediaStreamSource(stream);
+        micAnalyser=ctx.createAnalyser(); micAnalyser.fftSize=512; micAnalyser.smoothingTimeConstant=0.8;
+        src.connect(micAnalyser); micData=new Uint8Array(micAnalyser.frequencyBinCount);
+        const bar=$('#micBar');
+        (function loop(){
+          if(!micAnalyser) return;
+          micAnalyser.getByteTimeDomainData(micData);
+          let peak=0; for(let i=0;i<micData.length;i++){ const v=Math.abs(micData[i]-128)/128; if(v>peak) peak=v; }
+          bar.style.width=Math.min(98,(peak*100*1.6)+6)+'%';
+          requestAnimationFrame(loop);
+        })();
+      }catch{}
     }
   </script>
 </body>
