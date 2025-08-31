@@ -27,7 +27,7 @@
     .bubble.error{background:#1b0f12;border-color:#4a1f2a}
     .vis{height:10px;background:#0e1420;border-radius:9999px;overflow:hidden;border:1px solid #213145}
     .vis>b{display:block;height:100%;width:6%;background:linear-gradient(90deg,#85f3d5,#4dd4ff);transition:width .08s linear}
-    footer{margin-top:24px;color:var(--muted);font-size:12px}
+    footer{margin-top:24px;color:#9fb0c3;font-size:12px}
     .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     code.small{font-size:11px;opacity:.85}
   </style>
@@ -85,7 +85,7 @@
       partialByItem: new Map(),       // item_id -> pågående transkript
     };
 
-    // mic viz
+    // ===== Mic visualisering (EN deklaration) =====
     let micAnalyser, micData;
     function setupMicViz(stream){
       try{
@@ -166,12 +166,10 @@
           }));
           append(pill('Realtime ansluten.'));
 
-          // Tipsa modellen om att vi föredrar korta svar (engångssignal)
+          // Engångssignal om korta svar
           rt.dc.send(JSON.stringify({
             type: 'response.create',
-            response: {
-              instructions: 'Preferenser: brevity=short, language=sv.'
-            }
+            response: { instructions: 'Preferenser: brevity=short, language=sv.' }
           }));
         };
         rt.dc.onmessage=(e)=>{ try{ handleRealtimeMessage(JSON.parse(e.data)); }catch(err){ console.warn('parse',err); } };
@@ -289,12 +287,10 @@
         const shown = (String(args?.query||'')||'').slice(0,48)+((String(args?.query||'')||'').length>48?'…':'');
         append(pill(`TOOL CALL → ${tc.name} q="${shown}" (call_id=${tc.call_id})`));
 
-        // router
         const tool = (tc.name||'search_manual');
         if (tool === 'search_manual') return runSearchManualTool(tc.call_id, args).catch(err=>append(errorBubble(err?.message||String(err))));
         if (tool === 'store_memory_suggestion') return runStoreMemorySuggestion(tc.call_id, args).catch(err=>append(errorBubble(err?.message||String(err))));
         if (tool === 'save_user_preference') return runSaveUserPreference(tc.call_id, args).catch(err=>append(errorBubble(err?.message||String(err))));
-        // fallback: okänt -> no-op
         rt.dc?.send(JSON.stringify({
           type:'conversation.item.create',
           item:{ type:'function_call_output', call_id: tc.call_id, output: JSON.stringify({ok:false,error:'unknown_tool'}) }
@@ -330,9 +326,10 @@
           signal: controller.signal
         });
         clearTimeout(timeoutId);
+
         let data; try { data = await response.json(); } catch { data = { ok:false, snippets:[], error:'Ogiltigt svar' }; }
         if (!data.snippets) data.snippets = [];
-        // liten indikator
+
         const top = (data.snippets||[])[0];
         if (top) {
           append(pill(`📘 Källa: ${(top.heading||'Okänd rubrik')} (score ${typeof top.score==='number' ? Math.round(top.score*100)/100 : '–'})`));
@@ -346,7 +343,6 @@
     // ===== Client tool: store_memory_suggestion =====
     async function runStoreMemorySuggestion(callId, args) {
       try {
-        // injicera device_id + användarens text som bakgrund (om saknas)
         if (!args.device_id) args.device_id = deviceId;
         if (!args.user_utterance && rt.lastUserText) args.user_utterance = rt.lastUserText;
 
@@ -381,7 +377,7 @@
       }
     }
 
-    // ===== Common: send tool output & ask model to continue =====
+    // ===== Common: skicka tool output + trigga svar =====
     function sendTool(callId, data){
       rt.dc?.send(JSON.stringify({
         type: 'conversation.item.create',
@@ -402,25 +398,6 @@
       t = t.replace(/\bsort\s*byte\b/g, 'sortbyte');
       t = t.replace(/\s{2,}/g,' ').trim();
       return t;
-    }
-
-    // mic viz setup
-    let micAnalyser, micData;
-    function setupMicViz(stream){
-      try{
-        const ctx=new (window.AudioContext||window.webkitAudioContext)();
-        const src=ctx.createMediaStreamSource(stream);
-        micAnalyser=ctx.createAnalyser(); micAnalyser.fftSize=512; micAnalyser.smoothingTimeConstant=0.8;
-        src.connect(micAnalyser); micData=new Uint8Array(micAnalyser.frequencyBinCount);
-        const bar=$('#micBar');
-        (function loop(){
-          if(!micAnalyser) return;
-          micAnalyser.getByteTimeDomainData(micData);
-          let peak=0; for(let i=0;i<micData.length;i++){ const v=Math.abs(micData[i]-128)/128; if(v>peak) peak=v; }
-          bar.style.width=Math.min(98,(peak*100*1.6)+6)+'%';
-          requestAnimationFrame(loop);
-        })();
-      }catch{}
     }
   </script>
 </body>
