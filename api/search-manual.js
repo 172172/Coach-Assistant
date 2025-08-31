@@ -1,11 +1,5 @@
-// /api/search-manual.js – v4 (JS) — HYBRID (vector + trigram) + RRF + rubrik-normalisering + debug
-// - Konsekvent cosine (<=>) i score & sortering (embeddings)
-// - Lexikal sökning via pg_trgm på chunk/heading/title
-// - RRF-fusion av vector + lexikal
-// - Rubrikfilter mot heading + title
-// - Personläge: extrahera namn från frågan och sänk minSim (bibehållet för bakåtkomp.)
-// - Normalisera rubrik mot kända rubriker i tabellen
-// - Extra debug-fält i svaret
+// /api/search-manual.js – v5 (JS)
+// HYBRID (vector + trigram) + RRF + rubrik-normalisering + GET-stöd + timeouts
 
 import { Pool } from 'pg';
 
@@ -33,20 +27,16 @@ function readJsonBody(req) {
     return {};
   }
 }
+const quoteIdent = (id) => '"' + String(id).replace(/"/g, '""') + '"';
 
-function quoteIdent(id) {
-  return '"' + String(id).replace(/"/g, '""') + '"';
-}
-
-// Optimera embedQuery för att hantera timeouts
+// Embeddings med timeout
 async function embedQuery(q) {
   if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY saknas (env)');
   const model = process.env.EMBED_MODEL || 'text-embedding-3-small'; // 1536-dim
-  
-  // Lägg till timeout
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 8000);
-  
+
   try {
     const r = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
@@ -55,24 +45,21 @@ async function embedQuery(q) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ model, input: q }),
-      signal: controller.signal
+      signal: controller.signal,
     });
     clearTimeout(timeoutId);
-    
     if (!r.ok) {
       const t = await r.text();
-      throw new Error(`OpenAI embeddings misslyckades: ${r.status} ${r.statusText} – ${t.slice(0, 200)}`);
+      throw new Error(`OpenAI embeddings misslyckades: ${r.status} ${r.statusText} – ${t.slice(0,200)}`);
     }
     const j = await r.json();
-    const emb = j.data && j.data[0] && j.data[0].embedding;
+    const emb = j.data?.[0]?.embedding;
     if (!emb) throw new Error('Embedding saknas i OpenAI-svar');
     return { embedding: emb, model, dims: emb.length };
-  } catch (error) {
+  } catch (e) {
     clearTimeout(timeoutId);
-    if (error.name === 'AbortError') {
-      throw new Error('OpenAI embedding timeout - tog för lång tid');
-    }
-    throw error;
+    if (e.name === 'AbortError') throw new Error('OpenAI embedding timeout - tog för lång tid');
+    throw e;
   }
 }
 
@@ -104,18 +91,16 @@ async function getMappings() {
     return cands.find((c) => chunkCols.includes(c));
   };
 
-  const textCol = pick('MANUAL_TEXT_COL', ['chunk', 'content', 'text', 'body', 'raw', 'paragraph']);
-  const embCol = pick('MANUAL_EMB_COL', ['embedding', 'vector', 'emb', 'embedding_1536', 'embed']);
-  const idxCol = pick('MANUAL_IDX_COL', ['idx', 'chunk_index', 'position', 'ord', 'i']);
-  const headingCol = pick('MANUAL_HEADING_COL', ['heading', 'section', 'h1', 'h2']);
-  const docIdCol = pick('MANUAL_DOCID_COL', ['doc_id', 'document_id', 'docid', 'source_id', 'doc']);
+  const textCol   = pick('MANUAL_TEXT_COL',   ['chunk','content','text','body','raw','paragraph']);
+  const embCol    = pick('MANUAL_EMB_COL',    ['embedding','vector','emb','embedding_1536','embed']);
+  const idxCol    = pick('MANUAL_IDX_COL',    ['idx','chunk_index','position','ord','i']);
+  const headingCol= pick('MANUAL_HEADING_COL',['heading','section','h1','h2']);
+  const docIdCol  = pick('MANUAL_DOCID_COL',  ['doc_id','document_id','docid','source_id','doc']);
 
-  if (!textCol)
-    throw new Error('Kunde inte hitta textkolumn i manualtabellen (chunk/content/text/body/raw/paragraph). Sätt MANUAL_TEXT_COL.');
-  if (!embCol)
-    throw new Error('Kunde inte hitta embedding-kolumn i manualtabellen (embedding/vector/emb/embedding_1536/embed). Sätt MANUAL_EMB_COL.');
+  if (!textCol) throw new Error('Kunde inte hitta textkolumn (chunk/content/text/body/raw/paragraph). Sätt MANUAL_TEXT_COL.');
+  if (!embCol)  throw new Error('Kunde inte hitta embedding-kolumn (embedding/vector/emb/embedding_1536/embed). Sätt MANUAL_EMB_COL.');
 
-  let join = { exists: false };
+  let join = { exists:false };
   if (await tableExists(schema, docsTable)) {
     const docsCols = await columns(schema, docsTable);
     const pickDocs = (envName, cands) => {
@@ -127,37 +112,40 @@ async function getMappings() {
       exists: true,
       schema,
       table: docsTable,
-      idCol: pickDocs('MANUAL_DOCS_ID_COL', ['id', 'doc_id', 'document_id', 'docid']),
-      titleCol: pickDocs('MANUAL_DOCS_TITLE_COL', ['title', 'name', 'doc_title']),
+      idCol: pickDocs('MANUAL_DOCS_ID_COL',    ['id','doc_id','document_id','docid']),
+      titleCol: pickDocs('MANUAL_DOCS_TITLE_COL',['title','name','doc_title']),
     };
   }
 
   return { schema, chunksTable, textCol, embCol, idxCol, headingCol, docIdCol, join };
 }
 
-// ---- Rubrik-normalisering + persondetektion ----
+// ---- Rubriker + personläge ----
 let __knownHeadings = null;
 async function getKnownHeadings(schema, table, headingCol) {
   if (__knownHeadings) return __knownHeadings;
   if (!headingCol) { __knownHeadings = []; return __knownHeadings; }
   const q = `
-    SELECT DISTINCT LOWER(${quoteIdent(headingCol)}) AS h
+    SELECT DISTINCT ${quoteIdent(headingCol)} AS h
     FROM ${quoteIdent(schema)}.${quoteIdent(table)}
     WHERE ${quoteIdent(headingCol)} IS NOT NULL AND ${quoteIdent(headingCol)} <> ''
-    LIMIT 1000
+    LIMIT 2000
   `;
   const { rows } = await pool.query(q);
-  __knownHeadings = rows.map(r => String(r.h).trim()).filter(Boolean);
+  __knownHeadings = rows
+    .map(r => String(r.h || ''))
+    .map(s => s.toLowerCase().replace(/["'`]/g,'').replace(/^\s*:\s*/,'').trim()) // sanera
+    .filter(Boolean);
   return __knownHeadings;
 }
 
 function normalizeHeading(raw, known) {
   if (!raw) return null;
-  const s = String(raw).toLowerCase().replace(/["'`]/g,'').trim();
+  const s = String(raw).toLowerCase().replace(/["'`]/g,'').replace(/^\s*:\s*/,'').trim();
   if (!s) return null;
-  for (const h of known) {
-    if (s.includes(h)) return h;
-  }
+
+  for (const h of known) if (s.includes(h)) return h;
+
   const toks = s.split(/[^a-zåäö0-9]+/i).filter(w => w.length > 2);
   let best = null, bestScore = 0;
   for (const h of known) {
@@ -172,7 +160,7 @@ function extractPersonName(q) {
   const m = q.match(/vem\s+(?:är|heter)\s+([A-ZÅÄÖ][A-Za-zÅÄÖåäö\-]+(?:\s+[A-ZÅÄÖ][A-Za-zÅÄÖåäö\-]+)?)/i);
   if (m) return m[1].trim();
   const candidates = q.match(/\b[A-ZÅÄÖ][A-Za-zÅÄÖåäö\-]+(?:\s+[A-ZÅÄÖ][A-Za-zÅÄÖåäö\-]+)?/g);
-  if (candidates && candidates.length) {
+  if (candidates?.length) {
     candidates.sort((a,b)=>b.length - a.length);
     return candidates[0].trim();
   }
@@ -216,27 +204,42 @@ function buildSQL(map, { filtered, heading, restrict }) {
 
 // ---------- Handler ----------
 export default async function handler(req, res) {
-  // Lägg till tidsgräns för hela anropet
+  // Global timeout för hela anropet
   const HANDLER_TIMEOUT = 25000;
   const timeoutId = setTimeout(() => {
     if (!res.writableEnded) {
-      res.status(408).json({ 
-        ok: false, 
-        error: 'Timeout - sökningen tog för lång tid',
-        snippets: [] // Säkerställ att snippets alltid finns
-      });
+      res.status(408).json({ ok:false, error:'Timeout - sökningen tog för lång tid', snippets:[] });
     }
   }, HANDLER_TIMEOUT);
-  
+
   res.setHeader('Content-Type', 'application/json');
-  if (req.method !== 'POST')
-    return res.status(405).end(JSON.stringify({ ok: false, error: 'Method not allowed' }));
+
+  // Tillåt GET (för delning/test) och POST (produktion)
+  let body = {};
+  try {
+    if (req.method === 'GET') {
+      body = {
+        query: (req.query?.q ?? req.query?.query ?? '').toString(),
+        k: parseInt(req.query?.k ?? '5', 10) || 5,
+        minSim: req.query?.minSim ? parseFloat(req.query.minSim) : undefined,
+        heading: (req.query?.heading ?? req.query?.h ?? '').toString() || null,
+        restrictToHeading: ['1','true','on','yes'].includes(String(req.query?.restrict ?? req.query?.r ?? '').toLowerCase())
+      };
+    } else if (req.method === 'POST') {
+      body = readJsonBody(req) || {};
+    } else {
+      clearTimeout(timeoutId);
+      return res.status(405).end(JSON.stringify({ ok:false, error:'Method not allowed' }));
+    }
+  } catch (e) {
+    clearTimeout(timeoutId);
+    return res.status(400).end(JSON.stringify({ ok:false, error:'Bad request', details:String(e) }));
+  }
 
   try {
-    const body = readJsonBody(req);
     const rawQ = (body.query || '').trim();
     const K = Math.min(Math.max(parseInt(body.k || body.topK || 5, 10) || 5, 1), 20);
-    const minScore = typeof body.minSim === 'number' ? body.minSim : 0.4;
+    const minScore = typeof body.minSim === 'number' ? body.minSim : 0.3; // lite snällare default
     const rawHeading = body.heading ? String(body.heading).trim() : null;
     const restrictRequested = !!body.restrictToHeading;
 
@@ -244,10 +247,21 @@ export default async function handler(req, res) {
     const nameOnly = personMode ? extractPersonName(rawQ) : null;
 
     const q = (rawQ || nameOnly || '').trim();
-    if (!q) return res.status(422).end(JSON.stringify({ ok:false, error:'Empty query (no text or name extracted)' }));
+    if (!q) {
+      clearTimeout(timeoutId);
+      if (req.method === 'GET') {
+        return res.status(200).json({
+          ok:false, error:'missing_query',
+          usage:'GET /api/search-manual?q=din+fråga&k=5&minSim=0.3&heading=Rubrik&restrict=1',
+          snippets:[]
+        });
+      }
+      return res.status(422).json({ ok:false, error:'Empty query (no text or name extracted)', snippets:[] });
+    }
 
     const map = await getMappings();
     const known = await getKnownHeadings(map.schema, map.chunksTable, map.headingCol);
+
     let effectiveHeading = rawHeading ? normalizeHeading(rawHeading, known) : null;
     if (personMode && !effectiveHeading && known.includes('personal')) {
       effectiveHeading = 'personal';
@@ -255,7 +269,7 @@ export default async function handler(req, res) {
     const restrict = !!effectiveHeading && (restrictRequested || personMode);
     const minScoreEff = personMode ? Math.min(minScore, 0.35) : minScore;
 
-    // ===== 1) Embedding-sök =====
+    // 1) Vector
     const embedText = nameOnly || q;
     const { embedding, dims } = await embedQuery(embedText);
     const vecLiteral = '[' + embedding.map((x) => Number(x).toFixed(6)).join(',') + ']';
@@ -269,8 +283,8 @@ export default async function handler(req, res) {
       const r = await pool.query(sql, params);
       rows = r.rows || [];
     } catch (dbErr) {
-      if (/does not exist/i.test(dbErr.message))
-        throw new Error('Tabell/kolumn eller typ saknas – kontrollera MANUAL_* env och pgvector-installation.');
+      if (/operator does not exist|does not exist/i.test(dbErr.message))
+        throw new Error('Tabell/kolumn/typ saknas – kontrollera MANUAL_* env och pgvector-installation.');
       if (/type vector/i.test(dbErr.message))
         throw new Error('pgvector saknas – kör CREATE EXTENSION vector; och säkerställ vector(1536).');
       if (/is of type .* but expression is of type/i.test(dbErr.message))
@@ -288,11 +302,11 @@ export default async function handler(req, res) {
       rows = r2.rows || [];
     }
 
-    // ===== 2) Lexikal (pg_trgm) =====
+    // 2) Lexikal (pg_trgm)
     const qLower = q.toLowerCase();
     const lexK = Math.max(K, 8);
     const lexParams = [qLower, lexK];
-    let lexWhere = ` (lower(c.${quoteIdent(map.textCol)}) % $1`;
+    let lexWhere = `(lower(c.${quoteIdent(map.textCol)}) % $1`;
     if (map.headingCol) lexWhere += ` OR lower(c.${quoteIdent(map.headingCol)}) % $1`;
     lexWhere += `)`;
     let lexHeadingParamIndex = 3;
@@ -323,21 +337,19 @@ export default async function handler(req, res) {
     try {
       const rLex = await pool.query(lexSQL, lexParams);
       lexRows = rLex.rows || [];
-    } catch (e) {
-      // pg_trgm kanske saknas – gå vidare utan lex
-      lexRows = [];
+    } catch {
+      lexRows = []; // pg_trgm saknas – kör utan lex
     }
 
-    // ===== 3) RRF-fusion =====
-    // key: doc_id|idx|heading|chunkStart(24)
+    // 3) RRF-fusion
     const keyOf = (r) => `${r.doc_id ?? ''}|${r.idx ?? ''}|${r.heading ?? ''}|${String(r.chunk||'').slice(0,24)}`;
-    const rrf = (list, isLex) => {
+    const rrf = (list) => {
       const m = new Map();
       list.forEach((it, i) => m.set(keyOf(it), 1 / (60 + i))); // k=60
       return m;
     };
-    const r1 = rrf(rows, false);
-    const r2 = rrf(lexRows, true);
+    const r1 = rrf(rows);
+    const r2 = rrf(lexRows);
 
     const mergedScore = new Map();
     for (const [k,v] of r1) mergedScore.set(k, (mergedScore.get(k)||0) + v);
@@ -371,27 +383,7 @@ export default async function handler(req, res) {
       .map(([k]) => byKey.get(k))
       .slice(0, K);
 
-    // Lägg till detta direkt efter try i handler-funktionen:
-    console.log('Query received:', rawQ, 'K:', K, 'minScore:', minScore);
-
-    // Efter embedding-generering:
-    console.log('Embedding generated, dims:', dims);
-
-    // Efter SQL-generering:
-    console.log('SQL:', sql);
-    console.log('Params:', params);
-
-    // Efter databas-query:
-    console.log('DB rows returned:', rows?.length || 0);
-
-    // Efter lexikal sökning:
-    console.log('Lexical rows returned:', lexRows?.length || 0);
-
-    // Efter fusion:
-    console.log('Final fused results:', fused?.length || 0);
-
     clearTimeout(timeoutId);
-    // Säkerställ att även tomma resultat har snippets-array
     return res.status(200).json({
       ok: true,
       query: rawQ,
@@ -409,11 +401,7 @@ export default async function handler(req, res) {
   } catch (err) {
     clearTimeout(timeoutId);
     console.error('search-manual error:', err);
-    res.status(500).json({ 
-      ok: false, 
-      error: err?.message || String(err),
-      snippets: [] // Alltid inkludera denna!
-    });
+    return res.status(500).json({ ok:false, error: err?.message || String(err), snippets:[] });
   }
 }
 
@@ -427,7 +415,6 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS manual_chunks_emb_cos_idx
   ON public.manual_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 
--- Trigram-index för snabb textmatch
 CREATE INDEX IF NOT EXISTS manual_chunks_chunk_trgm_idx
   ON public.manual_chunks USING GIN ((lower(chunk)) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS manual_chunks_heading_trgm_idx
