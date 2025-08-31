@@ -38,25 +38,42 @@ function quoteIdent(id) {
   return '"' + String(id).replace(/"/g, '""') + '"';
 }
 
+// Optimera embedQuery för att hantera timeouts
 async function embedQuery(q) {
   if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY saknas (env)');
   const model = process.env.EMBED_MODEL || 'text-embedding-3-small'; // 1536-dim
-  const r = await fetch('https://api.openai.com/v1/embeddings', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ model, input: q }),
-  });
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error(`OpenAI embeddings misslyckades: ${r.status} ${r.statusText} – ${t.slice(0, 200)}`);
+  
+  // Lägg till timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
+  
+  try {
+    const r = await fetch('https://api.openai.com/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ model, input: q }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error(`OpenAI embeddings misslyckades: ${r.status} ${r.statusText} – ${t.slice(0, 200)}`);
+    }
+    const j = await r.json();
+    const emb = j.data && j.data[0] && j.data[0].embedding;
+    if (!emb) throw new Error('Embedding saknas i OpenAI-svar');
+    return { embedding: emb, model, dims: emb.length };
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('OpenAI embedding timeout - tog för lång tid');
+    }
+    throw error;
   }
-  const j = await r.json();
-  const emb = j.data && j.data[0] && j.data[0].embedding;
-  if (!emb) throw new Error('Embedding saknas i OpenAI-svar');
-  return { embedding: emb, model, dims: emb.length };
 }
 
 async function tableExists(schema, table) {
@@ -199,6 +216,18 @@ function buildSQL(map, { filtered, heading, restrict }) {
 
 // ---------- Handler ----------
 export default async function handler(req, res) {
+  // Lägg till tidsgräns för hela anropet
+  const HANDLER_TIMEOUT = 25000;
+  const timeoutId = setTimeout(() => {
+    if (!res.writableEnded) {
+      res.status(408).json({ 
+        ok: false, 
+        error: 'Timeout - sökningen tog för lång tid',
+        snippets: [] // Säkerställ att snippets alltid finns
+      });
+    }
+  }, HANDLER_TIMEOUT);
+  
   res.setHeader('Content-Type', 'application/json');
   if (req.method !== 'POST')
     return res.status(405).end(JSON.stringify({ ok: false, error: 'Method not allowed' }));
@@ -361,7 +390,9 @@ export default async function handler(req, res) {
     // Efter fusion:
     console.log('Final fused results:', fused?.length || 0);
 
-    return res.status(200).end(JSON.stringify({
+    clearTimeout(timeoutId);
+    // Säkerställ att även tomma resultat har snippets-array
+    return res.status(200).json({
       ok: true,
       query: rawQ,
       k: K,
@@ -373,11 +404,16 @@ export default async function handler(req, res) {
       person_mode: !!personMode,
       query_used_for_embed: embedText,
       fusion: { vec_count: rows.length, lex_count: lexRows.length },
-      snippets: fused
-    }));
+      snippets: fused || []
+    });
   } catch (err) {
-    console.error('search-manual 500', err);
-    res.status(500).end(JSON.stringify({ ok: false, error: err && err.message ? err.message : String(err) }));
+    clearTimeout(timeoutId);
+    console.error('search-manual error:', err);
+    res.status(500).json({ 
+      ok: false, 
+      error: err?.message || String(err),
+      snippets: [] // Alltid inkludera denna!
+    });
   }
 }
 
