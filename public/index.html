@@ -57,7 +57,7 @@
     </div>
 
     <footer>
-      Röstflöde: <code class="small">transcription.completed → (meta-guard?) → (ev. client-manual-first) → function_call_output → response.create</code>
+      Flöde: <code class="small">transcription.completed → (meta-guard) → response.create → (modell anropar search_manual) → function_call_output(call_id från modellen) → response.create</code>
     </footer>
   </div>
 
@@ -73,10 +73,10 @@
     // ===== State =====
     let rt = {
       pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
-      calls: new Map(),               // key = call_id, value = {name,argsText}
+      calls: new Map(),               // call_id -> {name,argsText}
       lastUserText: '',               // senaste transkript / text
       partialByItem: new Map(),       // item_id -> pågående transkript
-      sawToolResultForThisTurn: false // ENFORCER: måste vara true innan tekniskt svar
+      sawToolResultForThisTurn: false // true först när vi skickat output för modellens call_id
     };
 
     // mic viz
@@ -119,7 +119,7 @@
 
         rt.dc=rt.pc.createDataChannel('oai-events');
         rt.dc.onopen=()=>{
-          // *** Viktigt: Skicka INTE några extra instructions här ***
+          // *** Skicka INTE instructions här – de kommer från servern ***
           rt.dc.send(JSON.stringify({
             type:'session.update',
             session:{
@@ -169,7 +169,7 @@
       $('#quickText').value=''; append(bubble('➤ '+t,'user'));
       if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({ type:'input_text', text:t }));
-      rt.dc.send(JSON.stringify({ type:'response.create' })); // trigga modell för text
+      rt.dc.send(JSON.stringify({ type:'response.create' })); // trigga modell
     }
 
     // ===== Meta-guard (identitet) =====
@@ -203,13 +203,6 @@
 
     // ===== Realtime events =====
     function handleRealtimeMessage(msg){
-      // debug (valfritt)
-      if (msg?.type && (
-        msg.type.startsWith('response.function_call') ||
-        msg.type.startsWith('conversation.item.input_audio_transcription') ||
-        msg.type==='response.created' || msg.type==='response.completed'
-      )) append(pill('EVT: '+msg.type));
-
       // --- RÖST: transkriptions-delta ---
       if (msg.type === 'conversation.item.input_audio_transcription.delta') {
         const itemId = msg.item_id || msg.item?.id || 'unknown';
@@ -233,13 +226,13 @@
           rt.sawToolResultForThisTurn = false; // ny tur
           append(bubble(rt.lastUserText, 'user'));
 
-          // META-GUARD: besvara själv, skicka inte till modellen
+          // META-GUARD: besvara själv
           if (isMetaQuestion(rt.lastUserText)) {
             speakExact(metaAnswerFor(rt.lastUserText));
             return;
           }
         }
-        // annars låt modellen jobba
+        // annars: låt modellen ta nästa steg
         rt.dc?.send(JSON.stringify({ type: 'response.create' }));
         return;
       }
@@ -255,7 +248,7 @@
         }
       }
 
-      // === FUNKTIONSANROP: fånga skapandet (namn + call_id) ===
+      // === FUNKTIONSANROP: skapad (namn + call_id) ===
       if (msg.type === 'response.function_call.created') {
         const key = msg.call_id || msg.id || 'unknown';
         const prev = rt.calls.get(key) || { argsText: '', call_id: key };
@@ -265,7 +258,7 @@
         return;
       }
 
-      // === FUNKTIONSANROP: delta av arguments ===
+      // === FUNKTIONSANROP: arguments delta ===
       if (msg.type==='response.function_call_arguments.delta'){
         const key = msg.call_id ?? msg.tool_call_id ?? msg.id ?? msg.response_id ?? 'unknown';
         const prev = rt.calls.get(key) || { name: msg.name || 'search_manual', argsText: '', call_id: key };
@@ -289,23 +282,26 @@
         const toolName = tc.name || 'search_manual';
         append(pill(`TOOL CALL → ${toolName} q="${shown}" (call_id=${tc.call_id})`));
 
-        // kör oavsett namn (defaultar till search_manual)
+        // Kör sök (nu kopplat till RÄTT call_id)
         runSearchManualTool(tc.call_id, args)
           .catch(err=>append(errorBubble('Tool fel: '+(err?.message||String(err)))));
         return;
       }
 
-      // === POLICY-COP: stoppa textsvar om ingen manual i denna tur ===
+      // === POLICY-COP: om modellen försöker svara utan tool-result på linjefråga → tvinga function call ===
       if (msg.type==='response.output_text.done'){
         const text=msg.output_text||msg.text||'';
-
         if (isLine65Question(rt.lastUserText) && !rt.sawToolResultForThisTurn) {
-          append(pill('⚠︎ Stoppar svar utan manual. Kör sökning först.'));
-          runSearchManualTool('auto_'+Date.now(), { query: rt.lastUserText })
-            .catch(err=>append(errorBubble('Tool fel: '+(err?.message||String(err)))));
-          return; // visa inte modellens svar ännu
+          append(pill('⚠︎ Inget manual-resultat i denna tur. Tvingar "search_manual".'));
+          // Tvinga modellen att anropa verktyget (INGEN egen sökning här)
+          rt.dc?.send(JSON.stringify({
+            type:'response.create',
+            response:{
+              instructions: `Anropa nu verktyget "search_manual" med {"query":"${(rt.lastUserText||'').replace(/"/g,'\\"')}"} och svara först när du har snippets.`
+            }
+          }));
+          return; // visa inte texten än
         }
-
         if (text?.trim()) append(bubble(text,'assistant'));
         return;
       }
@@ -315,19 +311,20 @@
     async function runSearchManualTool(callId, args) {
       const qRaw = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
       const q = normalizeASR(qRaw);
-
       if (!q) {
         const fallbackResponse = {
           ok: false,
           snippets: [{ text: "Jag saknar en fråga att söka på. Säg t.ex. 'Hur gör man sortbyte i OCME?'", heading: "Hjälp", score: 0 }]
         };
-        // markera att vi INTE har ett riktigt tool-result
+        // OBS: detta är output till modellens RIKTIGA call_id
         rt.dc?.send(JSON.stringify({
           type: 'conversation.item.create',
           item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(fallbackResponse) }
         }));
         rt.dc?.send(JSON.stringify({ type:'response.create' }));
         append(pill('↩︎ function_call_output (fallback) + response.create'));
+        // markera ändå att vi “hanterat” call:et
+        rt.sawToolResultForThisTurn = true;
         return fallbackResponse;
       }
 
@@ -355,15 +352,16 @@
         catch { data = { ok:false, snippets:[], error:'Ogiltigt svar från servern' }; }
         if (!data.snippets) data.snippets = [];
 
-        // *** Viktigt: markera att denna tur HAR manualresultat ***
-        rt.sawToolResultForThisTurn = true;
-
+        // *** Viktigt: detta är output till modellens RIKTIGA call_id ***
         rt.dc?.send(JSON.stringify({
           type: 'conversation.item.create',
           item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(data) }
         }));
         rt.dc?.send(JSON.stringify({ type:'response.create' }));
         append(pill('↩︎ function_call_output + response.create (snippets: '+(data.snippets?.length||0)+')'));
+
+        // Nu har denna tur manuella snippets
+        rt.sawToolResultForThisTurn = true;
         return data;
       } catch (error) {
         const errorResponse = {
@@ -377,6 +375,7 @@
         }));
         rt.dc?.send(JSON.stringify({ type:'response.create' }));
         append(pill('↩︎ function_call_output (error) + response.create'));
+        rt.sawToolResultForThisTurn = true; // call är ändå hanterat
         return errorResponse;
       }
     }
@@ -384,12 +383,10 @@
     // ===== ASR-normalisering (vanliga fel) =====
     function normalizeASR(s){
       let t = s.toLowerCase();
-      // vanliga misshörningar för “sortbyte”
       t = t.replace(/\bsott\b/g, 'sort');
       t = t.replace(/\bsått\b/g, 'sort');
       t = t.replace(/\bsott\s+byte\b/g, 'sortbyte');
       t = t.replace(/\bsått\s+byte\b/g, 'sortbyte');
-      // städa upp whitespace
       t = t.replace(/\s{2,}/g,' ').trim();
       return t;
     }
