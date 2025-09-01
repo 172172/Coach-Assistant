@@ -1,4 +1,4 @@
-// /api/rt-token.js — Realtime-session med tools + instruktioner (svenska, robust)
+ // /api/rt-token.js — Realtime-session med tools + instruktioner (svenska, robust)
 export const config = { api: { bodyParser: true } };
 
 export default async function handler(req, res) {
