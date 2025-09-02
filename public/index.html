@@ -5,32 +5,182 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Coach Assistant – Linje 65 (Realtime, Stabil)</title>
   <style>
-    :root{--bg:#0b0f14;--panel:#121821;--text:#e6edf3;--muted:#9fb0c3;--accent:#5eead4;--danger:#f87171;--pill:#182232}
+    :root{
+      --bg:#0b0f14;
+      --panel:#121821;
+      --text:#e6edf3;
+      --muted:#9fb0c3;
+      --accent:#5eead4;
+      --danger:#f87171;
+      --pill:#182232;
+      --carlsberg-green:#007a33;
+      --carlsberg-gold:#ffd700;
+      --carlsberg-dark-green:#0b6e4f;
+    }
+    
     html,body{height:100%}
-    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Noto Sans","Helvetica Neue",Arial;background:radial-gradient(1200px 600px at 20% 0%,#0e1621,#0b0f14 75%);color:var(--text)}
+    body{margin:0;font-family:'Orbitron',system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Noto Sans","Helvetica Neue",Arial;background:radial-gradient(1200px 600px at 20% 0%,#0e1621,#0b0f14 75%);color:var(--text)}
     .wrap{max-width:980px;margin:0 auto;padding:24px}
     header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}
     header .title{font-size:20px;font-weight:700;letter-spacing:.3px}
     .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
     button{appearance:none;border:none;padding:10px 14px;border-radius:12px;cursor:pointer;font-weight:600}
-    .primary{background:var(--accent);color:#0a0f14}
+    .primary{background:var(--carlsberg-green);color:#fff;box-shadow:0 0 20px rgba(0,122,51,0.3)}
     .ghost{background:#0d1520;color:var(--text);border:1px solid #233146}
     .muted{color:var(--muted);font-size:13px}
     .row{display:flex;gap:10px;align-items:center}
     input[type="text"],input[type="search"]{background:#0d1622;color:#e6edf3;border:1px solid #243244;border-radius:10px;padding:10px 12px}
     .pill{background:var(--pill);color:var(--text);padding:8px 12px;border-radius:999px;display:inline-block;margin:6px 6px 0 0;font-size:12px;border:1px solid #26364a}
-    .panel{background:var(--panel);border:1px solid #233146;border-radius:16px;padding:14px}
-    #output{display:flex;flex-direction:column;gap:10px;margin-top:14px}
-    .bubble{background:#0f1722;border:1px solid #213145;border-radius:16px;padding:12px 14px;white-space:pre-wrap;line-height:1.45}
-    .bubble.user{background:#0f1a27;border-color:#24415a}
-    .bubble.assistant{background:#0f1823;border-color:#2c3f57}
-    .bubble.error{background:#1b0f12;border-color:#4a1f2a}
+    .panel{background:var(--panel);border:1px solid #233146;border-radius:16px;padding:14px;min-height:500px;display:flex;flex-direction:column;align-items:center}
+    
+    /* AI Avatar Styles */
+    .ai-avatar-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      flex: 1;
+      margin-top: 40px;
+    }
+    
+    .ai-avatar {
+      width: 300px;
+      height: 300px;
+      position: relative;
+      margin-bottom: 20px;
+    }
+    
+    .avatar-core {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 80px;
+      height: 80px;
+      background: radial-gradient(circle, var(--carlsberg-green), var(--carlsberg-dark-green));
+      border-radius: 50%;
+      box-shadow: 0 0 40px var(--carlsberg-green);
+      animation: corePulse 2s ease-in-out infinite;
+    }
+    
+    .avatar-ring {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      border: 2px solid var(--carlsberg-green);
+      border-radius: 50%;
+      opacity: 0.6;
+    }
+    
+    .ring-1 { width: 120px; height: 120px; animation: ringPulse 3s ease-in-out infinite; }
+    .ring-2 { width: 180px; height: 180px; animation: ringPulse 3s ease-in-out infinite 0.5s; }
+    .ring-3 { width: 240px; height: 240px; animation: ringPulse 3s ease-in-out infinite 1s; }
+    
+    .avatar-particle {
+      position: absolute;
+      width: 4px;
+      height: 4px;
+      background: var(--carlsberg-gold);
+      border-radius: 50%;
+      box-shadow: 0 0 10px var(--carlsberg-gold);
+    }
+    
+    .particle-1 { top: 20%; left: 20%; animation: float 4s ease-in-out infinite; }
+    .particle-2 { top: 30%; right: 15%; animation: float 4s ease-in-out infinite 1s; }
+    .particle-3 { bottom: 25%; left: 25%; animation: float 4s ease-in-out infinite 2s; }
+    .particle-4 { bottom: 20%; right: 20%; animation: float 4s ease-in-out infinite 3s; }
+    
+    .avatar-lines {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 200px;
+      height: 200px;
+    }
+    
+    .line {
+      position: absolute;
+      background: linear-gradient(90deg, transparent, var(--carlsberg-green), transparent);
+      height: 1px;
+      width: 100%;
+      top: 50%;
+      transform-origin: center;
+      opacity: 0.4;
+    }
+    
+    .line-1 { transform: rotate(0deg); animation: rotateLine 8s linear infinite; }
+    .line-2 { transform: rotate(60deg); animation: rotateLine 8s linear infinite 2s; }
+    .line-3 { transform: rotate(120deg); animation: rotateLine 8s linear infinite 4s; }
+    
+    .ai-status {
+      text-align: center;
+      font-size: 16px;
+      color: var(--carlsberg-green);
+      text-shadow: 0 0 10px var(--carlsberg-green);
+      margin-bottom: 10px;
+      font-weight: 600;
+    }
+    
+    .ai-activity {
+      text-align: center;
+      font-size: 12px;
+      color: var(--muted);
+      opacity: 0.8;
+    }
+    
+    /* Animations */
+    @keyframes corePulse {
+      0%, 100% { transform: translate(-50%, -50%) scale(1); box-shadow: 0 0 40px var(--carlsberg-green); }
+      50% { transform: translate(-50%, -50%) scale(1.1); box-shadow: 0 0 60px var(--carlsberg-green); }
+    }
+    
+    @keyframes ringPulse {
+      0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.6; }
+      50% { transform: translate(-50%, -50%) scale(1.1); opacity: 0.8; }
+    }
+    
+    @keyframes float {
+      0%, 100% { transform: translateY(0px); opacity: 0.6; }
+      50% { transform: translateY(-20px); opacity: 1; }
+    }
+    
+    @keyframes rotateLine {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+    /* Active states */
+    .ai-avatar.listening .avatar-core {
+      animation: corePulse 1s ease-in-out infinite;
+      background: radial-gradient(circle, var(--carlsberg-green), var(--carlsberg-gold));
+    }
+    
+    .ai-avatar.speaking .avatar-core {
+      animation: corePulse 0.5s ease-in-out infinite;
+      background: radial-gradient(circle, var(--carlsberg-gold), var(--carlsberg-green));
+      box-shadow: 0 0 80px var(--carlsberg-gold);
+    }
+    
+    .ai-avatar.speaking .avatar-ring {
+      border-color: var(--carlsberg-gold);
+      animation: ringPulse 1s ease-in-out infinite;
+    }
+    
+    .ai-avatar.speaking .line {
+      background: linear-gradient(90deg, transparent, var(--carlsberg-gold), transparent);
+      opacity: 0.8;
+      animation: rotateLine 2s linear infinite;
+    }
+
     .vis{height:10px;background:#0e1420;border-radius:9999px;overflow:hidden;border:1px solid #213145}
-    .vis>b{display:block;height:100%;width:6%;background:linear-gradient(90deg,#85f3d5,#4dd4ff);transition:width .08s linear}
+    .vis>b{display:block;height:100%;width:6%;background:linear-gradient(90deg,var(--carlsberg-green),var(--carlsberg-gold));transition:width .08s linear}
     footer{margin-top:24px;color:var(--muted);font-size:12px}
     .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     code.small{font-size:11px;opacity:.85}
   </style>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
   <div class="wrap">
@@ -53,7 +203,26 @@
         <button class="ghost" id="sendTextBtn">Skicka</button>
       </div>
 
-      <div id="output"></div>
+      <!-- AI Avatar replaces output -->
+      <div class="ai-avatar-container">
+        <div class="ai-avatar" id="aiAvatar">
+          <div class="avatar-core"></div>
+          <div class="avatar-ring ring-1"></div>
+          <div class="avatar-ring ring-2"></div>
+          <div class="avatar-ring ring-3"></div>
+          <div class="avatar-lines">
+            <div class="line line-1"></div>
+            <div class="line line-2"></div>
+            <div class="line line-3"></div>
+          </div>
+          <div class="avatar-particle particle-1"></div>
+          <div class="avatar-particle particle-2"></div>
+          <div class="avatar-particle particle-3"></div>
+          <div class="avatar-particle particle-4"></div>
+        </div>
+        <div class="ai-status" id="aiStatus">AI Assistant Standby</div>
+        <div class="ai-activity" id="aiActivity">Väntar på kommando...</div>
+      </div>
     </div>
 
     <footer>
@@ -64,21 +233,95 @@
   <script>
     // ===== Helpers =====
     const $ = s => document.querySelector(s);
-    const append = el => { $('#output').appendChild(el); el.scrollIntoView({behavior:'smooth',block:'end'}); };
-    const pill = t => { const d=document.createElement('div'); d.className='pill'; d.textContent=t; return d; };
-    const bubble = (t,role='assistant') => { const d=document.createElement('div'); d.className='bubble '+role; d.textContent=t; return d; };
-    const errorBubble = t => { const d=document.createElement('div'); d.className='bubble error'; d.textContent=t; return d; };
-    async function fetchJSON(url, opts){ const r=await fetch(url,opts); const txt=await r.text(); let j; try{j=JSON.parse(txt)}catch{throw new Error(`${r.status} ${r.statusText}: ${txt.slice(0,200)}`)} if(!r.ok||j?.ok===false) throw new Error(j?.error||j?.message||`${r.status} ${r.statusText}`); return j; }
+    const avatar = $('#aiAvatar');
+    const aiStatus = $('#aiStatus');
+    const aiActivity = $('#aiActivity');
+    
+    // Avatar state management
+    function setAvatarState(state, message) {
+      avatar.className = `ai-avatar ${state}`;
+      aiStatus.textContent = message || 'AI Assistant';
+      
+      switch(state) {
+        case 'listening':
+          aiActivity.textContent = 'Lyssnar...';
+          break;
+        case 'speaking':
+          aiActivity.textContent = 'Talar...';
+          break;
+        case 'thinking':
+          aiActivity.textContent = 'Tänker...';
+          break;
+        default:
+          aiActivity.textContent = 'Väntar på kommando...';
+      }
+    }
+
+    // Initialize avatar
+    setAvatarState('idle', 'AI Assistant Standby');
+
+    // ===== UI Helpers (modified for avatar) =====
+    const append = (el) => {
+      // Instead of appending to output, show activity in avatar
+      if (!el) return;
+    };
+
+    const pill = (text) => {
+      console.log('Event:', text); // Keep for debugging
+      
+      // Update avatar based on events
+      if (text.includes('Realtime ansluten')) {
+        setAvatarState('listening', 'Redo att hjälpa');
+      } else if (text.includes('FUNC CREATED') || text.includes('TOOL CALL')) {
+        setAvatarState('thinking', 'Söker i manual...');
+      } else if (text.includes('function_call_output')) {
+        setAvatarState('speaking', 'Svarar...');
+        setTimeout(() => setAvatarState('idle', 'Klar'), 2000);
+      } else if (text.includes('Samtal avslutat')) {
+        setAvatarState('idle', 'Frånkopplad');
+      }
+      
+      return null; // Don't create DOM elements
+    };
+
+    const bubble = (text, role = 'assistant') => {
+      console.log(`${role}:`, text); // Keep for debugging
+      
+      // Update avatar based on conversation
+      if (role === 'user') {
+        const preview = text.length > 30 ? text.slice(0, 30) + '...' : text;
+        setAvatarState('listening', 'Förstod kommando');
+        setTimeout(() => {
+          aiActivity.textContent = `"${preview}"`;
+        }, 500);
+      } else if (role === 'assistant') {
+        setAvatarState('speaking', 'Svarar...');
+        setTimeout(() => {
+          setAvatarState('idle', 'Klar');
+          const preview = text.length > 40 ? text.slice(0, 40) + '...' : text;
+          aiActivity.textContent = `Svarade: "${preview}"`;
+        }, 3000);
+      }
+      
+      return null; // Don't create DOM elements
+    };
+
+    const errorBubble = (text) => {
+      console.error('Error:', text);
+      setAvatarState('idle', 'Fel uppstod');
+      aiActivity.textContent = text.slice(0, 50) + (text.length > 50 ? '...' : '');
+      return null;
+    };
 
     // ===== State =====
     let rt = {
       pc:null, dc:null, mic:null, remoteAudio:null, connected:false,
-      calls: new Map(),               // key = call_id, value = {name,argsText}
-      lastUserText: '',               // senaste transkript / text
-      partialByItem: new Map(),       // item_id -> pågående transkript
+      calls: new Map(),
+      lastUserText: '',
+      partialByItem: new Map(),
     };
 
-    // mic viz
+    // mic viz - enhanced to also update avatar
     let micAnalyser, micData;
     function setupMicViz(stream){
       try{
@@ -87,11 +330,20 @@
         micAnalyser=ctx.createAnalyser(); micAnalyser.fftSize=512; micAnalyser.smoothingTimeConstant=0.8;
         src.connect(micAnalyser); micData=new Uint8Array(micAnalyser.frequencyBinCount);
         const bar=$('#micBar');
+        
         (function loop(){
           if(!micAnalyser) return;
           micAnalyser.getByteTimeDomainData(micData);
           let peak=0; for(let i=0;i<micData.length;i++){ const v=Math.abs(micData[i]-128)/128; if(v>peak) peak=v; }
           bar.style.width=Math.min(98,(peak*100*1.6)+6)+'%';
+          
+          // Update avatar based on mic activity
+          if (rt.connected && peak > 0.1) {
+            if (!avatar.classList.contains('listening')) {
+              setAvatarState('listening', 'Lyssnar...');
+            }
+          }
+          
           requestAnimationFrame(loop);
         })();
       }catch{}
@@ -103,6 +355,8 @@
 
     async function connectRealtime(){
       const status=t=>$('#rtStatus').textContent=t;
+      setAvatarState('thinking', 'Ansluter...');
+      
       try{
         rt.mic = await navigator.mediaDevices.getUserMedia({
           audio: { channelCount:1, noiseSuppression:true, echoCancellation:true, autoGainControl:false, sampleRate:48000 }
@@ -114,7 +368,11 @@
         rt.mic.getTracks().forEach(t=>rt.pc.addTrack(t,rt.mic));
 
         rt.remoteAudio=new Audio(); rt.remoteAudio.autoplay=true; rt.remoteAudio.playsInline=true; rt.remoteAudio.muted=false;
-        rt.pc.ontrack=e=>{ rt.remoteAudio.srcObject=e.streams[0]; rt.remoteAudio.play().catch(()=>{}); append(pill('🔊 Mottar röst från assistenten')); };
+        rt.pc.ontrack=e=>{ 
+          rt.remoteAudio.srcObject=e.streams[0]; 
+          rt.remoteAudio.play().catch(()=>{}); 
+          append(pill('🔊 Mottar röst från assistenten')); 
+        };
 
         rt.dc=rt.pc.createDataChannel('oai-events');
         rt.dc.onopen=()=>{
@@ -157,7 +415,11 @@
         await rt.pc.setRemoteDescription({type:'answer', sdp});
 
         rt.connected=true; $('#rtBtn').style.display='none'; $('#rtHangup').style.display='inline-block'; status('Realtime ansluten');
-      }catch(e){ console.error(e); $('#rtStatus').textContent=`Realtime misslyckades: ${e?.message||e}`; append(errorBubble('Fel vid anslutning: '+(e?.message||e))); }
+      }catch(e){ 
+        console.error(e); 
+        $('#rtStatus').textContent=`Realtime misslyckades: ${e?.message||e}`; 
+        append(errorBubble('Fel vid anslutning: '+(e?.message||e))); 
+      }
     }
 
     async function hangupRealtime(){
@@ -168,7 +430,8 @@
         micAnalyser=null;
       }catch{}
       rt={ pc:null, dc:null, mic:null, remoteAudio:null, connected:false, calls:new Map(), lastUserText:'', partialByItem:new Map() };
-      $('#rtBtn').style.display='inline-block'; $('#rtHangup').style.display='none'; $('#rtStatus').textContent='Inte ansluten'; append(pill('Samtal avslutat.'));
+      $('#rtBtn').style.display='inline-block'; $('#rtHangup').style.display='none'; $('#rtStatus').textContent='Inte ansluten'; 
+      append(pill('Samtal avslutat.'));
     }
 
     // ===== Text input (test) =====
@@ -180,7 +443,14 @@
       $('#quickText').value=''; append(bubble('➤ '+t,'user'));
       if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
       rt.dc.send(JSON.stringify({ type:'input_text', text:t }));
-      rt.dc.send(JSON.stringify({ type:'response.create' })); // trigga modell för text
+      rt.dc.send(JSON.stringify({ type:'response.create' }));
+    }
+
+    // Add missing fetchJSON function
+    async function fetchJSON(url) {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
     }
 
     // ===== Realtime events =====
@@ -201,6 +471,10 @@
           const cur = prev + delta;
           rt.partialByItem.set(itemId, cur);
           rt.lastUserText = cur;
+          // Show partial transcription in avatar
+          if (cur.length > 5) {
+            aiActivity.textContent = `Hörde: "${cur.slice(0, 30)}${cur.length > 30 ? '...' : ''}"`;
+          }
         }
         return;
       }
@@ -211,10 +485,10 @@
         const itemId = msg.item_id || msg.item?.id || 'unknown';
         const full = (msg.transcript || msg.text || rt.partialByItem.get(itemId) || '').trim();
         if (full) {
-          rt.lastUserText = normalizeASR(full); // ⬅️ stavningsfixar
+          rt.lastUserText = normalizeASR(full);
           append(bubble(rt.lastUserText, 'user'));
         }
-        rt.dc?.send(JSON.stringify({ type: 'response.create' })); // trigga modell (röst)
+        rt.dc?.send(JSON.stringify({ type: 'response.create' }));
         return;
       }
 
@@ -255,7 +529,6 @@
         const tc = rt.calls.get(key) || { name: 'search_manual', argsText: '', call_id: key };
 
         let args={}; try{ args=JSON.parse(tc.argsText||'{}'); }catch{ args={}; }
-        // fallback: om query saknas → senaste transkript
         const effectiveQuery = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
         if (!args.query && effectiveQuery) args.query = effectiveQuery;
 
@@ -263,7 +536,6 @@
         const toolName = tc.name || 'search_manual';
         append(pill(`TOOL CALL → ${toolName} q="${shown}" (call_id=${tc.call_id})`));
 
-        // kör oavsett namn (defaultar till search_manual)
         runSearchManualTool(tc.call_id, args)
           .catch(err=>append(errorBubble('Tool fel: '+(err?.message||String(err)))));
         return;
@@ -281,7 +553,7 @@
     async function runSearchManualTool(callId, args) {
       console.log('Tool args:', args);
       const qRaw = String(args?.query||'').trim() || String(rt.lastUserText||'').trim();
-      const q = normalizeASR(qRaw); // ⬅️ stavningsfixar för ASR
+      const q = normalizeASR(qRaw);
 
       if (!q) {
         const fallbackResponse = {
