@@ -18,22 +18,206 @@
       --carlsberg-dark-green:#0b6e4f;
     }
     
-    html,body{height:100%}
-    body{margin:0;font-family:'Orbitron',system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Noto Sans","Helvetica Neue",Arial;background:radial-gradient(1200px 600px at 20% 0%,#0e1621,#0b0f14 75%);color:var(--text)}
-    .wrap{max-width:980px;margin:0 auto;padding:24px}
+    html,body{height:100%;overflow-x:hidden}
+    body{
+      margin:0;
+      font-family:'Orbitron',system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Noto Sans","Helvetica Neue",Arial;
+      background:radial-gradient(1200px 600px at 20% 0%,#0e1621,#0b0f14 75%);
+      color:var(--text);
+      position:relative;
+    }
+    
+    /* Holographic Background */
+    body::before {
+      content: '';
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: 
+        radial-gradient(circle at 20% 80%, rgba(0,122,51,0.1) 0%, transparent 50%),
+        radial-gradient(circle at 80% 20%, rgba(255,215,0,0.05) 0%, transparent 50%),
+        radial-gradient(circle at 40% 40%, rgba(0,122,51,0.03) 0%, transparent 50%);
+      z-index: -1;
+      animation: backgroundShift 20s ease-in-out infinite;
+    }
+    
+    /* Animated Hexagons */
+    .hexagon-bg {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: -1;
+      opacity: 0.1;
+    }
+    
+    .hexagon {
+      position: absolute;
+      width: 60px;
+      height: 60px;
+      border: 1px solid var(--carlsberg-green);
+      border-radius: 10px;
+      transform: rotate(45deg);
+      animation: hexFloat 6s ease-in-out infinite;
+    }
+    
+    .hex-1 { top: 10%; left: 10%; animation-delay: 0s; }
+    .hex-2 { top: 20%; right: 20%; animation-delay: 1s; }
+    .hex-3 { bottom: 30%; left: 15%; animation-delay: 2s; }
+    .hex-4 { bottom: 20%; right: 10%; animation-delay: 3s; }
+    .hex-5 { top: 50%; left: 5%; animation-delay: 4s; }
+    .hex-6 { top: 60%; right: 5%; animation-delay: 5s; }
+    
+    /* Scanlines */
+    .scanlines {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 1;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,122,51,0.03) 2px,
+        rgba(0,122,51,0.03) 4px
+      );
+      animation: scanlineMove 10s linear infinite;
+    }
+    
+    .wrap{max-width:980px;margin:0 auto;padding:24px;position:relative;z-index:2}
     header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}
-    header .title{font-size:20px;font-weight:700;letter-spacing:.3px}
+    header .title{
+      font-size:20px;
+      font-weight:700;
+      letter-spacing:.3px;
+      text-shadow: 0 0 20px var(--carlsberg-green);
+      animation: titleGlow 3s ease-in-out infinite;
+    }
+    
     .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-    button{appearance:none;border:none;padding:10px 14px;border-radius:12px;cursor:pointer;font-weight:600}
-    .primary{background:var(--carlsberg-green);color:#fff;box-shadow:0 0 20px rgba(0,122,51,0.3)}
-    .ghost{background:#0d1520;color:var(--text);border:1px solid #233146}
+    button{
+      appearance:none;
+      border:none;
+      padding:10px 14px;
+      border-radius:12px;
+      cursor:pointer;
+      font-weight:600;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    
+    .primary{
+      background:var(--carlsberg-green);
+      color:#fff;
+      box-shadow:0 0 20px rgba(0,122,51,0.3);
+      border: 1px solid rgba(0,122,51,0.5);
+    }
+    
+    .primary:hover {
+      box-shadow:0 0 40px rgba(0,122,51,0.6);
+      transform: translateY(-2px);
+    }
+    
+    .primary::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+      transition: left 0.5s;
+    }
+    
+    .primary:hover::before {
+      left: 100%;
+    }
+    
+    .ghost{
+      background:#0d1520;
+      color:var(--text);
+      border:1px solid #233146;
+      box-shadow: 0 0 10px rgba(35,49,70,0.3);
+    }
+    
+    .ghost:hover {
+      border-color: var(--carlsberg-green);
+      box-shadow: 0 0 20px rgba(0,122,51,0.3);
+      transform: translateY(-1px);
+    }
+    
     .muted{color:var(--muted);font-size:13px}
     .row{display:flex;gap:10px;align-items:center}
-    input[type="text"],input[type="search"]{background:#0d1622;color:#e6edf3;border:1px solid #243244;border-radius:10px;padding:10px 12px}
-    .pill{background:var(--pill);color:var(--text);padding:8px 12px;border-radius:999px;display:inline-block;margin:6px 6px 0 0;font-size:12px;border:1px solid #26364a}
-    .panel{background:var(--panel);border:1px solid #233146;border-radius:16px;padding:14px;min-height:500px;display:flex;flex-direction:column;align-items:center}
     
-    /* AI Avatar Styles */
+    input[type="text"],input[type="search"]{
+      background:#0d1622;
+      color:#e6edf3;
+      border:1px solid #243244;
+      border-radius:10px;
+      padding:10px 12px;
+      transition: all 0.3s ease;
+      box-shadow: inset 0 0 10px rgba(0,0,0,0.3);
+    }
+    
+    input[type="text"]:focus,input[type="search"]:focus {
+      outline: none;
+      border-color: var(--carlsberg-green);
+      box-shadow: 0 0 20px rgba(0,122,51,0.3), inset 0 0 10px rgba(0,0,0,0.3);
+    }
+    
+    .pill{
+      background:var(--pill);
+      color:var(--text);
+      padding:8px 12px;
+      border-radius:999px;
+      display:inline-block;
+      margin:6px 6px 0 0;
+      font-size:12px;
+      border:1px solid #26364a;
+      box-shadow: 0 0 10px rgba(0,0,0,0.3);
+      animation: pillGlow 2s ease-in-out infinite;
+    }
+    
+    .panel{
+      background:var(--panel);
+      border:1px solid #233146;
+      border-radius:16px;
+      padding:14px;
+      min-height:500px;
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      box-shadow: 0 0 40px rgba(0,0,0,0.5), 0 0 20px rgba(0,122,51,0.1);
+      position: relative;
+      backdrop-filter: blur(10px);
+    }
+    
+    .panel::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      border-radius: 16px;
+      padding: 1px;
+      background: linear-gradient(45deg, var(--carlsberg-green), transparent, var(--carlsberg-gold), transparent);
+      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      -webkit-mask-composite: exclude;
+      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      mask-composite: exclude;
+      animation: borderGlow 4s linear infinite;
+    }
+    
+    /* AI Avatar Styles - Enhanced */
     .ai-avatar-container {
       display: flex;
       flex-direction: column;
@@ -41,11 +225,12 @@
       justify-content: center;
       flex: 1;
       margin-top: 40px;
+      position: relative;
     }
     
     .ai-avatar {
-      width: 300px;
-      height: 300px;
+      width: 350px;
+      height: 350px;
       position: relative;
       margin-bottom: 20px;
     }
@@ -63,6 +248,19 @@
       animation: corePulse 2s ease-in-out infinite;
     }
     
+    .avatar-core::before {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 40px;
+      height: 40px;
+      background: radial-gradient(circle, var(--carlsberg-gold), transparent);
+      border-radius: 50%;
+      animation: innerGlow 1.5s ease-in-out infinite alternate;
+    }
+    
     .avatar-ring {
       position: absolute;
       top: 50%;
@@ -71,11 +269,13 @@
       border: 2px solid var(--carlsberg-green);
       border-radius: 50%;
       opacity: 0.6;
+      box-shadow: 0 0 20px var(--carlsberg-green);
     }
     
     .ring-1 { width: 120px; height: 120px; animation: ringPulse 3s ease-in-out infinite; }
     .ring-2 { width: 180px; height: 180px; animation: ringPulse 3s ease-in-out infinite 0.5s; }
     .ring-3 { width: 240px; height: 240px; animation: ringPulse 3s ease-in-out infinite 1s; }
+    .ring-4 { width: 300px; height: 300px; animation: ringPulse 3s ease-in-out infinite 1.5s; border: 1px solid var(--carlsberg-green); }
     
     .avatar-particle {
       position: absolute;
@@ -90,6 +290,8 @@
     .particle-2 { top: 30%; right: 15%; animation: float 4s ease-in-out infinite 1s; }
     .particle-3 { bottom: 25%; left: 25%; animation: float 4s ease-in-out infinite 2s; }
     .particle-4 { bottom: 20%; right: 20%; animation: float 4s ease-in-out infinite 3s; }
+    .particle-5 { top: 15%; right: 30%; animation: float 4s ease-in-out infinite 0.5s; }
+    .particle-6 { bottom: 35%; right: 25%; animation: float 4s ease-in-out infinite 2.5s; }
     
     .avatar-lines {
       position: absolute;
@@ -108,19 +310,45 @@
       top: 50%;
       transform-origin: center;
       opacity: 0.4;
+      box-shadow: 0 0 5px var(--carlsberg-green);
     }
     
     .line-1 { transform: rotate(0deg); animation: rotateLine 8s linear infinite; }
     .line-2 { transform: rotate(60deg); animation: rotateLine 8s linear infinite 2s; }
     .line-3 { transform: rotate(120deg); animation: rotateLine 8s linear infinite 4s; }
     
+    /* Spektrogram för AI röst */
+    .spectro-container {
+      position: absolute;
+      bottom: -60px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 200px;
+      height: 40px;
+      display: flex;
+      align-items: end;
+      gap: 2px;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+    
+    .spectro-bar {
+      flex: 1;
+      background: linear-gradient(to top, var(--carlsberg-green), var(--carlsberg-gold));
+      border-radius: 2px;
+      height: 2px;
+      animation: spectro 0.5s ease-in-out infinite;
+      box-shadow: 0 0 5px var(--carlsberg-green);
+    }
+    
     .ai-status {
       text-align: center;
       font-size: 16px;
       color: var(--carlsberg-green);
-      text-shadow: 0 0 10px var(--carlsberg-green);
+      text-shadow: 0 0 15px var(--carlsberg-green);
       margin-bottom: 10px;
       font-weight: 600;
+      animation: statusGlow 2s ease-in-out infinite;
     }
     
     .ai-activity {
@@ -128,33 +356,95 @@
       font-size: 12px;
       color: var(--muted);
       opacity: 0.8;
+      text-shadow: 0 0 10px rgba(159,176,195,0.5);
     }
     
-    /* Animations */
+    /* Enhanced Animations */
+    @keyframes backgroundShift {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+    
+    @keyframes hexFloat {
+      0%, 100% { transform: rotate(45deg) translateY(0px); opacity: 0.3; }
+      50% { transform: rotate(45deg) translateY(-20px); opacity: 0.6; }
+    }
+    
+    @keyframes scanlineMove {
+      0% { transform: translateY(-100%); }
+      100% { transform: translateY(100vh); }
+    }
+    
+    @keyframes titleGlow {
+      0%, 100% { text-shadow: 0 0 20px var(--carlsberg-green); }
+      50% { text-shadow: 0 0 30px var(--carlsberg-green), 0 0 40px var(--carlsberg-green); }
+    }
+    
+    @keyframes pillGlow {
+      0%, 100% { box-shadow: 0 0 10px rgba(0,0,0,0.3); }
+      50% { box-shadow: 0 0 15px rgba(0,122,51,0.2), 0 0 10px rgba(0,0,0,0.3); }
+    }
+    
+    @keyframes borderGlow {
+      0% { opacity: 1; }
+      50% { opacity: 0.6; }
+      100% { opacity: 1; }
+    }
+    
     @keyframes corePulse {
-      0%, 100% { transform: translate(-50%, -50%) scale(1); box-shadow: 0 0 40px var(--carlsberg-green); }
-      50% { transform: translate(-50%, -50%) scale(1.1); box-shadow: 0 0 60px var(--carlsberg-green); }
+      0%, 100% { 
+        transform: translate(-50%, -50%) scale(1); 
+        box-shadow: 0 0 40px var(--carlsberg-green);
+      }
+      50% { 
+        transform: translate(-50%, -50%) scale(1.1); 
+        box-shadow: 0 0 60px var(--carlsberg-green), 0 0 80px var(--carlsberg-green);
+      }
+    }
+    
+    @keyframes innerGlow {
+      0% { opacity: 0.3; transform: translate(-50%, -50%) scale(0.8); }
+      100% { opacity: 0.8; transform: translate(-50%, -50%) scale(1.2); }
     }
     
     @keyframes ringPulse {
-      0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.6; }
-      50% { transform: translate(-50%, -50%) scale(1.1); opacity: 0.8; }
+      0%, 100% { 
+        transform: translate(-50%, -50%) scale(1); 
+        opacity: 0.6; 
+        box-shadow: 0 0 20px var(--carlsberg-green);
+      }
+      50% { 
+        transform: translate(-50%, -50%) scale(1.05); 
+        opacity: 0.9; 
+        box-shadow: 0 0 30px var(--carlsberg-green);
+      }
     }
     
     @keyframes float {
-      0%, 100% { transform: translateY(0px); opacity: 0.6; }
-      50% { transform: translateY(-20px); opacity: 1; }
+      0%, 100% { transform: translateY(0px) rotate(0deg); opacity: 0.6; }
+      50% { transform: translateY(-20px) rotate(180deg); opacity: 1; }
     }
     
     @keyframes rotateLine {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
+      0% { transform: rotate(0deg); opacity: 0.4; }
+      50% { opacity: 0.8; }
+      100% { transform: rotate(360deg); opacity: 0.4; }
     }
     
-    /* Active states */
+    @keyframes spectro {
+      0%, 100% { height: 2px; }
+    }
+    
+    @keyframes statusGlow {
+      0%, 100% { text-shadow: 0 0 15px var(--carlsberg-green); }
+      50% { text-shadow: 0 0 25px var(--carlsberg-green), 0 0 35px var(--carlsberg-green); }
+    }
+    
+    /* Active states - Enhanced */
     .ai-avatar.listening .avatar-core {
       animation: corePulse 1s ease-in-out infinite;
       background: radial-gradient(circle, var(--carlsberg-green), var(--carlsberg-gold));
+      box-shadow: 0 0 60px var(--carlsberg-green);
     }
     
     .ai-avatar.speaking .avatar-core {
@@ -165,24 +455,71 @@
     
     .ai-avatar.speaking .avatar-ring {
       border-color: var(--carlsberg-gold);
-      animation: ringPulse 1s ease-in-out infinite;
+      animation: ringPulse 0.8s ease-in-out infinite;
+      box-shadow: 0 0 30px var(--carlsberg-gold);
     }
     
     .ai-avatar.speaking .line {
       background: linear-gradient(90deg, transparent, var(--carlsberg-gold), transparent);
       opacity: 0.8;
       animation: rotateLine 2s linear infinite;
+      box-shadow: 0 0 10px var(--carlsberg-gold);
+    }
+    
+    .ai-avatar.speaking .spectro-container {
+      opacity: 1;
+    }
+    
+    .ai-avatar.thinking .avatar-core {
+      animation: corePulse 0.3s ease-in-out infinite;
+      background: conic-gradient(var(--carlsberg-green), var(--carlsberg-gold), var(--carlsberg-green));
+    }
+    
+    .ai-avatar.thinking .line {
+      animation: rotateLine 1s linear infinite;
+      opacity: 1;
     }
 
-    .vis{height:10px;background:#0e1420;border-radius:9999px;overflow:hidden;border:1px solid #213145}
-    .vis>b{display:block;height:100%;width:6%;background:linear-gradient(90deg,var(--carlsberg-green),var(--carlsberg-gold));transition:width .08s linear}
-    footer{margin-top:24px;color:var(--muted);font-size:12px}
+    .vis{
+      height:10px;
+      background:#0e1420;
+      border-radius:9999px;
+      overflow:hidden;
+      border:1px solid #213145;
+      box-shadow: inset 0 0 10px rgba(0,0,0,0.5), 0 0 10px rgba(0,122,51,0.2);
+    }
+    .vis>b{
+      display:block;
+      height:100%;
+      width:6%;
+      background:linear-gradient(90deg,var(--carlsberg-green),var(--carlsberg-gold));
+      transition:width .08s linear;
+      box-shadow: 0 0 10px var(--carlsberg-green);
+    }
+    
+    footer{
+      margin-top:24px;
+      color:var(--muted);
+      font-size:12px;
+      text-shadow: 0 0 10px rgba(159,176,195,0.3);
+    }
     .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     code.small{font-size:11px;opacity:.85}
   </style>
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
+  <!-- Holographic Background Elements -->
+  <div class="hexagon-bg">
+    <div class="hexagon hex-1"></div>
+    <div class="hexagon hex-2"></div>
+    <div class="hexagon hex-3"></div>
+    <div class="hexagon hex-4"></div>
+    <div class="hexagon hex-5"></div>
+    <div class="hexagon hex-6"></div>
+  </div>
+  <div class="scanlines"></div>
+
   <div class="wrap">
     <header>
       <div class="title">🦾 Coach Assistant – Linje 65 (Realtime, Stabil)</div>
@@ -203,13 +540,14 @@
         <button class="ghost" id="sendTextBtn">Skicka</button>
       </div>
 
-      <!-- AI Avatar replaces output -->
+      <!-- Enhanced AI Avatar -->
       <div class="ai-avatar-container">
         <div class="ai-avatar" id="aiAvatar">
           <div class="avatar-core"></div>
           <div class="avatar-ring ring-1"></div>
           <div class="avatar-ring ring-2"></div>
           <div class="avatar-ring ring-3"></div>
+          <div class="avatar-ring ring-4"></div>
           <div class="avatar-lines">
             <div class="line line-1"></div>
             <div class="line line-2"></div>
@@ -219,6 +557,21 @@
           <div class="avatar-particle particle-2"></div>
           <div class="avatar-particle particle-3"></div>
           <div class="avatar-particle particle-4"></div>
+          <div class="avatar-particle particle-5"></div>
+          <div class="avatar-particle particle-6"></div>
+          <!-- Spektrogram för AI röst -->
+          <div class="spectro-container" id="spectroContainer">
+            <div class="spectro-bar" style="animation-delay: 0s"></div>
+            <div class="spectro-bar" style="animation-delay: 0.1s"></div>
+            <div class="spectro-bar" style="animation-delay: 0.2s"></div>
+            <div class="spectro-bar" style="animation-delay: 0.3s"></div>
+            <div class="spectro-bar" style="animation-delay: 0.4s"></div>
+            <div class="spectro-bar" style="animation-delay: 0.5s"></div>
+            <div class="spectro-bar" style="animation-delay: 0.6s"></div>
+            <div class="spectro-bar" style="animation-delay: 0.7s"></div>
+            <div class="spectro-bar" style="animation-delay: 0.8s"></div>
+            <div class="spectro-bar" style="animation-delay: 0.9s"></div>
+          </div>
         </div>
         <div class="ai-status" id="aiStatus">AI Assistant Standby</div>
         <div class="ai-activity" id="aiActivity">Väntar på kommando...</div>
@@ -236,11 +589,19 @@
     const avatar = $('#aiAvatar');
     const aiStatus = $('#aiStatus');
     const aiActivity = $('#aiActivity');
+    const spectroContainer = $('#spectroContainer');
     
-    // Avatar state management
+    // Enhanced Avatar state management
     function setAvatarState(state, message) {
       avatar.className = `ai-avatar ${state}`;
       aiStatus.textContent = message || 'AI Assistant';
+      
+      // Update spektrogram based on state
+      if (state === 'speaking') {
+        startSpektrogram();
+      } else {
+        stopSpektrogram();
+      }
       
       switch(state) {
         case 'listening':
@@ -255,6 +616,31 @@
         default:
           aiActivity.textContent = 'Väntar på kommando...';
       }
+    }
+
+    // Spektrogram animation
+    function startSpektrogram() {
+      const bars = spectroContainer.querySelectorAll('.spectro-bar');
+      bars.forEach((bar, i) => {
+        bar.style.animation = `spectro ${0.3 + Math.random() * 0.4}s ease-in-out infinite`;
+        bar.style.animationDelay = `${i * 0.05}s`;
+        
+        // Random heights for spektrogram effect
+        setInterval(() => {
+          if (avatar.classList.contains('speaking')) {
+            const height = Math.random() * 30 + 5;
+            bar.style.height = `${height}px`;
+          }
+        }, 100 + i * 20);
+      });
+    }
+    
+    function stopSpektrogram() {
+      const bars = spectroContainer.querySelectorAll('.spectro-bar');
+      bars.forEach(bar => {
+        bar.style.height = '2px';
+        bar.style.animation = '';
+      });
     }
 
     // Initialize avatar
