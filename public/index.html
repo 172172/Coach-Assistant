@@ -535,11 +535,6 @@
         <div class="vis" style="flex:1 1 220px; min-width:220px"><b id="micBar"></b></div>
       </div>
 
-      <div class="row" style="margin-top:10px">
-        <input id="quickText" type="search" placeholder="Skicka text till assistenten (enter)" style="flex:1" />
-        <button class="ghost" id="sendTextBtn">Skicka</button>
-      </div>
-
       <!-- Enhanced AI Avatar -->
       <div class="ai-avatar-container">
         <div class="ai-avatar" id="aiAvatar">
@@ -817,16 +812,16 @@
     }
 
     // ===== Text input (test) =====
-    $('#sendTextBtn').onclick = sendQuickText;
-    $('#quickText').addEventListener('keydown', e => { if(e.key==='Enter') sendQuickText(); });
-    function sendQuickText(){
-      const t=$('#quickText').value.trim(); if(!t) return;
-      rt.lastUserText = t;
-      $('#quickText').value=''; append(bubble('➤ '+t,'user'));
-      if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
-      rt.dc.send(JSON.stringify({ type:'input_text', text:t }));
-      rt.dc.send(JSON.stringify({ type:'response.create' }));
-    }
+    // $('#sendTextBtn').onclick = sendQuickText;
+    // $('#quickText').addEventListener('keydown', e => { if(e.key==='Enter') sendQuickText(); });
+    // function sendQuickText(){
+    //   const t=$('#quickText').value.trim(); if(!t) return;
+    //   rt.lastUserText = t;
+    //   $('#quickText').value=''; append(bubble('➤ '+t,'user'));
+    //   if(!rt?.dc || rt.dc.readyState!=='open'){ append(pill('Inte ansluten.')); return; }
+    //   rt.dc.send(JSON.stringify({ type:'input_text', text:t }));
+    //   rt.dc.send(JSON.stringify({ type:'response.create' }));
+    // }
 
     // Add missing fetchJSON function
     async function fetchJSON(url) {
