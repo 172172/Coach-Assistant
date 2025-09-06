@@ -947,7 +947,7 @@
               modalities:['audio','text'],
               turn_detection:{ type:'server_vad', threshold:0.6, silence_duration_ms:550, prefix_padding_ms:200 },
               input_audio_transcription:{ model:'gpt-4o-transcribe', language:'sv' },
-              tool_choice:'auto',
+              tool_choice:'required',
               tools:[{
                 type:'function', name:'search_manual',
                 description:'Sök i manualen och returnera snippets.',
